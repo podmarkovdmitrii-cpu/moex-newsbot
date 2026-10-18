@@ -1,0 +1,104 @@
+{
+ "name": "Режимная: импульс + откат + шорт пробоя + новости (v2)",
+ "capital": 100000,
+ "riskPct": 0.01,
+ "stopPct": 0.03,
+ "maxPos": 3,
+ "maxPosPct": 0.34,
+ "minValue": 10000000,
+ "topN": 25,
+ "regime": {
+  "ma": 50,
+  "slope": 5,
+  "confirm": 3
+ },
+ "modules": [
+  {
+   "fam": "mom",
+   "p": {
+    "lb": 126,
+    "min": 0.05,
+    "skip": 1,
+    "k": 2,
+    "keep": 8,
+    "xe": 150
+   },
+   "take": null,
+   "trail": 0,
+   "be": 0,
+   "hold": 0,
+   "on": [
+    1
+   ],
+   "regExit": 0,
+   "prio": 2,
+   "vmax": 0.5,
+   "reg": {
+    "ma": 50,
+    "slope": 5,
+    "confirm": 3
+   },
+   "ng": false,
+   "extMax": 0.1
+  },
+  {
+   "fam": "pull",
+   "p": {
+    "f": 20,
+    "s": 100,
+    "tol": 0.01
+   },
+   "take": 3,
+   "trail": 3,
+   "be": 0,
+   "hold": 40,
+   "on": [
+    1
+   ],
+   "regExit": 0,
+   "prio": 1,
+   "vmax": 0.5,
+   "reg": {
+    "ma": 50,
+    "slope": 5,
+    "confirm": 3
+   },
+   "ng": {
+    "th": 0.5,
+    "days": 5
+   }
+  },
+  {
+   "fam": "sbrk",
+   "p": {
+    "n": 40,
+    "vk": 1.5,
+    "x": 10
+   },
+   "take": 3,
+   "trail": 2,
+   "be": 1,
+   "hold": 10,
+   "on": [
+    -1
+   ],
+   "regExit": 0,
+   "prio": 1,
+   "reg": {
+    "ma": 50,
+    "slope": 5,
+    "confirm": 1
+   },
+   "ng": false
+  }
+ ],
+ "ddCut": {
+  "at": 0.08,
+  "maxPos": 2
+ },
+ "pause": {
+  "k": 3,
+  "days": 5
+ },
+ "maxGross": 1
+}

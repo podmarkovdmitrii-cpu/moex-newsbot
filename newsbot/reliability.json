@@ -1,0 +1,156 @@
+{
+"interfaxonline": {
+"n": 4627,
+"firstShare": 0.09185217203371515,
+"medDelayMin": 8.6,
+"rumors": 543,
+"confirm": 0.1270718232044199
+},
+"markettwits": {
+"n": 5432,
+"firstShare": 0.5338733431516937,
+"medDelayMin": 14.8,
+"rumors": 3412,
+"confirm": 0.07121922626025791
+},
+"smartlabnews": {
+"n": 470,
+"firstShare": 0.2553191489361702,
+"medDelayMin": 327.7,
+"rumors": 231,
+"confirm": 0.09523809523809523
+},
+"finamalert": {
+"n": 322,
+"firstShare": 0.30124223602484473,
+"medDelayMin": 252.1,
+"rumors": 270,
+"confirm": 0.05555555555555555
+},
+"russianmacro": {
+"n": 100,
+"firstShare": 0.24,
+"medDelayMin": 123.3,
+"rumors": 26,
+"confirm": 0.23076923076923078
+},
+"frank_media": {
+"n": 2262,
+"firstShare": 0.4292661361626879,
+"medDelayMin": 472.8,
+"rumors": 4281,
+"confirm": 0.07942069609904227
+},
+"AK47pfl": {
+"n": 486,
+"firstShare": 0.294238683127572,
+"medDelayMin": 94.5,
+"rumors": 454,
+"confirm": 0.06828193832599119
+},
+"prime1": {
+"n": 2581,
+"firstShare": 0.5067803177063154,
+"medDelayMin": 54.8,
+"rumors": 863,
+"confirm": 0.08227114716106605
+},
+"cbrstocks": {
+"n": 2711,
+"firstShare": 0.40907414238288453,
+"medDelayMin": 12.1,
+"rumors": 689,
+"confirm": 0.10159651669085631
+},
+"headlines_for_traders": {
+"n": 909,
+"firstShare": 0.2376237623762376,
+"medDelayMin": 152.2,
+"rumors": 515,
+"confirm": 0.09902912621359224
+},
+"rbc_news": {
+"n": 2207,
+"firstShare": 0.42908926144086995,
+"medDelayMin": 126.0,
+"rumors": 2179,
+"confirm": 0.13262964662689308
+},
+"ifax_go": {
+"n": 7000,
+"firstShare": 0.5785714285714286,
+"medDelayMin": 84.2,
+"rumors": 7123,
+"confirm": 0.039730450652814824
+},
+"government_rus": {
+"n": 57,
+"firstShare": 0.3508771929824561,
+"medDelayMin": 271.1,
+"rumors": 131,
+"confirm": 0.030534351145038167
+},
+"moscowexchangeofficial": {
+"n": 45,
+"firstShare": 0.4,
+"medDelayMin": 335.4,
+"rumors": 6,
+"confirm": null
+},
+"minfin": {
+"n": 86,
+"firstShare": 0.38372093023255816,
+"medDelayMin": 370.4,
+"rumors": 194,
+"confirm": 0.05154639175257732
+},
+"bcs_express": {
+"n": 495,
+"firstShare": 0.19393939393939394,
+"medDelayMin": 152.8,
+"rumors": 100,
+"confirm": 0.14
+},
+"tass_agency": {
+"n": 386,
+"firstShare": 0.37305699481865284,
+"medDelayMin": 190.6,
+"rumors": 75,
+"confirm": 0.16
+},
+"vedomosti": {
+"n": 945,
+"firstShare": 0.2708994708994709,
+"medDelayMin": 180.2,
+"rumors": 522,
+"confirm": 0.08812260536398467
+},
+"kommersant": {
+"n": 465,
+"firstShare": 0.35698924731182796,
+"medDelayMin": 131.6,
+"rumors": 236,
+"confirm": 0.1483050847457627
+},
+"tb_invest_official": {
+"n": 355,
+"firstShare": 0.22253521126760564,
+"medDelayMin": 115.4,
+"rumors": 64,
+"confirm": 0.15625
+},
+"pravdainvest": {
+"n": 35,
+"firstShare": 0.42857142857142855,
+"medDelayMin": 140.8,
+"rumors": 1,
+"confirm": null
+},
+"if_stocks": {
+"n": 34,
+"firstShare": 0.20588235294117646,
+"medDelayMin": 122.7,
+"rumors": 7,
+"confirm": null
+}
+}
