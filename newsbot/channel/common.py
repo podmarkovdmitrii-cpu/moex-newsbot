@@ -32,6 +32,7 @@ DISCLAIMER = "Не является индивидуальной инвести�
 BG, FG, GRID = "#131722", "#d1d4dc", "#2a2e39"
 UP, DN, BLUE, ORANGE, VIOLET = "#26a69a", "#ef5350", "#2962ff", "#ff9800", "#b388ff"
 os.makedirs(OUT, exist_ok=True)
+os.makedirs(STATE, exist_ok=True)
 
 
 def now_msk():
@@ -66,12 +67,34 @@ def bln(x):
 # ---------------------------------------------------------------------------------------------
 # Сеть и данные ISS
 # ---------------------------------------------------------------------------------------------
+_RU_CTX = None
+
+
+def ru_ctx():
+    """Сайты Т-Банка подписаны сертификатом НУЦ Минцифры (Russian Trusted Root CA), которого нет в стандартном наборе.
+    Сертификаты скачиваются в workflow с gu-st.ru (Госуслуги) в файл RU_CA; проверка подлинности остаётся включённой."""
+    global _RU_CTX
+    if _RU_CTX is None:
+        import ssl
+        _RU_CTX = ssl.create_default_context()
+        path = os.environ.get("RU_CA") or os.path.join(HERE, "ru_ca.pem")
+        if os.path.exists(path):
+            try:
+                _RU_CTX.load_verify_locations(cafile=path)
+            except Exception as e:  # noqa: BLE001
+                log("RU_CA", e)
+        else:
+            log("RU_CA: нет файла сертификатов НУЦ Минцифры —", path)
+    return _RU_CTX
+
+
 def http_get(url, timeout=30, tries=3, headers=None):
     last = None
+    ctx = ru_ctx() if "tbank.ru" in url or "tinkoff.ru" in url else None
     for k in range(tries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "ru,en;q=0.8", **(headers or {})})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
                 return r.read()
         except Exception as e:  # noqa: BLE001
             last = e
@@ -287,7 +310,7 @@ class Publisher:
                 self.sink.write(f"[документ {os.path.basename(document[0])}]\n")
             self.sink.write("\n")
             self.sink.flush()
-            print("----- ПОСТ (без отправки) -----\n" + re.sub(r"<[^>]+>", "", text) + "\n" + "\n".join(f"[фото] {os.path.basename(p)}" for p, _ in photos), flush=True)
+            print("----- ПОСТ (без отправки) -----\n" + re.sub(r"<[^>]+>", "", text) + "\n" + "\n".join(f"[фото] {os.path.basename(p)}" for p, _ in photos) + (f"\n[документ] {os.path.basename(document[0])}" if document else ""), flush=True)
             return None
         link = None
         if self.tg_chat:

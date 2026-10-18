@@ -11,6 +11,7 @@
 
 Запуск: python channel/jobs.py <режим> [--dry-run] [--demo]. Без режима — по расписанию (переменная SCHED) или по времени МСК.
 """
+import html
 import datetime as dt
 import json
 import os
@@ -242,12 +243,15 @@ def ofz():
             if not r.get("VALTODAY") or not y.get("DURATION"):
                 continue
             bonds.append(dict(SECID=r["SECID"], NAME=(sec.get(r["SECID"]) or {}).get("SHORTNAME", r["SECID"]), VAL=r["VALTODAY"], DUR=y["DURATION"] / 365, Y=(y.get("EFFECTIVEYIELD") or 0) / 100))
-    agg = {b[2]: dict(vb=0.0, vs=0.0, val=0.0, yv=0.0) for b in BUCKETS}
+    agg = {b[2]: dict(vb=0.0, vs=0.0, val=0.0, yv=0.0, yw=0.0) for b in BUCKETS}
     for b in bonds:
         lab = next(x[2] for x in BUCKETS if x[0] <= b["DUR"] < x[1])
         a = agg[lab]
         a["val"] += b["VAL"]
-        a["yv"] += b["Y"] * b["VAL"]
+        # доходность — только по классическим ОФЗ-ПД (26xxx/25xxx/24xxx); ИН (52xxx) дают реальную доходность, флоатеры (29xxx) — не по кривой
+        if re.match(r"SU2[456]", b["SECID"]) and 0.03 < b["Y"] < 0.40:
+            a["yv"] += b["Y"] * b["VAL"]
+            a["yw"] += b["VAL"]
         try:
             rows = demo_trades(b["SECID"], None) if DEMO else fetch_trades(b["SECID"], "bonds", None, 40)
         except Exception as e:  # noqa: BLE001
@@ -263,7 +267,7 @@ def ofz():
     tot = sum(a["val"] for a in agg.values())
     avg = ofz_history_turnover()
     hist = load_json("ofz_yields.json", {})
-    hist[today] = {k: (a["yv"] / a["val"] if a["val"] else None) for k, a in agg.items()}
+    hist[today] = {k: (a["yv"] / a["yw"] if a["yw"] else None) for k, a in agg.items()}
     hist = {k: v for k, v in hist.items() if k >= (now.date() - dt.timedelta(days=40)).isoformat()}
     save_json("ofz_yields.json", hist)
     past = [d for d in sorted(hist) if d < today]
@@ -285,15 +289,18 @@ def ofz():
     longnet = sum(x["net"] for x in lines[2:])
     shortnet = sum(x["net"] for x in lines[:2])
     dylong = st.mean([x["dy"] for x in lines[2:] if x["dy"] is not None]) if any(x["dy"] is not None for x in lines[2:]) else None
-    if longnet > 0 and (dylong is None or dylong < 0):
+    thr = 0.03 * sum(x["val"] for x in lines[2:])
+    if abs(longnet) < thr and abs(shortnet) < 0.03 * sum(x["val"] for x in lines[:2]):
+        concl = "Потоки сбалансированы — заметного перекоса покупателей или продавцов нет."
+    elif longnet > thr and (dylong is None or dylong < 0):
         concl = "Деньги идут в длинные ОФЗ, доходности снижаются — рынок закладывает снижение ключевой ставки. Обычно это поддерживает акции роста, девелоперов и банки."
-    elif longnet < 0 and (dylong is None or dylong > 0):
+    elif longnet < -thr and (dylong is None or dylong > 0):
         concl = "Длинные ОФЗ продают, доходности растут — рынок закладывает более жёсткую политику ЦБ. Для акций это фон осторожности."
     elif shortnet > 0 and longnet <= 0:
         concl = "Покупают в основном короткие выпуски — деньги паркуются без ставки на снижение ключевой."
     else:
         concl = "Потоки смешанные, явного направления нет."
-    xa = f" ({fmt(tot / avg, 1)}× к среднему за 20 дней)" if avg else ""
+    xa = f" ({fmt(tot / avg, 1 if tot / avg >= 0.95 else 2)}× к среднему за 20 дней)" if avg else ""
     txt = [f"🏦 <b>Потоки в ОФЗ</b> — {now.strftime('%d.%m')}", f"Оборот гособлигаций: {bln(tot)}{xa}." + (f" Индекс RGBI {pc(rg1, 2)} за день, {pc(rg5, 2)} за 5 дней." if rg1 is not None else ""), ""]
     for x in lines:
         dy = f", доходность {fmt(x['y'] * 100, 2)}%" + (f" ({'+' if x['dy'] >= 0 else '−'}{fmt(abs(x['dy']) * 1e4, 0)} б.п. за неделю)" if x["dy"] is not None else "") if x["y"] else ""
@@ -327,8 +334,11 @@ def ofz():
 def pulse():
     cache = load_json("pulse.json", {"ids": {}, "last": {}})
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=6)
-    items, first = [], not cache["last"]
+    items, fails = [], 0
     for a in DATA["pulse"][:25]:
+        if fails >= 4:
+            log("Пульс: API недоступен, прекращаю опрос")
+            break
         nick = a["nick"]
         try:
             pid = cache["ids"].get(nick)
@@ -341,7 +351,9 @@ def pulse():
             js = json.loads(http_get(f"https://www.tbank.ru/api/invest-gw/social/v1/profile/{pid}/post?limit=20", timeout=15, tries=2))
         except Exception as e:  # noqa: BLE001
             log("Пульс", nick, e)
+            fails += 1
             continue
+        fails = 0
         last = cache["last"].get(nick, "")
         newest = last
         for p in (js.get("payload") or {}).get("items", []):
@@ -364,8 +376,8 @@ def pulse():
         cache["last"][nick] = newest
         time.sleep(0.3)
     save_json("pulse.json", cache)
-    if first or not items:
-        log("Пульс: новых постов", len(items), "(первый запуск — только запоминаю)" if first else "")
+    log("Пульс: новых постов за 6 ч", len(items))
+    if not items:
         return
     items.sort(key=lambda x: -(x["a"]["f"] or 0))
     buys = sum(1 for x in items if re.search(r"\b(купил|докупил|покупаю|беру|лонг|набираю)\b", x["tx"], re.I))
@@ -388,6 +400,9 @@ def pulse():
 # =============================================================================================
 # Утренний торговый план (совмещённая стратегия v2)
 # =============================================================================================
+DIGEST = re.compile(r"Что произошло за|Главное за|Главное к|Итоги дня|Итоги недели|дайджест|#крипто|биткоин|#BTC|Утренний обзор|Вечерний обзор", re.I)
+
+
 def news_background(hours=18, k=6):
     S = load_json("newsbot.json", {}, NEWS_STATE)
     now = time.time()
@@ -400,7 +415,10 @@ def news_background(hours=18, k=6):
         seen.add(c["first"]["link"])
         tk = c["key"].split("|")[0]
         mark = "🟢" if (c.get("score") or 0) > 0 else "🔴"
-        head = re.sub(r"\s+", " ", c["first"]["tx"])[:150]
+        raw = html.unescape(html.unescape(c["first"]["tx"] or ""))
+        if DIGEST.search(raw):
+            continue
+        head = re.sub(r"\s+", " ", raw)[:150]
         who = "$" + tk if tk != "РЫНОК" else "Рынок"
         out.append(f"{mark} {who}: {esc(head)} — <a href=\"{c['first']['link']}\">{esc(c['first']['ch'])}</a>")
         if len(out) >= k:
@@ -445,7 +463,10 @@ def morning():
     if sig:
         for q in sig.get("pend", []):
             plan.append(dict(q, kind="signal"))
+        held = {q["t"] for q in sig.get("pend", [])}
         for w in sig.get("watch", []):
+            if w["t"] in held:
+                continue
             if w["kind"] == "mom" and (w.get("ext") or 0) > 0.10:
                 continue
             plan.append(dict(w, fam=w["kind"], kind="watch"))
@@ -682,8 +703,8 @@ def weekly():
         txt.append(f"<b>{x['name']}:</b> {fmt(x['m']['last'], 2)} ({pc(x['m']['r1m'], 1)} за месяц, {pc(x['m']['r12m'], 1)} за год).")
     sect = sorted([x for x in rows if x["id"].startswith("MOEX") and x["id"] != "IMOEX"], key=lambda x: -x["sc"])
     if sect:
-        txt.append("<b>Сектора с лучшим трендом:</b> " + ", ".join(f"{x['name']} ({pc(x['m']['r3m'], 1)} за 3 мес.)" for x in sect[:3]) + ".")
-        txt.append("<b>Слабые сектора:</b> " + ", ".join(f"{x['name']} ({pc(x['m']['r3m'], 1)} за 3 мес.)" for x in sect[-3:]) + ".")
+        txt.append("<b>Сильнейшие сектора по оценке тренда:</b> " + ", ".join(f"{x['name']} ({pc(x['m']['r3m'], 1)} за 3 мес.)" for x in sect[:3]) + ".")
+        txt.append("<b>Слабейшие:</b> " + ", ".join(f"{x['name']} ({pc(x['m']['r3m'], 1)} за 3 мес.)" for x in sect[-3:][::-1]) + ".")
     txt.append("")
     if strong:
         txt.append("🟢 <b>Сильные позиции</b>:")
