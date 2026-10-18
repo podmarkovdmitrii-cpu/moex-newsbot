@@ -98,7 +98,7 @@ def http_get(url, timeout=30, tries=3, headers=None):
                 return r.read()
         except Exception as e:  # noqa: BLE001
             last = e
-            time.sleep(1.5 * (k + 1))
+            time.sleep((8 if getattr(e, "code", 0) == 429 else 1.5) * (k + 1))
     raise last
 
 

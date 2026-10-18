@@ -374,7 +374,7 @@ def pulse():
                 continue
             items.append(dict(a=a, id=p.get("id"), tx=tx, tks=tks, when=when))
         cache["last"][nick] = newest
-        time.sleep(0.3)
+        time.sleep(1.0)
     save_json("pulse.json", cache)
     log("Пульс: новых постов за 6 ч", len(items))
     if not items:
