@@ -287,6 +287,7 @@ class Publisher:
                 self.sink.write(f"[документ {os.path.basename(document[0])}]\n")
             self.sink.write("\n")
             self.sink.flush()
+            print("----- ПОСТ (без отправки) -----\n" + re.sub(r"<[^>]+>", "", text) + "\n" + "\n".join(f"[фото] {os.path.basename(p)}" for p, _ in photos), flush=True)
             return None
         link = None
         if self.tg_chat:
