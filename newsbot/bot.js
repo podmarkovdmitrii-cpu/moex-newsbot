@@ -40,8 +40,12 @@ const CHANNELS = {
   tb_invest_official: 'лента', russianmacro: 'лента', if_stocks: 'лента',
   // авторские каналы инвесторов
   bitkogan: 'автор', harmfulinvestor: 'автор', mozgovikresearch: 'автор', pravdainvest: 'автор', invest_or_lost: 'автор', investheroes: 'автор',
+  // ведомства и официальные лица (заявления о экономике, санкциях, переговорах) — для паблика
+  minec_russia: 'офиц', minenergo_official: 'офиц', minpromtorg_ru: 'офиц', fnsru: 'офиц', rosstat_official: 'офиц', news_kremlin: 'политик',
+  MariaVladimirovnaZakharova: 'политик', medvedev_telegram: 'политик', vv_volodin: 'политик', kadmitriev: 'политик',
 };
-const PRIORITY = ['markettwits', 'interfaxonline', 'ifax_go', 'prime1', 'tass_agency', 'rbc_news', 'cbrstocks', 'centralbank_russia', 'minfin', 'headlines_for_traders', 'moscowexchangeofficial', 'government_rus'];
+const PRIORITY = ['markettwits', 'interfaxonline', 'ifax_go', 'prime1', 'tass_agency', 'rbc_news', 'cbrstocks', 'centralbank_russia', 'minfin', 'headlines_for_traders', 'moscowexchangeofficial', 'government_rus', 'news_kremlin', 'kadmitriev'];
+const CH = require('./channel.js');
 const TYPE_RU = {
   div_rec: 'дивиденды', div_cut: 'отказ от дивидендов', buyback: 'обратный выкуп', spo: 'допэмиссия/SPO', ipo: 'IPO', results_up: 'отчётность: рост', results_down: 'отчётность: снижение',
   guidance_up: 'прогноз повышен', guidance_down: 'прогноз понижен', analyst_up: 'аналитики повысили', analyst_down: 'аналитики понизили', sanctions: 'санкции', legal: 'суды, штрафы, обыски',
@@ -135,7 +139,7 @@ async function collectNews(S) {
       if (!w || !d) continue;
       const v = w.w * d; if (!best || Math.abs(v) > Math.abs(best.v)) best = { ty, v, mean: w.mean, n: w.n }; score += v;
     }
-    return Object.assign(p, { tks, types: types.map(t => t[0]), s: c.s, rumor: c.rumor, official: c.official || CHANNELS[p.ch] === 'офиц', score, best });
+    return Object.assign(p, { tks, types: types.map(t => t[0]), s: c.s, rumor: c.rumor, official: c.official || CHANNELS[p.ch] === 'офиц' || CHANNELS[p.ch] === 'политик', score, best });
   });
 }
 
@@ -309,6 +313,9 @@ async function tradeMessages(S, res, data) {
       `⚠️ Риск сделки: ${fmt(risk, 0)} ₽ = ${fmt(risk / eq * 100, 2)}% счёта (${fmt(eq, 0)} ₽)\n` +
       `Почему: ${esc((p.why || []).join('; '))}\nРежим рынка: ${REG_RU[res.regime]}\n${filterLine(p)}\n${newsContext(S, p.t)}\n\n<i>Виртуальный счёт «${esc(STRAT.name)}». Не инвестиционная рекомендация.</i>`);
     S.open[k] = { t: p.t, d0: p.d0, entry, qty: p.qty, side: p.side };
+    await CH.trade(S, `${p.side > 0 ? '🟢 <b>Модельный портфель: ПОКУПКА</b>' : '🔴 <b>Модельный портфель: ШОРТ</b>'} $${p.t} (${esc(name(p.t))})\n` +
+      `Вход ≈ <b>${fmt(entry, 2)}</b> · стоп ${fmt(stop, 2)} (−${fmt(STRAT.stopPct * 100, 0)}%)${p.take ? ` · цель ${fmt(raw(p.t, p.d0, p.take), 2)}` : ''}\n` +
+      `Риск сделки — ${fmt(risk / eq * 100, 1)}% модельного счёта.\nПочему: ${esc((p.why || [])[0] || '')}\nРежим рынка: ${REG_RU[res.regime]}\n${filterLine(p)}\nСтратегия «${esc(STRAT.name)}» — виртуальный счёт, сделки публикуются для прозрачной статистики.\n#${p.t} #модельный_портфель`);
   }
   // закрытые позиции
   for (const k of Object.keys(S.open)) {
@@ -318,6 +325,7 @@ async function tradeMessages(S, res, data) {
     if (tr) {
       const exit = raw(tr.t, tr.d1, tr.exit);
       await tg(`${tr.pnl >= 0 ? '✅' : '⛔️'} <b>Закрыта сделка</b> $${tr.t} (${esc(name(tr.t))})\nВыход: ${fmt(exit, 2)} (вход ${fmt(o.entry, 2)}) · причина: ${esc(tr.reason)}\nРезультат: <b>${rub(tr.pnl)}</b> (${fmt(tr.r, 2)}R, ${fmt(tr.ret * 100, 2)}%), держали ${tr.days} дн.`);
+      await CH.trade(S, `${tr.pnl >= 0 ? '✅' : '⛔️'} <b>Модельный портфель: закрыта сделка</b> $${tr.t}\nВыход ${fmt(exit, 2)} (вход ${fmt(o.entry, 2)}) · ${esc(tr.reason)}\nРезультат: <b>${fmt(tr.ret * 100, 2)}%</b> по цене, ${fmt(tr.r, 2)}R (с комиссиями), ${tr.days} дн.\n#${tr.t} #модельный_портфель`);
     }
     delete S.open[k];
   }
@@ -328,6 +336,44 @@ async function tradeMessages(S, res, data) {
     const pend = r.pendEntries || [];
     if (pend.length) await tg('🔔 <b>Сигналы стратегии на завтра</b> (вход на открытии):\n' + pend.map(q => `• $${q.t} ${q.side > 0 ? 'покупка' : 'шорт'} — ${esc((q.why || [])[0] || '')}`).join('\n') + `\nРежим рынка: ${REG_RU[res.regime]}`);
   }
+}
+
+// ---------- сигналы и список наблюдения для утреннего плана паблика (state/signals.json) ----------
+function writeSignals(S, res, data, today) {
+  const { r, D, raw, to } = res;
+  const I = RG.I, d = D.days[to];
+  const name = t => ((data.lot[t] || {}).name || t);
+  const rr = (t, px) => raw(t, d, px);
+  const regS = RG.regimeOf(D, (STRAT.modules.find(m => m.fam === 'sbrk') || {}).reg || STRAT.regime).g[to];
+  const liquid = D.tickers.filter(t => { const s = D.S[t]; return s.c[to] === s.c[to] && I.av(s, 60)[to] >= (STRAT.minValue || 1e7); })
+    .sort((a, b) => I.av(D.S[b], 60)[to] - I.av(D.S[a], 60)[to]).slice(0, STRAT.topN || 25);
+  const mom = liquid.map(t => { const s = D.S[t]; return { t, roc: I.roc(s, 126)[to], ext: s.c[to] / I.ema(s, 20)[to] - 1, ok: s.c[to] > I.sma(s, 200)[to] }; })
+    .filter(x => x.ok && x.roc >= 0.05).sort((a, b) => b.roc - a.roc).slice(0, 6);
+  const watch = [], held = new Set(r.open.map(p => p.t));
+  mom.filter(x => !held.has(x.t)).forEach((x, k) => { const s = D.S[x.t]; const c = s.c[to]; watch.push({ t: x.t, name: name(x.t), kind: 'mom', side: 1, rank: k + 1, roc: x.roc, ext: x.ext, entry: rr(x.t, c), stop: rr(x.t, c * 0.97), take: null,
+    note: `лидер импульса №${k + 1}: ${fmt(x.roc * 100, 0)}% за 126 дней` + (x.ext > 0.10 ? `, но цена выше EMA 20 на ${fmt(x.ext * 100, 1)}% — вход отложен до паузы` : '; ротация по пятницам') }); });
+  for (const t of liquid) {
+    const s = D.S[t], c = s.c[to], e20 = I.ema(s, 20)[to], e100 = I.ema(s, 100)[to], s200 = I.sma(s, 200)[to];
+    if (held.has(t)) continue;
+    if (e20 > e100 && c > s200 && c >= e20 && (c - e20) / e20 <= 0.03 && !watch.some(w => w.t === t))
+      watch.push({ t, name: name(t), kind: 'pull', side: 1, entry: rr(t, e20), stop: rr(t, e20 * 0.97), take: rr(t, e20 * 1.09), dist: (c - e20) / e20,
+        note: `восходящий тренд, цена в ${fmt((c - e20) / e20 * 100, 1)}% над EMA 20: покупка при откате к ${fmt(rr(t, e20), 2)} и закрытии выше открытия` });
+    const ll = I.ll(s, 40)[to], e200 = I.ema(s, 200)[to];
+    if (regS === -1 && c < e200 && c <= ll * 1.03 && c > ll)
+      watch.push({ t, name: name(t), kind: 'sbrk', side: -1, entry: rr(t, ll), stop: rr(t, ll * 1.03), take: rr(t, ll * 0.91), note: `падающий рынок, цена в ${fmt((c / ll - 1) * 100, 1)}% над минимумом 40 дней: шорт при закрытии ниже ${fmt(rr(t, ll), 2)} на объёме` });
+  }
+  const last = r.daily[r.daily.length - 1] || {};
+  const tr = r.trades.filter(x => !x.open);
+  const out = {
+    made: new Date().toISOString(), day: d, today, regime: res.regime, regimeShort: regS, regimeText: REG_RU[res.regime], strategy: STRAT.name, start: S.start,
+    equity: last.equity || CAPITAL, capital: CAPITAL, trades: tr.length, wins: tr.filter(x => x.pnl > 0).length,
+    open: r.open.map(p => ({ t: p.t, name: name(p.t), side: p.side, fam: p.fam, d0: p.d0, entry: raw(p.t, p.d0, p.entry), stop: rr(p.t, p.stop), take: p.take ? rr(p.t, p.take) : null, last: rr(p.t, p.last), pnl: p.side * (p.last / p.entry - 1) })),
+    pend: (r.pendEntries || []).map(q => { const c = D.S[q.t].c[to]; return { t: q.t, name: name(q.t), side: q.side, fam: q.m.fam, why: q.why, entry: rr(q.t, c), stop: rr(q.t, c * (1 - q.side * STRAT.stopPct)), take: q.m.take ? rr(q.t, c * (1 + q.side * q.m.take * STRAT.stopPct)) : null }; }),
+    watch: watch.slice(0, 14),
+    recent: tr.slice(-10).map(x => ({ t: x.t, side: x.side, d0: x.d0, d1: x.d1, ret: x.ret, r: x.r, reason: x.reason })),
+  };
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(STATE_DIR, 'signals.json'), JSON.stringify(out));
 }
 
 // ---------- главный цикл ----------
@@ -343,6 +389,7 @@ async function tradeMessages(S, res, data) {
     const cl = cluster(S, items);
     log('новых постов', items.length, 'кластеров', cl.length);
     await newsMessages(S, Object.values(S.cl || {}).filter(c => Date.now() / 1000 - c.ts < 2 * 86400));
+    try { await CH.run(S, Object.values(S.cl || {}).filter(c => Date.now() / 1000 - c.ts < 2 * 86400), items); } catch (e) { log('паблик: ошибка', e.stack || e.message); }
   } catch (e) { log('новости: ошибка', e.message); }
   // 2) стратегия: дневные свечи (раз в день) + текущий день из marketdata
   try {
@@ -354,6 +401,7 @@ async function tradeMessages(S, res, data) {
     if (S.firstRun === undefined) { S.firstRun = false; S.open = Object.fromEntries(res.r.open.map(p => [p.t + '@' + p.d0, { t: p.t, d0: p.d0, entry: res.raw(p.t, p.d0, p.entry), qty: p.qty, side: p.side }])); await tg(`🤖 Новостной бот запущен. Виртуальный счёт ${fmt(CAPITAL, 0)} ₽, стратегия «${esc(STRAT.name)}», риск 1% на сделку, стоп 3%. Каналов: ${Object.keys(CHANNELS).length}. Режим рынка: ${REG_RU[res.regime]}.`); }
     else await tradeMessages(S, res, data);
     S.equity = Math.round(eq);
+    try { writeSignals(S, res, data, today); } catch (e) { log('signals.json: ошибка', e.message); }
   } catch (e) { log('стратегия: ошибка', e.stack || e.message); }
   saveState(S);
 })();
