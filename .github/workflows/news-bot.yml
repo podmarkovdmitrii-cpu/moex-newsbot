@@ -1,0 +1,45 @@
+name: Новостной бот (каждые 5 минут)
+
+on:
+  schedule:
+    - cron: '*/5 4-20 * * 1-5'    # будни 07:00–23:55 МСК (время в cron — UTC)
+    - cron: '7 6-18/3 * * 0,6'    # выходные: новости раз в 3 часа
+  workflow_dispatch:
+
+concurrency:
+  group: newsbot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Восстановить состояние бота
+        uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - name: Новости и сделки
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_NEWS_CHAT_ID: ${{ secrets.TG_NEWS_CHAT_ID }}
+          STATE_DIR: ${{ github.workspace }}/newsbot-state
+          BOT_CAPITAL: '100000'
+          NEWS_PER_DAY: '30'
+        run: |
+          BOT=$(find . -name bot.js -path '*newsbot*' | head -1)
+          if [ -z "$BOT" ]; then echo "Не найден newsbot/bot.js — загрузите папку newsbot в репозиторий"; exit 1; fi
+          node "$BOT"
+      - name: Сохранить состояние бота
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
