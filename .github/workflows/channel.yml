@@ -1,0 +1,66 @@
+name: Паблик (план дня, потоки, ОФЗ, Пульс, итоги, статья недели)
+
+on:
+  schedule:
+    - cron: '40 3 * * 1-5'      # 06:40 МСК — утренний торговый план
+    - cron: '30 5 * * 1'        # 08:30 МСК, понедельник — статья о базовых активах
+    - cron: '0 9 * * 1-5'       # 12:00 МСК — покупатели vs продавцы
+    - cron: '30 12 * * 1-5'     # 15:30 МСК — покупатели vs продавцы
+    - cron: '55 15 * * 1-5'     # 18:55 МСК — покупатели vs продавцы к закрытию
+    - cron: '10 16 * * 1-5'     # 19:10 МСК — потоки в ОФЗ
+    - cron: '25 16 * * 1-5'     # 19:25 МСК — итоги дня
+    - cron: '5 6-18/2 * * 1-5'  # 09:05–21:05 МСК каждые 2 часа — Пульс
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Что опубликовать'
+        required: true
+        default: 'morning'
+        type: choice
+        options: [morning, flows, ofz, pulse, evening, weekly]
+
+concurrency:
+  group: channel
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Библиотеки
+        run: pip install --quiet matplotlib reportlab
+      - name: Состояние новостного бота (сигналы стратегии, новости)
+        uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - name: Состояние паблика
+        uses: actions/cache/restore@v4
+        with:
+          path: channel-state
+          key: channel-state-${{ github.run_id }}
+          restore-keys: channel-state-
+      - name: Публикация
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_PUBLIC_CHAT: ${{ vars.TG_PUBLIC_CHAT }}
+          VK_GROUP_ID: ${{ vars.VK_GROUP_ID }}
+          VK_GROUP_TOKEN: ${{ secrets.VK_GROUP_TOKEN }}
+          VK_USER_TOKEN: ${{ secrets.VK_USER_TOKEN }}
+          MODE: ${{ github.event.inputs.mode }}
+          SCHED: ${{ github.event.schedule }}
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/channel-state
+        run: python newsbot/channel/jobs.py
+      - name: Сохранить состояние паблика
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: channel-state
+          key: channel-state-${{ github.run_id }}

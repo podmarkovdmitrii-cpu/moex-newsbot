@@ -33,6 +33,10 @@ jobs:
           STATE_DIR: ${{ github.workspace }}/newsbot-state
           BOT_CAPITAL: '100000'
           NEWS_PER_DAY: '30'
+          TG_PUBLIC_CHAT: ${{ vars.TG_PUBLIC_CHAT }}
+          VK_GROUP_ID: ${{ vars.VK_GROUP_ID }}
+          VK_GROUP_TOKEN: ${{ secrets.VK_GROUP_TOKEN }}
+          PUBLIC_PER_DAY: '40'
         run: |
           BOT=$(find . -name bot.js -path '*newsbot*' | head -1)
           if [ -z "$BOT" ]; then echo "Не найден newsbot/bot.js — загрузите папку newsbot в репозиторий"; exit 1; fi
