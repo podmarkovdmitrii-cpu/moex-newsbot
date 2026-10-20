@@ -61,6 +61,7 @@ async function lead(html, S) {
   if (st.day !== day) { st.day = day; st.n = 0; }
   if (st.n >= MAX) return null;
   const src = plain(html);
+  if (process.env.LLM_MODEL && st.model !== process.env.LLM_MODEL) { delete st.model; delete st.cands; }
   if (!st.model && !process.env.LLM_MODEL && !st.listed) {
     st.listed = 1;
     const found = pick(await listModels());
