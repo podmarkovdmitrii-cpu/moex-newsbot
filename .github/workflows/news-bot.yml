@@ -28,6 +28,7 @@ jobs:
       - name: Новости и сделки
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_PUBLIC_TOKEN: ${{ secrets.TG_PUBLIC_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           TG_NEWS_CHAT_ID: ${{ secrets.TG_NEWS_CHAT_ID }}
           STATE_DIR: ${{ github.workspace }}/newsbot-state

@@ -17,7 +17,7 @@ on:
         required: true
         default: 'morning'
         type: choice
-        options: [test_post, aitest, morning, flows, ofz, pulse, evening, weekly]
+        options: [tg_check, test_post, aitest, morning, flows, ofz, pulse, evening, weekly]
 
 concurrency:
   group: channel
@@ -56,6 +56,7 @@ jobs:
       - name: Публикация
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_PUBLIC_TOKEN: ${{ secrets.TG_PUBLIC_TOKEN }}
           TG_PUBLIC_CHAT: ${{ vars.TG_PUBLIC_CHAT }}
           VK_GROUP_ID: ${{ vars.VK_GROUP_ID }}
           VK_GROUP_TOKEN: ${{ secrets.VK_GROUP_TOKEN }}
