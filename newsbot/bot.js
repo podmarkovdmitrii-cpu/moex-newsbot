@@ -155,12 +155,12 @@ function cluster(S, items) {
       let c = S.cl[key];
       if (c && p.ts - c.ts > 12 * 3600) c = null;
       if (!c) {
-        c = S.cl[key] = { key, ts: p.ts, first: { ch: p.ch, link: p.link, tx: p.tx.slice(0, 400), rumor: p.rumor }, srcs: {}, rumorOnly: true, sent: {}, score: p.score, best: p.best, tks: p.tks, official: p.official };
+        c = S.cl[key] = { key, ts: p.ts, first: { ch: p.ch, link: p.link, tx: p.tx.slice(0, 1200), rumor: p.rumor }, srcs: {}, rumorOnly: true, sent: {}, score: p.score, best: p.best, tks: p.tks, official: p.official };
         // для новостного фильтра стратегии: одна новость = одно событие (как в исследовании)
         const tk = key.split('|')[0];
         if (tk !== 'РЫНОК' && p.best && !(S.newsEv || []).some(e => e.t === tk && e.ts === p.ts)) { S.newsEv = (S.newsEv || []).filter(e => p.ts - e.ts < 20 * 86400); S.newsEv.push({ t: tk, ts: p.ts, v: +(p.best.v).toFixed(3), ty: p.best.ty }); }
       }
-      if (!c.srcs[p.ch]) c.srcs[p.ch] = { ts: p.ts, link: p.link, rumor: p.rumor };
+      if (!c.srcs[p.ch]) c.srcs[p.ch] = { ts: p.ts, link: p.link, rumor: p.rumor, tx: p.tx.slice(0, 1200) };
       if (!p.rumor) c.rumorOnly = false;
       if (p.official) c.official = true;
       if (Math.abs(p.score) > Math.abs(c.score)) { c.score = p.score; c.best = p.best; }

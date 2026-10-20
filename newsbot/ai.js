@@ -6,7 +6,7 @@ const BASE = String(process.env.LLM_BASE_URL || '').replace(/\/+$/, '');
 const KEY = process.env.LLM_API_KEY || '';
 const AUTH = (process.env.LLM_AUTH || 'bearer').toLowerCase();
 const MODELS = [process.env.LLM_MODEL, 'claude-sonnet-4-5', 'claude-sonnet-4-20250514', 'claude-3-5-haiku-latest'].filter(Boolean);
-const MAX = +(process.env.LLM_NEWS_PER_DAY || 30);
+const MAX = +(process.env.LLM_NEWS_PER_DAY || 45);
 const ON = !!(BASE && KEY && process.env.LLM_OFF !== '1');
 const SYSTEM = 'Ты редактор русскоязычного паблика о рынке акций Мосбиржи. Тебе дают готовый новостной пост с историей реакции рынка. ' +
   'Напиши вступление «Коротко»: 1–2 простых предложения (не пересказывай пост целиком: одна-две главные мысли, не больше трёх чисел) — что произошло и чем это исторически было для бумаги или рынка. ' +
@@ -25,13 +25,13 @@ function check(lead, src) {
   return lead.length >= 30 && lead.length <= 450;
 }
 
-async function call(model, text) {
+async function call(model, text, system = SYSTEM, maxTokens = 300) {
   const headers = { 'content-type': 'application/json', 'anthropic-version': '2023-06-01' };
   if (AUTH === 'x-api-key') headers['x-api-key'] = KEY; else headers.authorization = 'Bearer ' + KEY;
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 45000);
   try {
     const r = await fetch(BASE + '/v1/messages', { method: 'POST', headers, signal: ctl.signal,
-      body: JSON.stringify({ model, max_tokens: 300, temperature: 0.3, system: SYSTEM, messages: [{ role: 'user', content: text.slice(0, 5000) }] }) });
+      body: JSON.stringify({ model, max_tokens: maxTokens, temperature: 0.4, system, messages: [{ role: 'user', content: text.slice(0, 5000) }] }) });
     const body = await r.text();
     if (!r.ok) return { err: r.status, msg: body.slice(0, 200) };
     const js = JSON.parse(body);
@@ -54,13 +54,13 @@ function pick(ms) {
   return ms;
 }
 
-async function lead(html, S) {
+// общий запрос к шлюзу: выбор модели, дневной лимит, перебор моделей при «Model not found»
+async function ask(S, text, system, maxTokens) {
   if (!ON) return null;
   const day = new Date().toISOString().slice(0, 10);
   const st = S.ai = S.ai || {};
   if (st.day !== day) { st.day = day; st.n = 0; }
   if (st.n >= MAX) return null;
-  const src = plain(html);
   if (process.env.LLM_MODEL && st.model !== process.env.LLM_MODEL) { delete st.model; delete st.cands; }
   if (!st.model && !process.env.LLM_MODEL && !st.listed) {
     st.listed = 1;
@@ -72,17 +72,51 @@ async function lead(html, S) {
   for (const m of models) {
     st.n++;
     let res;
-    try { res = await call(m, src); } catch (e) { log('шлюз недоступен:', e.message); return null; }
+    try { res = await call(m, text, system, maxTokens); } catch (e) { log('шлюз недоступен:', e.message); return null; }
     if (res.err) {
       log('модель', m, 'ошибка', res.err, res.msg);
       if ((res.err === 400 || res.err === 404) && /model/i.test(res.msg)) continue;
       return null;
     }
     st.model = m;
-    const out = res.text.replace(/[*#]/g, '').replace(/\s+/g, ' ').trim().replace(/^[«"]|[»"]$/g, '').replace(/^(🧠\s*)?(Коротко|Кратко|Вступление)\s*[:—-]\s*/i, '');
-    return check(out, src) ? out : null;
+    return res.text;
   }
   return null;
+}
+
+async function lead(html, S) {
+  const src = plain(html);
+  const txt = await ask(S, src, SYSTEM, 300);
+  if (!txt) return null;
+  const out = txt.replace(/[*#]/g, '').replace(/\s+/g, ' ').trim().replace(/^[«"]|[»"]$/g, '').replace(/^(🧠\s*)?(Коротко|Кратко|Вступление)\s*[:—-]\s*/i, '');
+  return check(out, src) ? out : null;
+}
+
+// Новость целиком своими словами + подпись-мем для картинки + короткий факт для картинки.
+const NEWS_SYSTEM = 'Ты редактор русскоязычного паблика о рынке акций Мосбиржи. Тебе дают исходный текст новости из Telegram-канала и контекст (тикеры, тип события). ' +
+  'Верни строго JSON без пояснений: {"retell": "...", "fact": "...", "caption": "..."}. ' +
+  'retell — новость ЦЕЛИКОМ своими словами: все ключевые факты, цифры, даты, кто что сказал или сделал, 2–5 предложений, до 700 знаков; не копируй фразы источника дословно; ' +
+  'без эмодзи, хештегов, ссылок, HTML, Markdown и рекламы канала-источника. ' +
+  'fact — суть одной фразой до 160 знаков. ' +
+  'caption — короткая остроумная подпись-мем к картинке (до 90 знаков) про ситуацию глазами частного инвестора, без оскорблений, без имён реальных людей и без призывов купить или продать; ' +
+  'если новость о гибели людей, катастрофах, атаках, болезнях или другой трагедии — caption нейтральная и серьёзная, без шуток. ' +
+  'Только факты из исходного текста: не добавляй числа, даты и тикеры, которых там нет.';
+
+async function newsPack(S, srcText, ctx) {
+  const src = plain(srcText);
+  const txt = await ask(S, `Контекст: ${ctx}\n\nИсходный текст новости:\n${src}`, NEWS_SYSTEM, 900);
+  if (!txt) return null;
+  let js;
+  try { js = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1)); } catch (e) { log('ответ не JSON'); return null; }
+  const clean = v => String(v || '').replace(/[*#]/g, '').replace(/\s+/g, ' ').trim();
+  const out = { retell: clean(js.retell), fact: clean(js.fact), caption: clean(js.caption).replace(/^[«"]|[»"]$/g, '') };
+  const base = src + ' ' + ctx;
+  const ok = v => { const sn = nums(base), st = tks(base); return ![...nums(v)].some(x => !sn.has(x)) && ![...tks(v)].some(x => !st.has(x)) && !/(покупайте|продавайте|рекомендуем|советуем|стоит купить|стоит продать)/i.test(v); };
+  for (const k of ['retell', 'fact', 'caption']) if (out[k] && !ok(out[k])) { log('отброшено', k, ': числа/тикеры не из новости или похоже на совет'); out[k] = ''; }
+  if (out.retell.length < 40) out.retell = '';
+  if (out.caption.length > 120) out.caption = '';
+  log('новость пересказана:', out.retell ? 'да' : 'нет', '| подпись:', out.caption || '—');
+  return out;
 }
 
 async function withLead(html, S, esc) {
@@ -92,4 +126,4 @@ async function withLead(html, S, esc) {
   return i < 0 ? html + `\n\n🧠 <i>Коротко: ${esc(ld)}</i>` : html.slice(0, i) + `\n\n🧠 <i>Коротко: ${esc(ld)}</i>\n\n` + html.slice(i).replace(/^\n+/, '');
 }
 
-module.exports = { withLead, check, ON };
+module.exports = { withLead, newsPack, check, ON };
