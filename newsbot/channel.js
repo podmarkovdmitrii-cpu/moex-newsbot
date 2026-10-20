@@ -98,12 +98,13 @@ async function tgSend(text, reply) {
 function vkText(html) {
   return html.replace(/<a href="([^"]+)">([^<]*)<\/a>/g, '$2: $1').replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 }
-async function vkPost(html, photo) {
+async function vkPost(html, photo, tgLink) {
   if (DRY || !(VK_TOKEN || VK_USER) || !VK_GROUP) { if (VK_TOKEN || VK_USER || DRY) console.log('\n===== ПАБЛИК ВК =====\n' + vkText(html)); return null; }
   const ph = photo && fs.existsSync(photo) ? await vkPhoto(photo) : null;
   const post = async tok => {
     const p = new URLSearchParams({ owner_id: '-' + VK_GROUP, from_group: '1', message: vkText(html).slice(0, 15000), access_token: tok, v: '5.199' });
     if (ph) p.set('attachments', ph.att);
+    else if (tgLink) p.set('attachments', tgLink);
     const r = await fetch('https://api.vk.com/method/wall.post', { method: 'POST', body: p });
     return r.json().catch(() => ({}));
   };
@@ -177,7 +178,10 @@ async function publish(S, html, reply, useAi, photo) {
     if (photo) console.log('[картинка] ' + photo);
     id = await tgSend(full, reply);
   }
-  await vkPost(html + `\n\n${DISCLAIMER}`, photo);
+  // ссылка на пост с картинкой в Telegram: ВК покажет её карточкой с этой картинкой, если фото не загрузить ключом сообщества
+  const tgUser = TG_CHAT.startsWith('@') ? TG_CHAT.slice(1) : '';
+  const tgLink = photo && id && tgUser ? `https://t.me/${tgUser}/${id}` : '';
+  await vkPost(html + `\n\n${DISCLAIMER}`, photo, tgLink);
   S.pub.count++;
   return id;
 }
