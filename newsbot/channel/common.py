@@ -321,6 +321,7 @@ class Publisher:
             print("----- ПОСТ (без отправки) -----\n" + re.sub(r"<[^>]+>", "", text) + "\n" + "\n".join(f"[фото] {os.path.basename(p)}" for p, _ in photos) + (f"\n[документ] {os.path.basename(document[0])}" if document else ""), flush=True)
             return None
         link = None
+        photo_link = None
         if self.tg_chat:
             try:
                 first = None
@@ -332,14 +333,16 @@ class Publisher:
                     chunk = photos[k:k + 10]
                     if len(chunk) == 1:
                         with open(chunk[0][0], "rb") as f:
-                            self._tg("sendPhoto", {"chat_id": self.tg_chat, "caption": chunk[0][1][:1020], "parse_mode": "HTML"}, {"photo": (os.path.basename(chunk[0][0]), f.read())})
+                            pm = self._tg("sendPhoto", {"chat_id": self.tg_chat, "caption": chunk[0][1][:1020], "parse_mode": "HTML"}, {"photo": (os.path.basename(chunk[0][0]), f.read())})
+                        photo_link = photo_link or self.tg_link(pm)
                         continue
                     media, files = [], {}
                     for j, (p, cap) in enumerate(chunk):
                         with open(p, "rb") as f:
                             files[f"p{j}"] = (os.path.basename(p), f.read())
                         media.append({"type": "photo", "media": f"attach://p{j}", "caption": cap[:1020], "parse_mode": "HTML"})
-                    self._tg("sendMediaGroup", {"chat_id": self.tg_chat, "media": json.dumps(media, ensure_ascii=False)}, files)
+                    mg = self._tg("sendMediaGroup", {"chat_id": self.tg_chat, "media": json.dumps(media, ensure_ascii=False)}, files)
+                    photo_link = photo_link or (self.tg_link(mg[0]) if isinstance(mg, list) and mg else None)
                 if document:
                     with open(document[0], "rb") as f:
                         self._tg("sendDocument", {"chat_id": self.tg_chat, "caption": document[1][:1020], "parse_mode": "HTML"}, {"document": (os.path.basename(document[0]), f.read())})
@@ -347,7 +350,7 @@ class Publisher:
                 log("Telegram: ошибка", e)
         if (self.vk_token or self.vk_user) and self.vk_group:
             try:
-                self.vk_post(vk_text_override or text, photos, link)
+                self.vk_post(vk_text_override or text, photos, link, photo_link)
             except Exception as e:  # noqa: BLE001
                 log("ВК: ошибка", e)
         return link
@@ -376,7 +379,7 @@ class Publisher:
         saved = self._vk("photos.saveWallPhoto", token, group_id=self.vk_group, server=up["server"], photo=up["photo"], hash=up["hash"])[0]
         return f"photo{saved['owner_id']}_{saved['id']}"
 
-    def vk_post(self, text, photos, tg_link):
+    def vk_post(self, text, photos, tg_link, photo_link=None):
         msg = vk_text(text)
         att, att_tok = [], None
         # картинки: сначала ключом сообщества, при отказе ВК — ключом администратора
@@ -388,9 +391,13 @@ class Publisher:
             except Exception as e:  # noqa: BLE001
                 log("ВК: фото не загрузились этим ключом:", e)
                 att = []
-        if photos and not att and tg_link:
-            msg += f"\n\nГрафики: {tg_link}"
-        params = dict(owner_id="-" + self.vk_group, from_group=1, message=msg[:15500])
+        params = dict(owner_id="-" + self.vk_group, from_group=1)
+        if photos and not att and (photo_link or tg_link):
+            # ключом сообщества фото на стену не загрузить — прикрепляем ссылку на пост в Telegram:
+            # ВК показывает её карточкой с картинкой из этого поста
+            msg += f"\n\nГрафики: {photo_link or tg_link}"
+            params["attachments"] = photo_link or tg_link
+        params["message"] = msg[:15500]
         if att:
             params["attachments"] = ",".join(att)
         # ключ сообщества может не иметь доступа к wall.post — тогда пробуем ключ пользователя-администратора
