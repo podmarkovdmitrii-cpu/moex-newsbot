@@ -55,9 +55,10 @@ function pick(ms) {
 }
 
 // общий запрос к шлюзу: выбор модели, дневной лимит, перебор моделей при «Model not found»
-let DOWN = false; // шлюз не ответил в этом запуске — дальше публикуем без ИИ, чтобы не тормозить ленту
+let DOWN = false; let RUN_N = 0; const RUN_MAX = +(process.env.LLM_PER_RUN || 3); // шлюз не ответил в этом запуске — дальше публикуем без ИИ, чтобы не тормозить ленту
 async function ask(S, text, system, maxTokens) {
-  if (!ON || DOWN) return null;
+  if (!ON || DOWN || RUN_N >= RUN_MAX) return null;
+  RUN_N++;
   const day = new Date().toISOString().slice(0, 10);
   const st = S.ai = S.ai || {};
   if (st.day !== day) { st.day = day; st.n = 0; }

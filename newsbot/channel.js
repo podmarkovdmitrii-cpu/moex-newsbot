@@ -144,13 +144,15 @@ async function tgPhoto(photo, caption, reply) {
   await sleep(1100);
   return js.result.message_id;
 }
+let VK_GROUP_PHOTO_OFF = false; // ВК не даёт ключу сообщества загружать фото на стену (ошибка 27) — нужен VK_USER_TOKEN
 async function vkPhoto(photo) {
   // загрузка картинки на стену: сначала ключом сообщества, при отказе — ключом администратора
   for (const tok of [VK_TOKEN, VK_USER].filter(Boolean)) {
+    if (tok === VK_TOKEN && VK_GROUP_PHOTO_OFF) continue;
     try {
       const q = p => new URLSearchParams({ ...p, access_token: tok, v: '5.199' });
       const srv = await (await fetch('https://api.vk.com/method/photos.getWallUploadServer', { method: 'POST', body: q({ group_id: VK_GROUP }) })).json();
-      if (srv.error) { log('vk фото (сервер):', srv.error.error_code, srv.error.error_msg); continue; }
+      if (srv.error) { if (tok === VK_TOKEN && srv.error.error_code === 27) VK_GROUP_PHOTO_OFF = true; else log('vk фото (сервер):', srv.error.error_code, srv.error.error_msg); continue; }
       const fd = new FormData();
       fd.append('photo', new Blob([fs.readFileSync(photo)], { type: 'image/png' }), path.basename(photo));
       const up = await (await fetch(srv.response.upload_url, { method: 'POST', body: fd })).json();
@@ -184,10 +186,22 @@ async function publish(S, html, reply, useAi, photo) {
 function srcPick(c) {
   return Object.entries(c.srcs).filter(([, x]) => x.tx).sort((a, b) => (TRUSTED.has(b[0]) - TRUSTED.has(a[0])) || (a[1].rumor - b[1].rumor) || (b[1].tx.length - a[1].tx.length))[0];
 }
+// Чистка текста источника: хештеги рубрик, упоминания каналов, реклама «подписывайтесь/канал в Максе»
+function cleanSrc(tx) {
+  return String(tx || '')
+    .replace(/[▪️•]*\s*(Канал|Читайте|Подписывайтесь|Подписаться|Наш канал|Мы в)[^.!?\n]{0,80}[«"]?(Максе|MAX|Telegram|ВК|VK|канал[а-я]*)[»"]?[.!]?/gi, ' ')
+    .replace(/(^|\s)#[\wА-Яа-яЁё_]+/g, ' ')
+    .replace(/(^|\s)@[\w_]{4,}/g, ' ')
+    .replace(/^[\s\u2600-\u27BF\uD83C-\uDBFF\uDC00-\uDFFF\uFE0F]+/, '')
+    .replace(/\s+/g, ' ').trim();
+}
 function srcFull(c) {
   const p = srcPick(c);
-  return ((p && p[1].tx) || c.first.tx || '').replace(/\s+/g, ' ').trim();
+  return cleanSrc((p && p[1].tx) || c.first.tx || '');
 }
+// Дайджесты и сводки (много тем в одном посте) в паблик не идут — тип события в них определяется плохо
+const DIGEST = /(сводк[аи]|главн(ые|ое) (новост|к этому|за|на)|что произошло|дайджест|утренн(ий|яя) (обзор|сводка)|вечерн(ий|яя) (обзор|сводка)|итоги (дня|недели)|коротко о главном|новости к этому часу)/i;
+const isDigest = c => DIGEST.test(srcFull(c).slice(0, 200)) || (c.tks || []).length > 3;
 // Цитата без обрыва на полуслове: целиком до 700 знаков, иначе до конца предложения + «читать полностью»
 function quoteFull(tx, link) {
   tx = tx.replace(/\s+/g, ' ').trim();
@@ -266,6 +280,7 @@ async function run(S, clusters, items) {
   for (const c of fresh) {
     if (!can()) break;
     const [tk, ty] = c.key.split('|');
+    if (!(c.pub && (c.pub.rumor || c.pub.done)) && isDigest(c)) continue;
     const chs = Object.keys(c.srcs);
     const firstLink = c.first.link;
     c.pub = c.pub || {};
