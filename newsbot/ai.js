@@ -78,7 +78,7 @@ async function lead(html, S) {
       return null;
     }
     st.model = m;
-    const out = res.text.replace(/[*#]/g, '').replace(/\s+/g, ' ').trim().replace(/^[«"]|[»"]$/g, '');
+    const out = res.text.replace(/[*#]/g, '').replace(/\s+/g, ' ').trim().replace(/^[«"]|[»"]$/g, '').replace(/^(🧠\s*)?(Коротко|Кратко|Вступление)\s*[:—-]\s*/i, '');
     return check(out, src) ? out : null;
   }
   return null;
