@@ -832,7 +832,19 @@ def test_post():
     """Пробный пост для проверки подключения Telegram-канала и сообщества ВК."""
     log("Telegram:", PUB.tg_chat or "TG_PUBLIC_CHAT не задан", "| ВК:", ("сообщество " + PUB.vk_group) if PUB.vk_group else "VK_GROUP_ID не задан",
         "| ключ сообщества:", "есть" if PUB.vk_token else "нет", "| ключ администратора:", "есть" if PUB.vk_user else "нет")
-    PUB.post(f"✅ <b>Паблик подключён</b>\nПроверка связи {now_msk().strftime('%d.%m.%Y %H:%M')} МСК. Здесь будут план дня, потоки денег, ОФЗ, Пульс, итоги и важные новости Мосбиржи.", ai_lead=False)
+    img = None
+    try:
+        import card
+        src = os.path.join(OUT, "test_card.json")
+        img = os.path.join(OUT, "test_card.png")
+        json.dump({"t": "РЫНОК", "label": "Проверка связи", "caption": "Паблик подключён: графики и картинки на месте", "sign": 1,
+                   "fact": "Пробная картинка: так выглядят иллюстрации к новостям"}, open(src, "w", encoding="utf-8"), ensure_ascii=False)
+        card.main(src, img)
+    except Exception as e:  # noqa: BLE001
+        log("картинка для проверки не сделана:", e)
+        img = None
+    PUB.post(f"✅ <b>Паблик подключён</b>\nПроверка связи {now_msk().strftime('%d.%m.%Y %H:%M')} МСК: текст и картинка. Здесь будут план дня, потоки денег, ОФЗ, Пульс, итоги и важные новости Мосбиржи.",
+             [(img, "Пробная иллюстрация")] if img else None, ai_lead=False)
     log("готово — проверьте канал и сообщество")
 
 
