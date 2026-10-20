@@ -17,7 +17,7 @@ on:
         required: true
         default: 'morning'
         type: choice
-        options: [aitest, morning, flows, ofz, pulse, evening, weekly]
+        options: [test_post, aitest, morning, flows, ofz, pulse, evening, weekly]
 
 concurrency:
   group: channel

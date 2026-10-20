@@ -41,6 +41,7 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL || 'claude-opus-5-5' }}
           LLM_AUTH: ${{ vars.LLM_AUTH }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          VK_USER_TOKEN: ${{ secrets.VK_USER_TOKEN }}
         run: |
           BOT=$(find . -name bot.js -path '*newsbot*' | head -1)
           if [ -z "$BOT" ]; then echo "Не найден newsbot/bot.js — загрузите папку newsbot в репозиторий"; exit 1; fi
