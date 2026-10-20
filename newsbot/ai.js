@@ -39,6 +39,21 @@ async function call(model, text) {
   } finally { clearTimeout(t); }
 }
 
+async function listModels() {
+  const headers = { 'anthropic-version': '2023-06-01' };
+  if (AUTH === 'x-api-key') headers['x-api-key'] = KEY; else headers.authorization = 'Bearer ' + KEY;
+  try {
+    const r = await fetch(BASE + '/v1/models?limit=100', { headers });
+    if (!r.ok) return [];
+    const js = await r.json();
+    return (js.data || js.models || []).map(m => m && m.id).filter(Boolean);
+  } catch (e) { log('список моделей недоступен:', e.message); return []; }
+}
+function pick(ms) {
+  for (const p of ['sonnet', 'haiku', 'opus']) { const c = ms.filter(m => m.toLowerCase().includes(p)).sort().reverse(); if (c.length) return c; }
+  return ms;
+}
+
 async function lead(html, S) {
   if (!ON) return null;
   const day = new Date().toISOString().slice(0, 10);
@@ -46,7 +61,13 @@ async function lead(html, S) {
   if (st.day !== day) { st.day = day; st.n = 0; }
   if (st.n >= MAX) return null;
   const src = plain(html);
-  const models = (st.model ? [st.model] : []).concat(MODELS.filter(m => m !== st.model));
+  if (!st.model && !process.env.LLM_MODEL && !st.listed) {
+    st.listed = 1;
+    const found = pick(await listModels());
+    log('модели шлюза:', found.slice(0, 8).join(', ') || '—');
+    if (found.length) { st.model = found[0]; st.cands = found.slice(0, 4); }
+  }
+  const models = (st.model ? [st.model] : []).concat((st.cands || []).concat(MODELS).filter(m => m !== st.model));
   for (const m of models) {
     st.n++;
     let res;
