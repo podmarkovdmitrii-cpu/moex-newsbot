@@ -393,10 +393,9 @@ class Publisher:
                 att = []
         params = dict(owner_id="-" + self.vk_group, from_group=1)
         if photos and not att and (photo_link or tg_link):
-            # ключом сообщества фото на стену не загрузить — прикрепляем ссылку на пост в Telegram:
-            # ВК показывает её карточкой с картинкой из этого поста
+            # ключом сообщества фото на стену не загрузить — даём ссылку на пост с картинкой в Telegram
+            # (вложение-ссылку ВК отклоняет: не может забрать картинку с t.me, ошибка link_photo_sizing_rule)
             msg += f"\n\nГрафики: {photo_link or tg_link}"
-            params["attachments"] = photo_link or tg_link
         params["message"] = msg[:15500]
         if att:
             params["attachments"] = ",".join(att)
