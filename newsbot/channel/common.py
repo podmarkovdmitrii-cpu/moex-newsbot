@@ -298,8 +298,16 @@ class Publisher:
         cid = str(msg.get("chat", {}).get("id", ""))
         return f"https://t.me/c/{cid[4:]}/{mid}" if cid.startswith("-100") else None
 
-    def post(self, text, photos=None, document=None, vk_text_override=None):
+    def post(self, text, photos=None, document=None, vk_text_override=None, ai_lead=True):
         """text — HTML; photos — [(path, подпись)]; document — (path, подпись). Возвращает ссылку на пост в Telegram."""
+        if ai_lead:
+            try:
+                import ai
+                st = load_json("ai.json", {})
+                text = ai.with_lead(text, st, esc)
+                save_json("ai.json", st)
+            except Exception as e:  # noqa: BLE001
+                log("ИИ-вступление пропущено:", e)
         text = text.rstrip() + f"\n\n<i>{DISCLAIMER}</i>"
         photos = [p for p in (photos or []) if p and p[0] and os.path.exists(p[0])]
         if self.dry:

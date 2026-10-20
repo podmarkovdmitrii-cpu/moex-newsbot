@@ -789,13 +789,27 @@ def weekly_pdf(now, rows, stocks, imgs):
 
 
 # =============================================================================================
+def aitest():
+    """Проверка шлюза ИИ: ничего не публикует, только пишет в журнал ответ модели и итог проверки."""
+    import ai
+    log("шлюз:", ai.BASE or "не задан", "| ключ:", "есть" if ai.KEY else "НЕТ (секрет LLM_API_KEY)", "| модели:", ", ".join(ai.MODELS))
+    sample = ("🌙 <b>Итоги дня — пример</b>\nИндекс МосБиржи: 2 450 (+1,00%). Оборот 60 крупнейших акций: 32,9 млрд ₽.\n"
+              "Лидеры роста: $SNGS +3,0%, $NVTK +3,0%. Лидеры падения: $MDMG −2,7%, $VKCO −0,5%.\n"
+              "Перевес к закрытию: покупатели — $SNGS, $VKCO; продавцы — $MDMG, $AFLT.")
+    st = {}
+    out = ai.with_lead(sample, st, esc)
+    log("состояние:", json.dumps(st, ensure_ascii=False))
+    print("----- РЕЗУЛЬТАТ -----\n" + out, flush=True)
+    log("ИТОГ:", "вступление получено и прошло проверку" if out != sample else "вступления нет — см. сообщения [ИИ] выше")
+
+
 def main():
     mode = next((a for a in sys.argv[1:] if not a.startswith("--")), None) or os.environ.get("MODE") or SCHED.get(os.environ.get("SCHED", "").strip())
     if not mode:
         h = now_msk().strftime("%H:%M")
         mode = "morning" if "06:00" <= h < "08:30" else "pulse"
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly}[mode]()
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest}[mode]()
 
 
 if __name__ == "__main__":
