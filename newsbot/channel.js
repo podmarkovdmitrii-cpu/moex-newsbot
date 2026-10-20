@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const N = require('./nlp.js');
+const AI = require('./ai.js');
 
 const IMPACT = JSON.parse(fs.readFileSync(path.join(__dirname, 'impact.json'), 'utf8'));
 const RELIAB = fs.existsSync(path.join(__dirname, 'reliability.json')) ? JSON.parse(fs.readFileSync(path.join(__dirname, 'reliability.json'), 'utf8')) : {};
@@ -105,7 +106,8 @@ async function vkPost(html) {
   await sleep(400);
   return js.response ? js.response.post_id : null;
 }
-async function publish(S, html, reply) {
+async function publish(S, html, reply, useAi) {
+  if (useAi) html = await AI.withLead(html, S, esc);
   const id = await tgSend(html + `\n\n<i>${DISCLAIMER}</i>`, reply);
   await vkPost(html + `\n\n${DISCLAIMER}`);
   S.pub.count++;
@@ -169,7 +171,7 @@ async function run(S, clusters, items) {
     if (polit && tk === 'РЫНОК' && IMPACT.mkt[typeKey(ty, s)] && !c.pub.done && !done.has(firstLink)) {
       c.pub.done = true; mark(firstLink); n++;
       const lines = mktLines(ty, s);
-      c.pub.msg = await publish(S, `🏛 <b>Заявление</b> — ${esc(TYPE_RU[ty] || ty)}\n${esc(headline(c))}\n\n${sourcesLine(c)}\n\n<b>Как рынок реагировал на такие заявления (2017–2026):</b>\n${lines.map(esc).join('\n')}`);
+      c.pub.msg = await publish(S, `🏛 <b>Заявление</b> — ${esc(TYPE_RU[ty] || ty)}\n${esc(headline(c))}\n\n${sourcesLine(c)}\n\n<b>Как рынок реагировал на такие заявления (2017–2026):</b>\n${lines.map(esc).join('\n')}`, null, true);
       continue;
     }
     // 3) ранний сигнал (данные «источников») с оценкой вероятности подтверждения
@@ -197,7 +199,7 @@ async function run(S, clusters, items) {
     if (tk !== 'РЫНОК' && ty !== 'tone' && Math.abs(c.score) < 0.05 && !c.official) continue; // типы без заметной исторической реакции — пропускаем
     c.pub.done = true; mark(firstLink); n++;
     const body = tk === 'РЫНОК' ? mktLines(ty, s).map(esc).join('\n') : c.tks.slice(0, 5).map(t => esc(compLine(t, ty, s))).join('\n');
-    c.pub.msg = await publish(S, `${c.official ? '🏛' : '📰'} <b>${tk === 'РЫНОК' ? 'Рынок' : c.tks.map(t => '$' + t).join(' ')}</b> — ${esc(TYPE_RU[ty] || ty)}\n${esc(headline(c))}\n\n${sourcesLine(c)}\n\n<b>Влияние (история реакций 2017–2026):</b>\n${body}` + tags(c.tks));
+    c.pub.msg = await publish(S, `${c.official ? '🏛' : '📰'} <b>${tk === 'РЫНОК' ? 'Рынок' : c.tks.map(t => '$' + t).join(' ')}</b> — ${esc(TYPE_RU[ty] || ty)}\n${esc(headline(c))}\n\n${sourcesLine(c)}\n\n<b>Влияние (история реакций 2017–2026):</b>\n${body}` + tags(c.tks), null, true);
   }
   if (n) log('опубликовано', n, 'за день', S.pub.count);
 }
