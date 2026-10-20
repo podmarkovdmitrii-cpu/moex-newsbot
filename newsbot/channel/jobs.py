@@ -790,6 +790,22 @@ def weekly_pdf(now, rows, stocks, imgs):
 
 
 # =============================================================================================
+def vk_keys():
+    """Какие ключи ВК заданы: пользователя или сообщества (картинки на стену грузит только ключ пользователя)."""
+    for name, tok in (("VK_GROUP_TOKEN", PUB.vk_token), ("VK_USER_TOKEN", PUB.vk_user)):
+        if not tok:
+            continue
+        try:
+            u = PUB._vk("users.get", tok)
+            if u:
+                log(name, "— ключ ПОЛЬЗОВАТЕЛЯ:", (u[0].get("first_name", "") + " " + u[0].get("last_name", "")).strip(), "(подходит для картинок)")
+            else:
+                log(name, "— ключ СООБЩЕСТВА (картинки им загрузить нельзя)")
+        except Exception as e:  # noqa: BLE001
+            kind = "ключ СООБЩЕСТВА (картинки им загрузить нельзя)" if "group auth" in str(e) or " 27 " in str(e) else "ошибка"
+            log(name, "—", kind, "|", e)
+
+
 def tg_check():
     """Проверка бота паблика: кто он, в каких каналах админ и может ли публиковать. Ничего не публикует."""
     if not os.environ.get("TG_PUBLIC_TOKEN"):
@@ -826,12 +842,14 @@ def tg_check():
         log("канал:", info.get("title"), "| статус бота:", mem.get("status"), "| может публиковать:", "ДА" if ok else "НЕТ — дайте право «Публикация сообщений»")
     except Exception as e:  # noqa: BLE001
         log("канал", chat, "недоступен боту:", e, "— добавьте бота администратором канала")
+    vk_keys()
 
 
 def test_post():
     """Пробный пост для проверки подключения Telegram-канала и сообщества ВК."""
     log("Telegram:", PUB.tg_chat or "TG_PUBLIC_CHAT не задан", "| ВК:", ("сообщество " + PUB.vk_group) if PUB.vk_group else "VK_GROUP_ID не задан",
         "| ключ сообщества:", "есть" if PUB.vk_token else "нет", "| ключ администратора:", "есть" if PUB.vk_user else "нет")
+    vk_keys()
     img = None
     try:
         import card
