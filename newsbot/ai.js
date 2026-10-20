@@ -28,7 +28,7 @@ function check(lead, src) {
 async function call(model, text, system = SYSTEM, maxTokens = 300) {
   const headers = { 'content-type': 'application/json', 'anthropic-version': '2023-06-01' };
   if (AUTH === 'x-api-key') headers['x-api-key'] = KEY; else headers.authorization = 'Bearer ' + KEY;
-  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 45000);
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), +(process.env.LLM_TIMEOUT_MS || 100000));
   try {
     const r = await fetch(BASE + '/v1/messages', { method: 'POST', headers, signal: ctl.signal,
       body: JSON.stringify({ model, max_tokens: maxTokens, temperature: 0.4, system, messages: [{ role: 'user', content: text.slice(0, 5000) }] }) });
@@ -55,8 +55,9 @@ function pick(ms) {
 }
 
 // общий запрос к шлюзу: выбор модели, дневной лимит, перебор моделей при «Model not found»
+let DOWN = false; // шлюз не ответил в этом запуске — дальше публикуем без ИИ, чтобы не тормозить ленту
 async function ask(S, text, system, maxTokens) {
-  if (!ON) return null;
+  if (!ON || DOWN) return null;
   const day = new Date().toISOString().slice(0, 10);
   const st = S.ai = S.ai || {};
   if (st.day !== day) { st.day = day; st.n = 0; }
@@ -72,7 +73,9 @@ async function ask(S, text, system, maxTokens) {
   for (const m of models) {
     st.n++;
     let res;
-    try { res = await call(m, text, system, maxTokens); } catch (e) { log('шлюз недоступен:', e.message); return null; }
+    const t0 = Date.now();
+    try { res = await call(m, text, system, maxTokens); } catch (e) { DOWN = true; log('шлюз не ответил за', Math.round((Date.now() - t0) / 1000), 'с:', e.message, '— до конца запуска без ИИ'); return null; }
+    log('ответ модели', m, 'за', Math.round((Date.now() - t0) / 1000), 'с');
     if (res.err) {
       log('модель', m, 'ошибка', res.err, res.msg);
       if ((res.err === 400 || res.err === 404) && /model/i.test(res.msg)) continue;
