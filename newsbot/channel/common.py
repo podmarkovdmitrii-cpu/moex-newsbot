@@ -364,8 +364,8 @@ class Publisher:
         time.sleep(0.4)
         return js["response"]
 
-    def vk_photo(self, path):
-        srv = self._vk("photos.getWallUploadServer", self.vk_user, group_id=self.vk_group)
+    def vk_photo(self, path, token):
+        srv = self._vk("photos.getWallUploadServer", token, group_id=self.vk_group)
         bnd = "----vk" + str(random.randint(10 ** 8, 10 ** 9))
         with open(path, "rb") as f:
             content = f.read()
@@ -373,17 +373,20 @@ class Publisher:
         req = urllib.request.Request(srv["upload_url"], data=body, headers={"Content-Type": f"multipart/form-data; boundary={bnd}"})
         with urllib.request.urlopen(req, timeout=90) as r:
             up = json.loads(r.read().decode())
-        saved = self._vk("photos.saveWallPhoto", self.vk_user, group_id=self.vk_group, server=up["server"], photo=up["photo"], hash=up["hash"])[0]
+        saved = self._vk("photos.saveWallPhoto", token, group_id=self.vk_group, server=up["server"], photo=up["photo"], hash=up["hash"])[0]
         return f"photo{saved['owner_id']}_{saved['id']}"
 
     def vk_post(self, text, photos, tg_link):
         msg = vk_text(text)
-        att = []
-        if photos and self.vk_user:
+        att, att_tok = [], None
+        # картинки: сначала ключом сообщества, при отказе ВК — ключом администратора
+        for tok in [t for t in (self.vk_token, self.vk_user) if t] if photos else []:
             try:
-                att = [self.vk_photo(p) for p, _ in photos[:10]]
+                att = [self.vk_photo(p, tok) for p, _ in photos[:10]]
+                att_tok = tok
+                break
             except Exception as e:  # noqa: BLE001
-                log("ВК: фото не загрузились, публикую текст со ссылкой:", e)
+                log("ВК: фото не загрузились этим ключом:", e)
                 att = []
         if photos and not att and tg_link:
             msg += f"\n\nГрафики: {tg_link}"
@@ -391,7 +394,7 @@ class Publisher:
         if att:
             params["attachments"] = ",".join(att)
         # ключ сообщества может не иметь доступа к wall.post — тогда пробуем ключ пользователя-администратора
-        first = self.vk_user if (att or not self.vk_token) else self.vk_token
+        first = att_tok or self.vk_token or self.vk_user
         try:
             self._vk("wall.post", first, **params)
         except RuntimeError as e:
