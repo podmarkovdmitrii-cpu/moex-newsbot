@@ -252,7 +252,7 @@ class Publisher:
         self.vk_token = os.environ.get("VK_GROUP_TOKEN", "")
         self.vk_user = os.environ.get("VK_USER_TOKEN", "")
         self.vk_group = os.environ.get("VK_GROUP_ID", "").lstrip("-")
-        self.dry = DRY or not (self.tg_chat or self.vk_token)
+        self.dry = DRY or not (self.tg_chat or ((self.vk_token or self.vk_user) and self.vk_group))
         self.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8") if self.dry else None
         self.tg_username = self.tg_chat.lstrip("@") if self.tg_chat.startswith("@") else None
 
@@ -345,7 +345,7 @@ class Publisher:
                         self._tg("sendDocument", {"chat_id": self.tg_chat, "caption": document[1][:1020], "parse_mode": "HTML"}, {"document": (os.path.basename(document[0]), f.read())})
             except Exception as e:  # noqa: BLE001
                 log("Telegram: ошибка", e)
-        if self.vk_token and self.vk_group:
+        if (self.vk_token or self.vk_user) and self.vk_group:
             try:
                 self.vk_post(vk_text_override or text, photos, link)
             except Exception as e:  # noqa: BLE001
@@ -390,7 +390,16 @@ class Publisher:
         params = dict(owner_id="-" + self.vk_group, from_group=1, message=msg[:15500])
         if att:
             params["attachments"] = ",".join(att)
-        self._vk("wall.post", self.vk_user if att else self.vk_token, **params)
+        # ключ сообщества может не иметь доступа к wall.post — тогда пробуем ключ пользователя-администратора
+        first = self.vk_user if (att or not self.vk_token) else self.vk_token
+        try:
+            self._vk("wall.post", first, **params)
+        except RuntimeError as e:
+            if first == self.vk_token and self.vk_user:
+                log("ВК: ключ сообщества не подошёл (", e, ") — публикую ключом администратора")
+                self._vk("wall.post", self.vk_user, **params)
+            else:
+                raise
 
 
 # ---------------------------------------------------------------------------------------------

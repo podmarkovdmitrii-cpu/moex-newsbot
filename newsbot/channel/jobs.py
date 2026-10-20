@@ -790,6 +790,14 @@ def weekly_pdf(now, rows, stocks, imgs):
 
 
 # =============================================================================================
+def test_post():
+    """Пробный пост для проверки подключения Telegram-канала и сообщества ВК."""
+    log("Telegram:", PUB.tg_chat or "TG_PUBLIC_CHAT не задан", "| ВК:", ("сообщество " + PUB.vk_group) if PUB.vk_group else "VK_GROUP_ID не задан",
+        "| ключ сообщества:", "есть" if PUB.vk_token else "нет", "| ключ администратора:", "есть" if PUB.vk_user else "нет")
+    PUB.post(f"✅ <b>Паблик подключён</b>\nПроверка связи {now_msk().strftime('%d.%m.%Y %H:%M')} МСК. Здесь будут план дня, потоки денег, ОФЗ, Пульс, итоги и важные новости Мосбиржи.", ai_lead=False)
+    log("готово — проверьте канал и сообщество")
+
+
 def aitest():
     """Проверка шлюза ИИ: ничего не публикует, только пишет в журнал ответ модели и итог проверки."""
     import ai
@@ -811,7 +819,7 @@ def main():
         h = now_msk().strftime("%H:%M")
         mode = "morning" if "06:00" <= h < "08:30" else "pulse"
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest}[mode]()
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post}[mode]()
 
 
 if __name__ == "__main__":
