@@ -55,9 +55,10 @@ def liquid_shares(n=30):
     if DEMO:
         return [dict(SECID=t, VALTODAY=1e9, LAST=100, LASTTOPREVPRICE=0) for t in ["SBER", "GAZP", "LKOH", "YDEX", "T", "ROSN", "VTBR", "GMKN", "NVTK", "PLZL"]]
     js = iss("engines/stock/markets/shares/boards/TQBR/securities.json", **{"iss.only": "marketdata,securities", "marketdata.columns": "SECID,LAST,LASTTOPREVPRICE,VALTODAY,OPEN,HIGH,LOW,SYSTIME",
-                                                                              "securities.columns": "SECID,SHORTNAME,PREVPRICE,DECIMALS"})
-    names = {r["SECID"]: r for r in table(js, "securities")}
-    md = [dict(r, NAME=(names.get(r["SECID"]) or {}).get("SHORTNAME", r["SECID"])) for r in table(js, "marketdata") if r.get("VALTODAY")]
+                                                                              "securities.columns": "SECID,SHORTNAME,PREVPRICE,DECIMALS,INSTRID"})
+    # на TQBR теперь торгуются и биржевые фонды (INSTRID IFTF и др.) — оставляем только акции и расписки (EQIN)
+    names = {r["SECID"]: r for r in table(js, "securities") if (r.get("INSTRID") or "EQIN") == "EQIN"}
+    md = [dict(r, NAME=names[r["SECID"]].get("SHORTNAME", r["SECID"])) for r in table(js, "marketdata") if r.get("VALTODAY") and r["SECID"] in names]
     md.sort(key=lambda r: -(r["VALTODAY"] or 0))
     return md[:n]
 
