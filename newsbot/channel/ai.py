@@ -72,6 +72,32 @@ def _call(model, text, timeout=60):
     return "".join(b.get("text", "") for b in js.get("content", []) if b.get("type") == "text").strip()
 
 
+def list_models():
+    """Список моделей шлюза (GET /v1/models); пустой список, если шлюз его не отдаёт."""
+    headers = {"anthropic-version": "2023-06-01"}
+    if AUTH == "x-api-key":
+        headers["x-api-key"] = KEY
+    else:
+        headers["authorization"] = "Bearer " + KEY
+    try:
+        req = urllib.request.Request(BASE + "/v1/models?limit=100", headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            js = json.loads(r.read())
+        return [m.get("id") for m in (js.get("data") or js.get("models") or []) if isinstance(m, dict) and m.get("id")]
+    except Exception as e:  # noqa: BLE001
+        _log("список моделей недоступен:", e)
+        return []
+
+
+def pick(models):
+    """Предпочтение: Sonnet (качество/цена), затем Haiku, затем Opus; внутри — самая новая по имени."""
+    for pat in ("sonnet", "haiku", "opus"):
+        c = sorted([m for m in models if pat in m.lower()], reverse=True)
+        if c:
+            return c
+    return models
+
+
 def lead(post_html, state):
     """Вернуть проверенное вступление или None. state — словарь состояния паблика (счётчик и рабочая модель)."""
     if not ON:
@@ -83,7 +109,14 @@ def lead(post_html, state):
     if st["n"] >= MAX_PER_DAY:
         _log("дневной лимит запросов исчерпан", MAX_PER_DAY)
         return None
-    models = ([st["model"]] if st.get("model") else []) + [m for m in MODELS if m != st.get("model")]
+    if not st.get("model") and not os.environ.get("LLM_MODEL") and not st.get("listed"):
+        st["listed"] = 1
+        found = pick(list_models())
+        _log("модели шлюза:", ", ".join(found[:8]) or "—")
+        if found:
+            st["model"] = found[0]
+            st["cands"] = found[:4]
+    models = ([st["model"]] if st.get("model") else []) + [m for m in (st.get("cands") or []) + MODELS if m != st.get("model")]
     src = _plain(post_html)
     for m in models:
         try:

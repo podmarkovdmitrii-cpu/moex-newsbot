@@ -796,6 +796,7 @@ def aitest():
     sample = ("🌙 <b>Итоги дня — пример</b>\nИндекс МосБиржи: 2 450 (+1,00%). Оборот 60 крупнейших акций: 32,9 млрд ₽.\n"
               "Лидеры роста: $SNGS +3,0%, $NVTK +3,0%. Лидеры падения: $MDMG −2,7%, $VKCO −0,5%.\n"
               "Перевес к закрытию: покупатели — $SNGS, $VKCO; продавцы — $MDMG, $AFLT.")
+    log("все модели шлюза:", ", ".join(ai.list_models()) or "— (шлюз не отдаёт список)")
     st = {}
     out = ai.with_lead(sample, st, esc)
     log("состояние:", json.dumps(st, ensure_ascii=False))
