@@ -790,6 +790,44 @@ def weekly_pdf(now, rows, stocks, imgs):
 
 
 # =============================================================================================
+def tg_check():
+    """Проверка бота паблика: кто он, в каких каналах админ и может ли публиковать. Ничего не публикует."""
+    if not os.environ.get("TG_PUBLIC_TOKEN"):
+        log("секрет TG_PUBLIC_TOKEN не задан — паблик будет писать от основного бота (TG_TOKEN)")
+    try:
+        me = PUB._tg("getMe")
+    except Exception as e:  # noqa: BLE001
+        log("бот не отвечает — проверьте токен:", e)
+        return
+    log("бот паблика: @" + me.get("username", "?"), "id", me.get("id"))
+    try:
+        ups = PUB._tg("getUpdates", {"allowed_updates": json.dumps(["my_chat_member", "channel_post"]), "limit": 100})
+    except Exception as e:  # noqa: BLE001
+        ups = []
+        log("getUpdates:", e)
+    seen = {}
+    for u in ups:
+        m = u.get("my_chat_member") or {}
+        ch = m.get("chat") or (u.get("channel_post") or {}).get("chat") or {}
+        if ch.get("id"):
+            seen[ch["id"]] = (ch.get("title"), ch.get("username"), (m.get("new_chat_member") or {}).get("status"))
+    for cid, (title, un, stt) in seen.items():
+        log("бота добавили в чат:", title, "@" + un if un else "(без публичной ссылки)", "id", cid, "статус", stt or "?")
+    if not seen:
+        log("в последних событиях бот ни в один канал не добавлялся (или события старше суток)")
+    chat = PUB.tg_chat
+    if not chat:
+        log("переменная TG_PUBLIC_CHAT не задана — укажите @ссылку канала или его id из строки выше")
+        return
+    try:
+        info = PUB._tg("getChat", {"chat_id": chat})
+        mem = PUB._tg("getChatMember", {"chat_id": chat, "user_id": me["id"]})
+        ok = mem.get("status") == "creator" or (mem.get("status") == "administrator" and mem.get("can_post_messages", True))
+        log("канал:", info.get("title"), "| статус бота:", mem.get("status"), "| может публиковать:", "ДА" if ok else "НЕТ — дайте право «Публикация сообщений»")
+    except Exception as e:  # noqa: BLE001
+        log("канал", chat, "недоступен боту:", e, "— добавьте бота администратором канала")
+
+
 def test_post():
     """Пробный пост для проверки подключения Telegram-канала и сообщества ВК."""
     log("Telegram:", PUB.tg_chat or "TG_PUBLIC_CHAT не задан", "| ВК:", ("сообщество " + PUB.vk_group) if PUB.vk_group else "VK_GROUP_ID не задан",
@@ -819,7 +857,7 @@ def main():
         h = now_msk().strftime("%H:%M")
         mode = "morning" if "06:00" <= h < "08:30" else "pulse"
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post}[mode]()
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check}[mode]()
 
 
 if __name__ == "__main__":
