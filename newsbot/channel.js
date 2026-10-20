@@ -14,10 +14,11 @@ const RELIAB = fs.existsSync(path.join(__dirname, 'reliability.json')) ? JSON.pa
 const TG_TOKEN = process.env.TG_PUBLIC_TOKEN || process.env.TG_TOKEN || '';
 const TG_CHAT = process.env.TG_PUBLIC_CHAT || '';
 const VK_TOKEN = process.env.VK_GROUP_TOKEN || '';
+const VK_USER = process.env.VK_USER_TOKEN || '';
 const VK_GROUP = String(process.env.VK_GROUP_ID || '').replace(/^-/, '');
 const PER_DAY = +(process.env.PUBLIC_PER_DAY || 40);
-const DRY = process.argv.includes('--dry-run') || (!TG_CHAT && !VK_TOKEN);
-const ON = !!(TG_CHAT || VK_TOKEN || process.argv.includes('--dry-run'));
+const DRY = process.argv.includes('--dry-run') || (!TG_CHAT && !VK_TOKEN && !process.env.VK_USER_TOKEN);
+const ON = !!(TG_CHAT || VK_TOKEN || process.env.VK_USER_TOKEN || process.argv.includes('--dry-run'));
 const DISCLAIMER = 'Не является индивидуальной инвестиционной рекомендацией.';
 
 // Источники: кто считается достоверным, как называть в постах
@@ -98,10 +99,14 @@ function vkText(html) {
   return html.replace(/<a href="([^"]+)">([^<]*)<\/a>/g, '$2: $1').replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 }
 async function vkPost(html) {
-  if (DRY || !VK_TOKEN || !VK_GROUP) { if (VK_TOKEN || DRY) console.log('\n===== ПАБЛИК ВК =====\n' + vkText(html)); return null; }
-  const p = new URLSearchParams({ owner_id: '-' + VK_GROUP, from_group: '1', message: vkText(html).slice(0, 15000), access_token: VK_TOKEN, v: '5.199' });
-  const r = await fetch('https://api.vk.com/method/wall.post', { method: 'POST', body: p });
-  const js = await r.json().catch(() => ({}));
+  if (DRY || !(VK_TOKEN || VK_USER) || !VK_GROUP) { if (VK_TOKEN || VK_USER || DRY) console.log('\n===== ПАБЛИК ВК =====\n' + vkText(html)); return null; }
+  const post = async tok => {
+    const p = new URLSearchParams({ owner_id: '-' + VK_GROUP, from_group: '1', message: vkText(html).slice(0, 15000), access_token: tok, v: '5.199' });
+    const r = await fetch('https://api.vk.com/method/wall.post', { method: 'POST', body: p });
+    return r.json().catch(() => ({}));
+  };
+  let js = await post(VK_TOKEN || VK_USER);
+  if (js.error && VK_TOKEN && VK_USER) { log('vk: ключ сообщества не подошёл (', js.error.error_code, js.error.error_msg, ') — публикую ключом администратора'); js = await post(VK_USER); }
   if (js.error) log('vk:', js.error.error_code, js.error.error_msg);
   await sleep(400);
   return js.response ? js.response.post_id : null;
