@@ -109,6 +109,10 @@ def lead(post_html, state):
     if st["n"] >= MAX_PER_DAY:
         _log("дневной лимит запросов исчерпан", MAX_PER_DAY)
         return None
+    want = os.environ.get("LLM_MODEL")
+    if want and st.get("model") != want:  # модель задана явно — сбросить запомненную прежнюю
+        st.pop("model", None)
+        st.pop("cands", None)
     if not st.get("model") and not os.environ.get("LLM_MODEL") and not st.get("listed"):
         st["listed"] = 1
         found = pick(list_models())
