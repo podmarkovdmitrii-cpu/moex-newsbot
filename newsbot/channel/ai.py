@@ -134,6 +134,7 @@ def lead(post_html, state):
         st["model"] = m
         _log("модель", m, "ответила:", out[:300])
         out = re.sub(r"\s+", " ", out.replace("*", "").replace("#", "")).strip().strip("«»\"")
+        out = re.sub(r"^(🧠\s*)?(Коротко|Кратко|Вступление)\s*[:—-]\s*", "", out, flags=re.I)
         return out if check(out, src) else None
     return None
 
