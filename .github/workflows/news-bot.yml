@@ -13,12 +13,17 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Библиотека для картинок к новостям
+        run: pip install --quiet matplotlib
       - name: Восстановить состояние бота
         uses: actions/cache/restore@v4
         with:
@@ -43,6 +48,8 @@ jobs:
           LLM_AUTH: ${{ vars.LLM_AUTH }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           VK_USER_TOKEN: ${{ secrets.VK_USER_TOKEN }}
+          PYTHON: python
+          LLM_NEWS_PER_DAY: '45'
         run: |
           BOT=$(find . -name bot.js -path '*newsbot*' | head -1)
           if [ -z "$BOT" ]; then echo "Не найден newsbot/bot.js — загрузите папку newsbot в репозиторий"; exit 1; fi
