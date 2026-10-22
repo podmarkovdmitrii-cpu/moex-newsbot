@@ -1198,7 +1198,8 @@ def anomaly_post(x, md, by_sec, ixc):
     if x["kind"] == "share":
         cl = news_for([t])
     else:
-        cl = news_for(FUT[x["asset"]][2], types={"BR": ["oil_"], "NG": ["oil_"], "TTF": ["oil_"]}.get(x["asset"]))
+        cl = news_for(FUT[x["asset"]][2], types={"BR": ["oil_", "geo_", "sanctions"], "NG": ["oil_", "geo_", "sanctions"], "TTF": ["oil_", "geo_", "sanctions"],
+                                                     "GOLD": ["geo_", "cbr_"], "SILV": ["geo_"], "WHEAT": ["geo_", "tax"]}.get(x["asset"]))
     if cl:
         txt.append("Возможная причина — свежие новости:")
         for c in cl:
