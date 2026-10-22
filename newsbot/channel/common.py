@@ -477,17 +477,23 @@ class Publisher:
             # одна картинка: картинка с подписью (до 1024 знаков), остаток — следующим сообщением
             try:
                 blocks, cap, k = text.split("\n\n"), "", 0
+                disc = blocks.pop() if blocks and DISCLAIMER in blocks[-1] else ""
+                room = 1010 - len(re.sub(r"<[^>]+>", "", disc))
                 for k, bl in enumerate(blocks):
                     nx = cap + ("\n\n" if cap else "") + bl
-                    if len(re.sub(r"<[^>]+>", "", nx)) > 1000:
+                    if len(re.sub(r"<[^>]+>", "", nx)) > room:
                         break
                     cap = nx
                 else:
                     k = len(blocks)
+                if cap and disc:
+                    cap += "\n\n" + disc
                 with open(photos[0][0], "rb") as f:
                     pm = self._tg("sendPhoto", {"chat_id": self.tg_chat, "caption": cap or photos[0][1][:1000], "parse_mode": "HTML"}, {"photo": (os.path.basename(photos[0][0]), f.read())})
                 link = photo_link = self.tg_link(pm)
                 rest = "\n\n".join(blocks[k:]) if cap else text
+                if rest.strip() and cap and disc:
+                    rest += "\n\n" + disc
                 for part in split_text(rest, 4000) if rest.strip() else []:
                     self._tg("sendMessage", {"chat_id": self.tg_chat, "text": part, "parse_mode": "HTML", "disable_web_page_preview": True})
             except Exception as e:  # noqa: BLE001

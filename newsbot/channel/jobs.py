@@ -1131,7 +1131,7 @@ def anomaly():
             why.append(f"цена {pc(chg, 1)} за день при индексе {pc(ixc, 1)}")
         if abs(jump) >= (2 if tier == 1 else 3.5 if tier == 2 else 5) / 100 and val >= 5e6:
             why.append(f"рывок {pc(jump, 1)} за последние минуты")
-        if vx and vx >= 4 and val >= (300e6 if tier == 1 else 30e6 if tier == 2 else 15e6):
+        if vx and vx >= (4 if tier < 3 else 6) and val >= (300e6 if tier == 1 else 50e6 if tier == 2 else 30e6):
             why.append(f"оборот {fmt(vx, 1)}× к обычному на это время ({bln(val)})")
         stt["snap"][t] = [last, val]
         if why:
