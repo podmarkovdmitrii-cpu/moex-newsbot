@@ -21,6 +21,8 @@ function check(lead, src) {
   const sn = nums(src), st = tks(src);
   const badN = [...nums(lead)].filter(x => !sn.has(x)), badT = [...tks(lead)].filter(x => !st.has(x));
   if (badN.length || badT.length) { log('вступление отброшено: лишние числа', badN.slice(0, 5), 'тикеры', badT.slice(0, 5)); return false; }
+  const cyr = (lead.match(/[А-Яа-яЁё]/g) || []).length, let_ = (lead.match(/[A-Za-zА-Яа-яЁё]/g) || []).length;
+  if (cyr < 0.5 * let_ || /^\s*(the user|i need|let me|okay|here)/i.test(lead)) { log('вступление отброшено: ответ не по-русски / рассуждения модели'); return false; }
   if (/(покупайте|продавайте|рекомендуем|советуем|стоит купить|стоит продать)/i.test(lead)) { log('вступление отброшено: похоже на рекомендацию'); return false; }
   return lead.length >= 30 && lead.length <= 450;
 }
@@ -118,7 +120,7 @@ async function newsPack(S, srcText, ctx, cands) {
   const out = { retell: clean(js.retell), fact: clean(js.fact), caption: clean(js.caption).replace(/^[«"]|[»"]$/g, ''),
     relevant: js.relevant !== false, tickers: Array.isArray(js.tickers) ? js.tickers.map(t => String(t).replace(/^\$/, '').toUpperCase()).filter(t => !cands || cands.includes(t)) : null };
   const base = src + ' ' + ctx;
-  const ok = v => { const sn = nums(base), st = tks(base); return ![...nums(v)].some(x => !sn.has(x)) && ![...tks(v)].some(x => !st.has(x)) && !/(покупайте|продавайте|рекомендуем|советуем|стоит купить|стоит продать)/i.test(v); };
+  const ok = v => { const cy = (v.match(/[А-Яа-яЁё]/g) || []).length, lt = (v.match(/[A-Za-zА-Яа-яЁё]/g) || []).length; if (cy < 0.5 * lt) return false; const sn = nums(base), st = tks(base); return ![...nums(v)].some(x => !sn.has(x)) && ![...tks(v)].some(x => !st.has(x)) && !/(покупайте|продавайте|рекомендуем|советуем|стоит купить|стоит продать)/i.test(v); };
   for (const k of ['retell', 'fact', 'caption']) if (out[k] && !ok(out[k])) { log('отброшено', k, ': числа/тикеры не из новости или похоже на совет'); out[k] = ''; }
   if (out.retell.length < 40) out.retell = '';
   if (out.caption.length > 120) out.caption = '';
