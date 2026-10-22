@@ -22,7 +22,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (BG, BLUE, DEMO, DN, FG, GRID, NEWS_STATE, ORANGE, OUT, UP, VIOLET, Publisher, bln, candle_chart, currency_candles, ema, esc, fmt, hbars,  # noqa: E402
-                    http_get, index_candles, iss, load_json, log, now_msk, pc, plt, save_json, share_candles, style, table)
+                    http_get, index_candles, iss, load_json, log, now_msk, pc, plt, save_json, share_candles, style, table,
+                    FUT, FUT_CODE, fut_continuous, fut_fronts, fut_candles, tf_bars, atr, TF_RU)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = json.load(open(os.path.join(HERE, "data.json"), encoding="utf-8"))
@@ -31,8 +32,8 @@ SEC_OF = json.load(open(os.path.join(HERE, "..", "impact.json"), encoding="utf-8
 CBR_DAYS = ["2026-10-23", "2026-12-18", "2027-02-12", "2027-03-20", "2027-04-24", "2027-06-11", "2027-07-23", "2027-09-10", "2027-10-22", "2027-12-17"]
 FAM_RU = {"mom": "импульс", "pull": "откат к EMA 20", "sbrk": "шорт пробоя"}
 SEC_RU = {"bank": "банки", "oil": "нефтегаз", "metal": "металлурги", "retail": "ритейл", "tech": "IT и связь", "power": "энергетика", "chem": "химия", "devel": "девелоперы", "transport": "транспорт"}
-SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "weekly", "0 9 * * 1-5": "flows", "30 12 * * 1-5": "flows", "55 15 * * 1-5": "flows", "10 16 * * 1-5": "ofz",
-         "25 16 * * 1-5": "evening", "5 6-18/2 * * 1-5": "pulse"}
+SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "weekly", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
+         "45 10 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening", "20 6-18/2 * * 1-5": "pulse"}
 PUB = Publisher()
 
 
@@ -126,70 +127,125 @@ def turnover_avg(tickers, days=20):
     return {t: (st.mean([cache[x].get(t, 0) for x in dates]) if dates else None) for t in tickers}
 
 
+def fetch_fut_trades(secid, last=None, max_pages=150):
+    out, start = [], 0
+    for _ in range(max_pages):
+        p = {"iss.only": "trades", "trades.columns": "TRADENO,TRADETIME,PRICE,QUANTITY,BUYSELL", "limit": 5000}
+        if last:
+            p.update(tradeno=last, next_trade=1)
+        else:
+            p["start"] = start
+        rows = table(iss(f"engines/futures/markets/forts/securities/{secid}/trades.json", **p), "trades")
+        out += rows
+        if len(rows) < 5000:
+            break
+        if last:
+            last = rows[-1]["TRADENO"]
+        else:
+            start += len(rows)
+    return out
+
+
 def flows():
+    """Перевес покупателей/продавцов и сделки китов: акции (1–3 эшелон по обороту) и сырьевые фьючерсы. Каждые 30 минут."""
     now = now_msk()
     today = now.date().isoformat()
     stt = load_json("flows.json", {})
     if stt.get("date") != today:
         stt = {"date": today, "tk": {}}
-    md = liquid_shares(30)
-    big_min = float(os.environ.get("BIG_TRADE", "50e6"))
-    for r in md:
-        t = r["SECID"]
-        s = stt["tk"].setdefault(t, {"last": None, "vb": 0.0, "vs": 0.0, "big": []})
+    md = liquid_shares(int(os.environ.get("FLOWS_N", "60")))
+    avg = turnover_avg([r["SECID"] for r in md])
+    try:
+        fut = fut_fronts()
+    except Exception as e:  # noqa: BLE001
+        log("фьючерсы", e)
+        fut = {}
+    items = [("share", r["SECID"], r) for r in md] + [("fut", f["secid"], f) for f in fut.values()]
+    for kind, t, r in items:
+        s = stt["tk"].setdefault(t, {"last": None, "vb": 0.0, "vs": 0.0, "big": [], "pb": 0.0, "ps": 0.0})
+        s["pb"], s["ps"] = s["vb"], s["vs"]  # на момент прошлого поста — для перевеса за последние 30 минут
+        if kind == "share":
+            a20 = avg.get(t) or 0
+            thr = float(os.environ.get("BIG_TRADE", "50e6")) if a20 > 3e9 else max(5e6, min(50e6, 0.05 * a20 if a20 else 20e6))
+        else:
+            thr = 30e6
         try:
-            rows = demo_trades(t, s["last"]) if DEMO else fetch_trades(t, "shares", s["last"])
+            if DEMO:
+                rows = demo_trades(t, s["last"])
+            elif kind == "share":
+                rows = fetch_trades(t, "shares", s["last"])
+            else:
+                rows = fetch_fut_trades(t, s["last"])
         except Exception as e:  # noqa: BLE001
             log("сделки", t, e)
             continue
+        k = (r["step"] / r["minstep"]) if kind == "fut" and r.get("minstep") else 1
         for x in rows:
-            if x.get("BOARDID") not in (None, "TQBR"):
+            if kind == "share" and x.get("BOARDID") not in (None, "TQBR"):
                 continue
-            v = x.get("VALUE") or 0
+            v = x.get("VALUE") or (x.get("PRICE", 0) * x.get("QUANTITY", 0) * k)
             if x.get("BUYSELL") == "B":
                 s["vb"] += v
             elif x.get("BUYSELL") == "S":
                 s["vs"] += v
-            if v >= big_min:
-                s["big"].append([x["TRADETIME"], x["PRICE"], v, x.get("BUYSELL")])
+            if v >= thr:
+                s["big"].append([x["TRADETIME"], x["PRICE"], v, x.get("BUYSELL"), 1])
         if rows:
             s["last"] = rows[-1]["TRADENO"]
-        time.sleep(0.1)
-    save_json("flows.json", stt)
-    avg = turnover_avg([r["SECID"] for r in md])
-    res = []
-    for r in md:
-        s = stt["tk"].get(r["SECID"])
+        time.sleep(0.05)
+
+    def stat(kind, t, r):
+        s = stt["tk"].get(t)
         if not s or s["vb"] + s["vs"] <= 0:
-            continue
+            return None
         tot = s["vb"] + s["vs"]
-        res.append(dict(t=r["SECID"], name=r.get("NAME", r["SECID"]), imb=(s["vb"] - s["vs"]) / tot, tot=tot, net=s["vb"] - s["vs"], chg=(r.get("LASTTOPREVPRICE") or 0) / 100,
-                        x=(tot / avg[r["SECID"]]) if avg.get(r["SECID"]) else None, big=s["big"]))
+        wb, ws = s["vb"] - s.get("pb", 0), s["vs"] - s.get("ps", 0)
+        lab = t if kind == "share" else r["asset"]
+        return dict(t=t, lab=lab, kind=kind, name=r.get("NAME") or r.get("name") or t, imb=(s["vb"] - s["vs"]) / tot, tot=tot,
+                    wimb=(wb - ws) / (wb + ws) if wb + ws > 0 else None, wtot=wb + ws,
+                    chg=((r.get("LASTTOPREVPRICE") or 0) / 100) if kind == "share" else (r.get("chg") or 0),
+                    x=(tot / avg[t]) if kind == "share" and avg.get(t) else None, big=[b for b in s["big"] if len(b) > 4 and b[4]])
+    res = [z for z in (stat(k_, t, r) for k_, t, r in items) if z]
+    for t, s in stt["tk"].items():  # киты показаны — больше не повторяем
+        for b in s["big"]:
+            if len(b) > 4:
+                b[4] = 0
+        s["big"] = s["big"][-40:]
+    save_json("flows.json", stt)
     if not res:
         log("нет данных по сделкам")
         return
-    allb = sum(x["tot"] * (1 + x["imb"]) / 2 for x in res)
-    allt = sum(x["tot"] for x in res)
-    buyers = sorted([x for x in res if x["imb"] > 0], key=lambda x: -x["imb"] * min(1.5, (x["x"] or 1)))[:5]
-    sellers = sorted([x for x in res if x["imb"] < 0], key=lambda x: x["imb"] * min(1.5, (x["x"] or 1)))[:5]
-    bigs = sorted([(x["t"], *b) for x in res for b in x["big"]], key=lambda z: -z[3])[:8]
+    sh = [x for x in res if x["kind"] == "share"]
+    fu = [x for x in res if x["kind"] == "fut"]
+    allb = sum(x["tot"] * (1 + x["imb"]) / 2 for x in sh)
+    allt = sum(x["tot"] for x in sh) or 1
+    key = lambda x: x["wimb"] if x["wimb"] is not None and x["wtot"] > 0.02 * x["tot"] else x["imb"]
+    buyers = sorted([x for x in sh if key(x) > 0], key=lambda x: -key(x) * min(1.5, (x["x"] or 1)))[:6]
+    sellers = sorted([x for x in sh if key(x) < 0], key=lambda x: key(x) * min(1.5, (x["x"] or 1)))[:6]
+    bigs = sorted([(x["lab"], x["kind"], *b[:4]) for x in res for b in x["big"]], key=lambda z: -z[4])[:10]
     hm = now.strftime("%H:%M")
 
     def row(x):
         xx = f", оборот {fmt(x['x'], 1)}× к среднему" if x["x"] else ""
-        return f"• <b>${x['t']}</b> {pc(x['imb'], 0)} перевес · {bln(x['tot'])}{xx} · цена {pc(x['chg'], 1)}"
+        w = f"за 30 мин {pc(x['wimb'], 0)}, " if x["wimb"] is not None and x["wtot"] > 0 else ""
+        return f"• <b>${x['lab']}</b> {w}за день {pc(x['imb'], 0)} · {bln(x['tot'])}{xx} · цена {pc(x['chg'], 1)}"
     txt = [f"⚖️ <b>Покупатели vs продавцы</b> — {now.strftime('%d.%m')}, на {hm} МСК",
-           f"30 самых ликвидных акций: покупок по рынку {pc(allb / allt, 0, False)} от оборота {bln(allt)}.", "",
+           f"{len(sh)} акций 1–3 эшелона: покупок по рынку {pc(allb / allt, 0, False)} от оборота {bln(allt)}.", "",
            "🟢 <b>Перевес покупателей</b>:", *(row(x) for x in buyers), "", "🔴 <b>Перевес продавцов</b>:", *(row(x) for x in sellers)]
+    if fu:
+        txt += ["", "🛢 <b>Сырьё (фьючерсы)</b>:"]
+        for x in sorted(fu, key=lambda x: -x["tot"])[:8]:
+            w = f"за 30 мин {pc(x['wimb'], 0)}, " if x["wimb"] is not None and x["wtot"] > 0 else ""
+            txt.append(f"• {esc(FUT[x['lab']][0])} ({x['t']}): {w}за день {pc(x['imb'], 0)} · {bln(x['tot'])} · цена {pc(x['chg'], 1)}")
     if bigs:
-        txt += ["", f"🐋 <b>Крупные сделки</b> (от {bln(big_min)} одной сделкой):"]
-        txt += [f"• ${t} {tm[:5]} — {'покупка' if side == 'B' else 'продажа'} по рынку на {bln(v)} по {fmt(p, 2)}" for t, tm, p, v, side in bigs]
-    txt += ["", "<i>Перевес — доля сделок, где инициатором была покупка (B) или продажа (S) по рынку. Данные Мосбиржи с задержкой до 15 минут. "
-            "Перевес показывает, кто сейчас активнее, но сам по себе не прогноз.</i>", "#потоки #перевес"]
-    rows = [(f"{x['t']}", x["imb"], None) for x in sorted(res, key=lambda x: -x["imb"])]
-    img = hbars(rows, os.path.join(OUT, "flows.png"), f"Перевес покупок (+) и продаж (−) по рынку, {now.strftime('%d.%m')} {hm} МСК", fmt_v=lambda v: pc(v, 0))
+        txt += ["", "🐋 <b>Сделки китов за последние 30 минут</b> (крупнейшие одной сделкой):"]
+        txt += [f"• {'$' + t if k_ == 'share' else esc(FUT[t][0])} {tm[:5]} — {'покупка' if side == 'B' else 'продажа'} по рынку на {bln(v)} по {fmt(p, 2)}" for t, k_, tm, p, v, side in bigs]
+    txt += ["", "<i>Перевес — доля оборота, где инициатором была покупка (B) или продажа (S) по рынку. «Кит» — сделка от 50 млн ₽ в голубых фишках, "
+            "от 5% среднего дневного оборота во 2–3 эшелоне, от 30 млн ₽ во фьючерсах. Данные Мосбиржи с задержкой до 15 минут; перевес — не прогноз.</i>", "#потоки #перевес #киты"]
+    rows = [(x["lab"], key(x), None) for x in sorted(buyers + sellers[::-1], key=lambda x: -key(x))]
+    img = hbars(rows, os.path.join(OUT, "flows.png"), f"Перевес покупок (+) и продаж (−) за 30 мин, {now.strftime('%d.%m')} {hm} МСК", fmt_v=lambda v: pc(v, 0))
     PUB.post("\n".join(txt), [(img, f"Перевес покупателей и продавцов на {hm} МСК")])
-    save_json("flows_last.json", dict(time=now.isoformat(), buyers=[(x["t"], x["imb"]) for x in buyers], sellers=[(x["t"], x["imb"]) for x in sellers], share=allb / allt))
+    save_json("flows_last.json", dict(time=now.isoformat(), buyers=[(x["lab"], x["imb"]) for x in buyers], sellers=[(x["lab"], x["imb"]) for x in sellers], share=allb / allt))
 
 
 # =============================================================================================
@@ -301,8 +357,10 @@ def ofz():
         concl = "Покупают в основном короткие выпуски — деньги паркуются без ставки на снижение ключевой."
     else:
         concl = "Потоки смешанные, явного направления нет."
-    xa = f" ({fmt(tot / avg, 1 if tot / avg >= 0.95 else 2)}× к среднему за 20 дней)" if avg else ""
-    txt = [f"🏦 <b>Потоки в ОФЗ</b> — {now.strftime('%d.%m')}", f"Оборот гособлигаций: {bln(tot)}{xa}." + (f" Индекс RGBI {pc(rg1, 2)} за день, {pc(rg5, 2)} за 5 дней." if rg1 is not None else ""), ""]
+    mins = (now.hour * 60 + now.minute) - 600
+    frac = max(0.1, min(1.0, mins / 530))
+    xa = f" ({fmt(tot / (avg * frac), 1)}× к обычному обороту {'на это время' if frac < 1 else 'за день'})" if avg else ""
+    txt = [f"🏦 <b>Потоки в ОФЗ</b> — {now.strftime('%d.%m')}, {'середина дня, ' if now.hour < 16 else 'итоги дня, '}{now.strftime('%H:%M')} МСК", f"Оборот гособлигаций: {bln(tot)}{xa}." + (f" Индекс RGBI {pc(rg1, 2)} за день, {pc(rg5, 2)} за 5 дней." if rg1 is not None else ""), ""]
     for x in lines:
         dy = f", доходность {fmt(x['y'] * 100, 2)}%" + (f" ({'+' if x['dy'] >= 0 else '−'}{fmt(abs(x['dy']) * 1e4, 0)} б.п. за неделю)" if x["dy"] is not None else "") if x["y"] else ""
         txt.append(f"• {x['lab']}: {'покупки' if x['net'] >= 0 else 'продажи'} по рынку {'+' if x['net'] >= 0 else '−'}{bln(abs(x['net']))} из {bln(x['val'])}{dy}")
@@ -515,6 +573,82 @@ def morning():
         path = candle_chart(bars, os.path.join(OUT, f"m_{k}_{p['t']}.png"), title, lines=lines, emas=emas, note=note, mark="СИГНАЛ" if p["kind"] == "signal" else "ЖДЁМ")
         imgs.append((path, f"${p['t']}: {FAM_RU.get(p['fam'], '')}, {'лонг' if side > 0 else 'шорт'}"))
     PUB.post("\n".join(txt), imgs)
+    try:
+        commod_plan()
+    except Exception as e:  # noqa: BLE001
+        log("сырьё", e)
+
+
+COMMOD_MAIN = ["BR", "NG", "TTF", "GOLD", "SILV", "PLT", "PLD", "COPPER", "ALUM", "NICKEL", "WHEAT"]
+
+
+def commod_state(a, f):
+    """Трендовый анализ сырья как для акций: EMA 20/50, 20-дневный канал, ATR, идея по тренду с уровнями."""
+    B = fut_continuous(a, 200) if a in FUT_CODE else fut_candles(f["secid"], 200)
+    if len(B) < 40:
+        return None
+    c = [b["c"] for b in B]
+    e20, e50 = ema(c, 20)[-1], ema(c, 50)[-1]
+    last = f.get("last") or c[-1]
+    a14 = atr(B[-15:])
+    hi20, lo20 = max(b["h"] for b in B[-21:-1]), min(b["l"] for b in B[-21:-1])
+    trend = 1 if last > e50 and e20 > e50 else -1 if last < e50 and e20 < e50 else 0
+    r1m = c[-1] / c[-22] - 1 if len(c) > 22 else None
+    idea = None
+    if trend and a14:
+        side = trend
+        dist = 1.5 * a14
+        idea = dict(side=side, entry=last, stop=last - side * dist, take=last + side * 2 * dist)
+    brk = "пробой 20-дневного максимума" if last > hi20 else "пробой 20-дневного минимума" if last < lo20 else None
+    return dict(a=a, f=f, last=last, e20=e20, e50=e50, trend=trend, r1m=r1m, atr=a14, hi20=hi20, lo20=lo20, idea=idea, brk=brk)
+
+
+def commod_plan():
+    fr = fut_fronts(COMMOD_MAIN)
+    rows = []
+    for a in COMMOD_MAIN:
+        f = fr.get(a)
+        if not f:
+            continue
+        try:
+            x = commod_state(a, f)
+        except Exception as e:  # noqa: BLE001
+            log("сырьё", a, e)
+            x = None
+        if x:
+            rows.append(x)
+        time.sleep(0.1)
+    if not rows:
+        return
+    now = now_msk()
+    txt = [f"🛢 <b>Сырьё: план на {now.strftime('%d.%m')}</b> (фьючерсы Мосбиржи, ближайший контракт)", ""]
+    for x in rows:
+        f = x["f"]
+        tr = {1: "🟢 восходящий тренд", -1: "🔴 нисходящий тренд", 0: "⚪ боковик"}[x["trend"]]
+        line = f"<b>{esc(f['name'])}</b> ({f['secid']}): {fmt(x['last'], 2)} {f['unit']} · {pc(f['chg'], 1)} за день" + (f" · {pc(x['r1m'], 1)} за месяц" if x["r1m"] is not None else "") + f"\n  {tr}" + (f", {x['brk']}" if x["brk"] else "")
+        if x["idea"]:
+            i = x["idea"]
+            line += f"\n  Идея по тренду: {'ЛОНГ' if i['side'] > 0 else 'ШОРТ'} от {fmt(i['entry'], 2)}, стоп {fmt(i['stop'], 2)}, тейк {fmt(i['take'], 2)}"
+        rel = FUT[x["a"]][2]
+        if rel and x["trend"]:
+            line += f"\n  Для акций: {' '.join('$' + r for r in rel[:4])} — {'попутный ветер' if x['trend'] > 0 else 'встречный ветер'}"
+        txt.append(line)
+    txt += ["", "<i>Тренд — по EMA 20/50 дневных свечей склеенных контрактов; стоп — 1,5 дневного ATR, тейк — 2 риска. Фьючерсы — плечевой инструмент: гарантийное обеспечение и вариационная маржа.</i>", "#сырьё #фьючерсы"]
+    imgs = []
+    for x in sorted(rows, key=lambda x: -(x["f"].get("val") or 0))[:4]:
+        try:
+            bars = tf_bars(x["f"]["secid"], "4h", "fut")
+            lines = []
+            if x["idea"]:
+                i = x["idea"]
+                lines = [(i["entry"], BLUE, "Вход", "--"), (i["stop"], DN, "Стоп", "-"), (i["take"], UP, "Тейк", "-")]
+            p = candle_chart(bars, os.path.join(OUT, f"c_{x['a']}.png"), f"{x['f']['name']} ({x['f']['secid']}) · свечи 4 часа", lines=lines,
+                             emas=((20, BLUE, "EMA 20"), (50, ORANGE, "EMA 50")), n=90)
+            if p:
+                imgs.append((p, f"{x['f']['name']}: свечи 4 часа"))
+        except Exception as e:  # noqa: BLE001
+            log("график сырья", x["a"], e)
+    PUB.post("\n".join(txt), imgs)
 
 
 # =============================================================================================
@@ -570,6 +704,21 @@ def evening():
 ASSETS_IX = [("IMOEX", "Индекс МосБиржи", "index"), ("RGBI", "Гособлигации (RGBI)", "index")] + [(s, n, "index") for s, n in SECT_IX] + \
             [("CNYRUB_TOM", "Юань, ₽", "fx"), ("GLDRUB_TOM", "Золото, ₽/г", "fx")]
 STOCKS = "SBER GAZP LKOH ROSN NVTK GMKN YDEX T PLZL TATN SNGSP VTBR MGNT CHMF PHOR NLMK ALRS MOEX MTSS X5 IRAO OZON HEAD AFLT".split()
+
+
+def top_stocks(n=50):
+    """Самые торгуемые акции (1–3 эшелон) по среднему обороту за 20 дней; фонды (IFTF) исключены."""
+    if DEMO:
+        return STOCKS
+    try:
+        js = iss("engines/stock/markets/shares/boards/TQBR/securities.json", **{"iss.only": "securities", "securities.columns": "SECID,INSTRID"})
+        eq = [r["SECID"] for r in table(js, "securities") if (r.get("INSTRID") or "EQIN") == "EQIN"]
+        avg = turnover_avg(eq)
+        out = [t for t in sorted(eq, key=lambda t: -(avg.get(t) or 0)) if avg.get(t)][:n]
+        return out or STOCKS
+    except Exception as e:  # noqa: BLE001
+        log("список акций", e)
+        return STOCKS
 
 
 def metrics(bars):
@@ -644,8 +793,16 @@ def weekly():
                 rows.append(dict(id=sid, name=name, kind=kind, m=m, bars=bars))
         except Exception as e:  # noqa: BLE001
             log("актив", sid, e)
+    for a in ["BR", "NG", "GOLD", "SILV", "COPPER", "WHEAT"]:
+        try:
+            bars = fut_continuous(a, 420)
+            m = metrics(bars)
+            if m:
+                rows.append(dict(id=a, name=FUT[a][0], kind="fut", m=m, bars=bars))
+        except Exception as e:  # noqa: BLE001
+            log("сырьё", a, e)
     stocks = []
-    for t in STOCKS:
+    for t in top_stocks(int(os.environ.get("WEEKLY_N", "50"))):
         try:
             bars = share_candles(t, 420)
             m = metrics(bars)
@@ -702,6 +859,9 @@ def weekly():
     fx = [x for x in rows if x["kind"] == "fx"]
     for x in fx:
         txt.append(f"<b>{x['name']}:</b> {fmt(x['m']['last'], 2)} ({pc(x['m']['r1m'], 1)} за месяц, {pc(x['m']['r12m'], 1)} за год).")
+    fu = [x for x in rows if x["kind"] == "fut"]
+    if fu:
+        txt.append("<b>Сырьё (фьючерсы, склейка контрактов):</b> " + "; ".join(f"{x['name']} {pc(x['m']['r1m'], 1)} за месяц, {pc(x['m']['r12m'], 1)} за год — {x['lab']}" for x in sorted(fu, key=lambda x: -x["sc"])) + ".")
     sect = sorted([x for x in rows if x["id"].startswith("MOEX") and x["id"] != "IMOEX"], key=lambda x: -x["sc"])
     if sect:
         txt.append("<b>Сильнейшие сектора по оценке тренда:</b> " + ", ".join(f"{x['name']} ({pc(x['m']['r3m'], 1)} за 3 мес.)" for x in sect[:3]) + ".")
@@ -881,13 +1041,223 @@ def aitest():
     log("ИТОГ:", "вступление получено и прошло проверку" if out != sample else "вступления нет — см. сообщения [ИИ] выше")
 
 
+# =============================================================================================
+# Аномалии цен и объёмов (запускается из новостного бота каждые ~5 минут)
+# =============================================================================================
+def sec_of():
+    """Сектора бумаг — из словаря новостного бота (nlp.js), чтобы не вести два списка."""
+    try:
+        txt = open(os.path.join(HERE, "..", "nlp.js"), encoding="utf-8").read()
+        m = re.search(r"const SEC_OF = (\{.*?\});", txt)
+        return json.loads(m.group(1)) if m else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+SEC_NAME = {"bank": "банки", "oil": "нефтегаз", "metal": "металлурги", "retail": "ритейл", "tech": "IT и связь", "power": "энергетика", "chem": "химия",
+            "devel": "девелоперы", "transport": "транспорт", "consumer": "потребсектор", "industry": "машиностроение"}
+FUT_TH = {"BR": (2.5, 1.2), "NG": (5, 2.5), "TTF": (6, 3), "GOLD": (2, 1), "SILV": (3, 1.5), "PLT": (3.5, 1.8), "PLD": (3.5, 1.8), "COPPER": (2.5, 1.2),
+          "NICKEL": (3, 1.5), "ALUM": (2.5, 1.2), "ZINC": (3, 1.5), "WHEAT": (3, 1.5), "SUGAR": (3, 1.5), "COCOA": (4, 2), "COFFEE": (4, 2)}
+
+
+def recent_trades(t, kind="share", n=500):
+    """Последние сделки (свежие первыми) — кто двигал цену: перевес и крупнейшая сделка."""
+    path = f"engines/stock/markets/shares/boards/TQBR/securities/{t}/trades.json" if kind == "share" else f"engines/futures/markets/forts/securities/{t}/trades.json"
+    cols = "TRADENO,TRADETIME,PRICE,VALUE,QUANTITY,BUYSELL" if kind == "share" else "TRADENO,TRADETIME,PRICE,QUANTITY,BUYSELL"
+    try:
+        return table(iss(path, reversed=1, limit=n, **{"iss.only": "trades", "trades.columns": cols}), "trades")
+    except Exception as e:  # noqa: BLE001
+        log("последние сделки", t, e)
+        return []
+
+
+def news_for(tks, hours=6, types=None):
+    S = load_json("newsbot.json", {}, NEWS_STATE)
+    now = time.time()
+    out = []
+    for c in (S.get("cl") or {}).values():
+        if now - c.get("ts", 0) > hours * 3600:
+            continue
+        tk, ty = (c.get("key") or "|").split("|")[:2]
+        if tk in tks or (types and tk == "РЫНОК" and any(ty.startswith(x) for x in types)):
+            out.append(c)
+    out.sort(key=lambda c: -c.get("ts", 0))
+    return out[:2]
+
+
+def anomaly():
+    now = now_msk()
+    hm = now.strftime("%H:%M")
+    if now.weekday() >= 5 or not ("10:05" <= hm <= "23:50"):
+        log("аномалии: вне торговой сессии")
+        return
+    today = now.date().isoformat()
+    stt = load_json("anomaly.json", {})
+    if stt.get("date") != today:
+        stt = {"date": today, "snap": {}, "sent": {}, "n": 0}
+    md = liquid_shares(400)
+    avg = turnover_avg([r["SECID"] for r in md])
+    rank = {t: i for i, t in enumerate(sorted(avg, key=lambda t: -(avg[t] or 0)))}
+    try:
+        ix = index_candles("IMOEX", 5)
+        ixc = ix[-1]["c"] / ix[-2]["c"] - 1
+    except Exception:  # noqa: BLE001
+        ixc = 0.0
+    try:
+        fut = fut_fronts()
+    except Exception as e:  # noqa: BLE001
+        log("фьючерсы", e)
+        fut = {}
+    secs = sec_of()
+    mins = (now.hour * 60 + now.minute) - 600
+    frac = max(0.06, min(1.0, mins / 530)) if mins < 530 else min(1.25, 1 + (mins - 540) / 1700)
+    found = []
+    by_sec = {}
+    for r in md:
+        by_sec.setdefault(secs.get(r["SECID"], "?"), []).append((r.get("LASTTOPREVPRICE") or 0) / 100)
+    for r in md:
+        t, last, val = r["SECID"], r.get("LAST"), r.get("VALTODAY") or 0
+        if not last:
+            continue
+        chg = (r.get("LASTTOPREVPRICE") or 0) / 100
+        tier = 1 if rank.get(t, 999) < 15 else 2 if rank.get(t, 999) < 50 else 3
+        prev = stt["snap"].get(t)
+        jump = last / prev[0] - 1 if prev and prev[0] else 0
+        a20 = avg.get(t) or 0
+        vx = val / (a20 * frac) if a20 else None
+        exc = chg - ixc
+        why = []
+        if abs(exc) >= (4 if tier == 1 else 6 if tier == 2 else 8) / 100 and val >= (100e6 if tier == 1 else 10e6):
+            why.append(f"цена {pc(chg, 1)} за день при индексе {pc(ixc, 1)}")
+        if abs(jump) >= (2 if tier == 1 else 3.5 if tier == 2 else 5) / 100 and val >= 5e6:
+            why.append(f"рывок {pc(jump, 1)} за последние минуты")
+        if vx and vx >= 4 and val >= (300e6 if tier == 1 else 30e6 if tier == 2 else 15e6):
+            why.append(f"оборот {fmt(vx, 1)}× к обычному на это время ({bln(val)})")
+        stt["snap"][t] = [last, val]
+        if why:
+            lvl = max(abs(exc), abs(jump)) + (vx or 0) / 100
+            old = stt["sent"].get(t)
+            if old and lvl < old[0] * 1.5 and (old[1] > 0) == (chg > 0):
+                continue
+            found.append(dict(t=t, kind="share", name=r.get("NAME", t), last=last, chg=chg, exc=exc, jump=jump, vx=vx, val=val, tier=tier, why=why, lvl=lvl, sec=secs.get(t)))
+    for a, f in fut.items():
+        t, last = f["secid"], f.get("last")
+        if not last:
+            continue
+        th, tj = FUT_TH.get(a, (3, 1.5))
+        prev = stt["snap"].get(t)
+        jump = last / prev[0] - 1 if prev and prev[0] else 0
+        stt["snap"][t] = [last, f.get("val") or 0]
+        why = []
+        if abs(f["chg"]) >= th / 100:
+            why.append(f"цена {pc(f['chg'], 1)} за день")
+        if abs(jump) >= tj / 100:
+            why.append(f"рывок {pc(jump, 1)} за последние минуты")
+        if why:
+            lvl = max(abs(f["chg"]), abs(jump))
+            old = stt["sent"].get(t)
+            if old and lvl < old[0] * 1.5 and (old[1] > 0) == (f["chg"] > 0):
+                continue
+            found.append(dict(t=t, kind="fut", asset=a, name=f["name"], last=last, chg=f["chg"], exc=f["chg"], jump=jump, vx=None, val=f.get("val"), tier=1, why=why, lvl=lvl))
+    found.sort(key=lambda x: -x["lvl"])
+    posted = 0
+    for x in found:
+        if posted >= 3 or stt["n"] >= int(os.environ.get("ANOMALY_PER_DAY", "15")):
+            break
+        try:
+            anomaly_post(x, md, by_sec, ixc)
+            posted += 1
+            stt["n"] += 1
+            stt["sent"][x["t"]] = [x["lvl"], x["chg"]]
+        except Exception as e:  # noqa: BLE001
+            log("аномалия", x["t"], e)
+    save_json("anomaly.json", stt)
+    log("аномалий найдено", len(found), "опубликовано", posted)
+
+
+def anomaly_post(x, md, by_sec, ixc):
+    t, up = x["t"], (x["exc"] if x["kind"] == "share" else x["chg"]) > 0
+    lab = "$" + t if x["kind"] == "share" else f"{FUT[x['asset']][0]} ({t})"
+    txt = [f"🚨 <b>Аномалия: {lab}</b> — {'резкий рост' if up else 'резкое падение'}" + (" на большом объёме" if x.get("vx") and x["vx"] >= 4 else ""),
+           "Что случилось: " + "; ".join(x["why"]) + "."]
+    # кто двигал: последние сделки
+    tr = recent_trades(t, x["kind"])
+    if tr:
+        k = 1
+        if x["kind"] == "fut":
+            f = fut_fronts([x["asset"]]).get(x["asset"]) or {}
+            k = (f.get("step") or 1) / (f.get("minstep") or 1)
+        vals = [(r.get("VALUE") or r.get("PRICE", 0) * r.get("QUANTITY", 0) * k, r.get("BUYSELL"), r) for r in tr]
+        vb = sum(v for v, s_, _ in vals if s_ == "B")
+        vs = sum(v for v, s_, _ in vals if s_ == "S")
+        big = max(vals, key=lambda z: z[0])
+        if vb + vs:
+            txt.append(f"Кто двигал: в последних {len(tr)} сделках {'покупатели' if vb >= vs else 'продавцы'} ({pc((vb - vs) / (vb + vs), 0)} перевес), "
+                       f"крупнейшая — {'покупка' if big[1] == 'B' else 'продажа'} на {bln(big[0])} в {str(big[2].get('TRADETIME', ''))[:5]}.")
+    # причины
+    if x["kind"] == "share":
+        cl = news_for([t])
+    else:
+        cl = news_for(FUT[x["asset"]][2], types={"BR": ["oil_"], "NG": ["oil_"], "TTF": ["oil_"]}.get(x["asset"]))
+    if cl:
+        txt.append("Возможная причина — свежие новости:")
+        for c in cl:
+            head = re.sub(r"\s+", " ", html.unescape(c["first"].get("tx") or ""))[:170]
+            txt.append(f"• {esc(head)} — <a href=\"{c['first']['link']}\">{esc(c['first'].get('ch', ''))}</a>")
+    else:
+        txt.append("Возможная причина: в публичных новостях за 6 часов объяснения нет — так бывает при выходе крупного участника, перед корпоративными событиями (отчётность, дивиденды, допэмиссия) или из-за слухов. Осторожно: такие движения часто частично откатываются.")
+    # контекст и влияние
+    if x["kind"] == "share":
+        sec = x.get("sec")
+        peers = by_sec.get(sec, []) if sec else []
+        pm = st.mean(peers) if len(peers) >= 3 else None
+        ctx = f"Индекс МосБиржи {pc(ixc, 1)}" + (f", сектор «{SEC_NAME.get(sec, sec)}» в среднем {pc(pm, 1)}" if pm is not None else "")
+        own = pm is None or abs(x["chg"] - pm) > abs(pm)
+        txt.append(ctx + (" — движение индивидуальное, не всего рынка." if own else " — двигается весь сектор."))
+        eff = []
+        if sec:
+            peers_t = [r["SECID"] for r in md if sec_of_cache().get(r["SECID"]) == sec and r["SECID"] != t][:4]
+            if peers_t:
+                eff.append(f"бумаги сектора ({' '.join('$' + p for p in peers_t)}) — {'подтягиваются вверх' if up else 'под давлением'}, если причина отраслевая")
+        if x["tier"] == 1:
+            eff.append(f"индекс МосБиржи — бумага из числа самых торгуемых, её движение {'поддерживает' if up else 'тянет вниз'} индекс")
+        txt.append("На что может повлиять: " + ("; ".join(eff) if eff else "в основном на саму бумагу — во 2–3 эшелоне такие рывки редко передаются рынку") + ".")
+    else:
+        rel = FUT[x["asset"]][2]
+        if rel:
+            txt.append(f"На что может повлиять: {' '.join('$' + r for r in rel)} — {'позитивно' if up else 'негативно'} для выручки экспортёров этого сырья; для рубля — {'поддержка' if up and x['asset'] in ('BR', 'NG', 'TTF') else 'давление' if x['asset'] in ('BR', 'NG', 'TTF') else 'влияние слабое'}.")
+    txt += ["", "<i>Аномалия — движение цены или оборота намного сильнее обычного. Это повод присмотреться, а не готовый сигнал на сделку.</i>", "#аномалия" + (" #" + t if x["kind"] == "share" else "")]
+    import card as cardmod
+    src = os.path.join(OUT, f"an_{t}.json")
+    img = os.path.join(OUT, f"an_{t}.png")
+    json.dump({"t": t, "kind": x["kind"], "tf": "1h", "name": lab, "label": "аномалия", "sign": 1 if up else -1,
+               "caption": ("Кто-то очень торопится купить" if up else "Кто-то очень торопится продать") if (x.get("vx") or 0) >= 4 else ("Резкий рывок вверх" if up else "Резкий обвал"),
+               "fact": "; ".join(x["why"])}, open(src, "w", encoding="utf-8"), ensure_ascii=False)
+    try:
+        cardmod.main(src, img)
+    except Exception as e:  # noqa: BLE001
+        log("картинка аномалии", e)
+        img = None
+    PUB.post("\n".join(txt), [(img, f"{lab}: свечи 1 час")] if img and os.path.exists(img) else None)
+
+
+_SEC = None
+
+
+def sec_of_cache():
+    global _SEC
+    if _SEC is None:
+        _SEC = sec_of()
+    return _SEC
+
+
 def main():
     mode = next((a for a in sys.argv[1:] if not a.startswith("--")), None) or os.environ.get("MODE") or SCHED.get(os.environ.get("SCHED", "").strip())
     if not mode:
         h = now_msk().strftime("%H:%M")
         mode = "morning" if "06:00" <= h < "08:30" else "pulse"
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check}[mode]()
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan}[mode]()
 
 
 if __name__ == "__main__":

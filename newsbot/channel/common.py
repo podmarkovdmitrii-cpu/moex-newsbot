@@ -57,6 +57,8 @@ def fmt(x, d=2):
 def pc(x, d=1, sign=True):
     if x is None:
         return "—"
+    if round(abs(x) * 100, d) == 0:
+        return f"{0:.{d}f}".replace(".", ",") + "%"
     return (f"{x * 100:+.{d}f}" if sign else f"{x * 100:.{d}f}").replace(".", ",").replace("-", "−") + "%"
 
 
@@ -123,8 +125,9 @@ def candles(path, days=420, interval=24):
         if len(part) < 500:
             break
         start += len(part)
-    B = [dict(t=r["begin"][:10], o=r["open"], h=r["high"], l=r["low"], c=r["close"], v=r.get("value") or r.get("volume") or 0) for r in rows if r.get("close")]
-    return adjust_splits(B)
+    tl = 10 if interval in (24, 7, 31) else 16
+    B = [dict(t=r["begin"][:tl], o=r["open"], h=r["high"], l=r["low"], c=r["close"], v=r.get("value") or r.get("volume") or 0) for r in rows if r.get("close")]
+    return adjust_splits(B) if tl == 10 else B
 
 
 def adjust_splits(B):
@@ -151,6 +154,154 @@ def index_candles(t, days=420):
     if DEMO:
         return demo_bars(t, days)
     return candles(f"engines/stock/markets/index/securities/{t}/candles.json", days)
+
+
+# ---------------------------------------------------------------------------------------------
+# Таймфреймы 1д / 4ч / 1ч и сырьевые фьючерсы FORTS
+# ---------------------------------------------------------------------------------------------
+TF_RU = {"1d": "1 день", "4h": "4 часа", "1h": "1 час"}
+# базовый актив → (название, единица цены, связанные акции)
+FUT = {
+    "BR": ("Нефть Brent", "$/барр.", ["LKOH", "ROSN", "TATN", "SNGS", "SIBN", "BANEP"]),
+    "NG": ("Газ Henry Hub", "$/MMBtu", ["NVTK", "GAZP"]),
+    "TTF": ("Газ TTF, Европа", "€/МВт·ч", ["GAZP", "NVTK"]),
+    "GOLD": ("Золото", "$/унц.", ["PLZL", "UGLD", "SELG", "LNZL"]),
+    "SILV": ("Серебро", "$/унц.", ["PLZL", "SELG"]),
+    "PLT": ("Платина", "$/унц.", ["GMKN"]),
+    "PLD": ("Палладий", "$/унц.", ["GMKN"]),
+    "COPPER": ("Медь", "$/т", ["GMKN"]),
+    "NICKEL": ("Никель", "$/т", ["GMKN"]),
+    "ALUM": ("Алюминий", "$/т", ["RUAL", "ENPG"]),
+    "ZINC": ("Цинк", "$/т", []),
+    "WHEAT": ("Пшеница", "₽/т", ["NKHP", "RAGR"]),
+    "SUGAR": ("Сахар", "₽/т", ["RAGR"]),
+    "COCOA": ("Какао", "$/т", []),
+    "COFFEE": ("Кофе", "$/фунт", []),
+}
+
+
+def fut_fronts(assets=None):
+    """Ближайший ликвидный контракт по каждому сырьевому активу: максимум оборота, но не за 3 дня до экспирации."""
+    assets = assets or list(FUT)
+    if DEMO:
+        return {a: dict(secid=a + "Z6", asset=a, name=FUT[a][0], unit=FUT[a][1], last=100.0, chg=0.01, val=1e9, step=1.0, minstep=1.0, exp="2026-12-18") for a in assets[:5]}
+    js = iss("engines/futures/markets/forts/securities.json", **{"iss.only": "securities,marketdata",
+             "securities.columns": "SECID,SHORTNAME,ASSETCODE,LASTTRADEDATE,MINSTEP,STEPPRICE,PREVSETTLEPRICE",
+             "marketdata.columns": "SECID,LAST,VALTODAY,LASTTOPREVPRICE,OPENPOSITION,UPDATETIME"})
+    md = {r["SECID"]: r for r in table(js, "marketdata")}
+    soon = (dt.date.today() + dt.timedelta(days=3)).isoformat()
+    out = {}
+    for r in table(js, "securities"):
+        a = r.get("ASSETCODE")
+        if a not in assets or (r.get("LASTTRADEDATE") or "9") <= soon:
+            continue
+        m = md.get(r["SECID"]) or {}
+        v = m.get("VALTODAY") or 0
+        if a in out and out[a]["val"] >= v:
+            continue
+        last = m.get("LAST") or r.get("PREVSETTLEPRICE")
+        out[a] = dict(secid=r["SECID"], asset=a, name=FUT[a][0], unit=FUT[a][1], last=last, chg=(m.get("LASTTOPREVPRICE") or 0) / 100,
+                      val=v, step=r.get("STEPPRICE") or 0, minstep=r.get("MINSTEP") or 1, exp=r.get("LASTTRADEDATE"), oi=m.get("OPENPOSITION"))
+    return out
+
+
+FUT_CODE = {"BR": ("BR", "m"), "NG": ("NG", "m"), "GOLD": ("GD", "q"), "SILV": ("SV", "q"), "COPPER": ("CE", "q"), "WHEAT": ("W4", "m"),
+            "PLT": ("PT", "q"), "PLD": ("PD", "q"), "ALUM": ("AN", "q"), "NICKEL": ("NC", "q"), "TTF": ("FF", "m")}
+MCODE = "FGHJKMNQUVXZ"
+
+
+def fut_continuous(asset, days=400):
+    """Непрерывный ряд по ближайшим контрактам (склейка на экспирации с обратной корректировкой цен)."""
+    if DEMO:
+        return demo_bars(asset, days)
+    pre, per = FUT_CODE[asset]
+    today = dt.date.today()
+    codes = []
+    for k in range(-15, 4):
+        y, m = today.year + (today.month - 1 + k) // 12, (today.month - 1 + k) % 12 + 1
+        if per == "q" and m not in (3, 6, 9, 12):
+            continue
+        codes.append(f"{pre}{MCODE[m - 1]}{y % 10}")
+    series = []
+    for sid in codes:
+        try:
+            B = candles(f"engines/futures/markets/forts/securities/{sid}/candles.json", days + 120, 24)
+        except Exception:  # noqa: BLE001
+            B = []
+        if len(B) >= 5:
+            series.append(B)
+        time.sleep(0.05)
+    if not series:
+        return []
+    series.sort(key=lambda B: B[-1]["t"])
+    out = []
+    for B in series:
+        if not out:
+            out = [dict(b) for b in B]
+            continue
+        last_t = out[-1]["t"]
+        nxt = [b for b in B if b["t"] > last_t]
+        same = {b["t"]: b for b in B}
+        # день склейки: последний общий день — по нему корректируем прошлую историю
+        common_t = [b["t"] for b in out if b["t"] in same]
+        if common_t:
+            ct = common_t[-1]
+            old = next(b for b in out if b["t"] == ct)
+            r = same[ct]["c"] / old["c"] if old["c"] else 1
+            out = [dict(b, o=b["o"] * r, h=b["h"] * r, l=b["l"] * r, c=b["c"] * r) for b in out if b["t"] <= ct]
+            nxt = [b for b in B if b["t"] > ct]
+        out += [dict(b) for b in nxt]
+    frm = (today - dt.timedelta(days=days)).isoformat()
+    return [b for b in out if b["t"] >= frm]
+
+
+def fut_candles(secid, days=180, interval=24):
+    if DEMO:
+        return demo_bars(secid, days)
+    return candles(f"engines/futures/markets/forts/securities/{secid}/candles.json", days, interval)
+
+
+def agg_bars(B, hours=4):
+    """Часовые свечи → 4-часовые (по календарным блокам 0–4, 4–8 … часов)."""
+    out = []
+    for b in B:
+        key = b["t"][:11] + f"{int(b['t'][11:13]) // hours * hours:02d}:00"
+        if out and out[-1]["t"] == key:
+            o = out[-1]
+            o["h"], o["l"], o["c"], o["v"] = max(o["h"], b["h"]), min(o["l"], b["l"]), b["c"], o["v"] + b["v"]
+        else:
+            out.append(dict(t=key, o=b["o"], h=b["h"], l=b["l"], c=b["c"], v=b["v"]))
+    return out
+
+
+def tf_bars(t, tf="1d", kind=None):
+    """Свечи бумаги/индекса/фьючерса на таймфрейме 1d (≈180 дней), 4h (≈45 дней), 1h (≈8 торговых дней)."""
+    kind = kind or ("index" if t in ("IMOEX", "RGBI", "RTSI") or t.startswith("MOEX") else "share")
+    if DEMO:
+        return demo_bars(t, 180)
+    if kind == "fut":
+        f = lambda d, i: fut_candles(t, d, i)
+    elif kind == "index":
+        f = lambda d, i: candles(f"engines/stock/markets/index/securities/{t}/candles.json", d, i)
+    else:
+        f = lambda d, i: candles(f"engines/stock/markets/shares/boards/TQBR/securities/{t}/candles.json", d, i)
+    if tf == "1h":
+        return f(12, 60)[-80:]
+    if tf == "4h":
+        return agg_bars(f(45, 60))[-90:]
+    return f(260, 24)[-150:]
+
+
+def atr(B, n=14):
+    if len(B) < 2:
+        return None
+    tr = [max(b["h"] - b["l"], abs(b["h"] - p["c"]), abs(b["l"] - p["c"])) for p, b in zip(B, B[1:])]
+    tr = tr[-n:]
+    return sum(tr) / len(tr) if tr else None
+
+
+def tlab(t):
+    return f"{t[8:10]}.{t[5:7]}" + (f" {t[11:16]}" if len(t) > 10 else "")
 
 
 def currency_candles(t, days=420):
@@ -461,7 +612,7 @@ def candle_chart(bars, path, title, lines=None, emas=((20, BLUE, "EMA 20"), (100
     ax.set_xlim(-1, right + 9)
     step = max(1, m // 6)
     axv.set_xticks(list(range(0, m, step)))
-    axv.set_xticklabels([B[k]["t"][5:] for k in range(0, m, step)], color=FG, fontsize=8)
+    axv.set_xticklabels([tlab(B[k]["t"]) for k in range(0, m, step)], color=FG, fontsize=8)
     plt.setp(ax.get_xticklabels(), visible=False)
     axv.set_yticks([])
     leg = ax.legend(loc="upper left", fontsize=8, facecolor=BG, edgecolor=GRID)

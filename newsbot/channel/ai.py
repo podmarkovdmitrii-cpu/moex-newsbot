@@ -17,7 +17,7 @@ BASE = (os.environ.get("LLM_BASE_URL") or "").rstrip("/")
 KEY = os.environ.get("LLM_API_KEY") or ""
 AUTH = (os.environ.get("LLM_AUTH") or "bearer").lower()  # bearer | x-api-key
 MODELS = [m for m in [os.environ.get("LLM_MODEL"), "claude-sonnet-4-5", "claude-sonnet-4-20250514", "claude-3-5-haiku-latest"] if m]
-MAX_PER_DAY = int(os.environ.get("LLM_MAX_PER_DAY") or 40)
+MAX_PER_DAY = int(os.environ.get("LLM_MAX_PER_DAY") or 70)
 ON = bool(BASE and KEY and os.environ.get("LLM_OFF") != "1")
 
 SYSTEM = (
@@ -58,7 +58,7 @@ def check(lead, source):
     return 40 <= len(lead) <= 500
 
 
-def _call(model, text, timeout=60):
+def _call(model, text, timeout=int(os.environ.get("LLM_TIMEOUT_S") or 100)):
     headers = {"content-type": "application/json", "anthropic-version": "2023-06-01"}
     if AUTH == "x-api-key":
         headers["x-api-key"] = KEY
