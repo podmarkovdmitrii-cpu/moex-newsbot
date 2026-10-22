@@ -173,7 +173,10 @@ async function publish(S, html, reply, useAi, photo) {
   const full = html + `\n\n<i>${DISCLAIMER}</i>`;
   let id = null;
   if (photo && fs.existsSync(photo) && !DRY && TG_CHAT) {
-    const [cap, rest] = splitCaption(full);
+    const disc = `\n\n<i>${DISCLAIMER}</i>`;
+    let [cap, rest] = splitCaption(html, 1000 - DISCLAIMER.length - 2);
+    cap += disc;
+    if (rest) rest += disc;
     id = await tgPhoto(photo, cap, reply);
     if (id && rest) await tgSend(rest); // продолжение отдельным сообщением (не ответом — без цитаты-дубля)
     if (!id) id = await tgSend(full, reply);
