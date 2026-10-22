@@ -473,7 +473,26 @@ class Publisher:
             return None
         link = None
         photo_link = None
-        if self.tg_chat:
+        if self.tg_chat and len(photos) == 1 and not document:
+            # одна картинка: картинка с подписью (до 1024 знаков), остаток — следующим сообщением
+            try:
+                blocks, cap, k = text.split("\n\n"), "", 0
+                for k, bl in enumerate(blocks):
+                    nx = cap + ("\n\n" if cap else "") + bl
+                    if len(re.sub(r"<[^>]+>", "", nx)) > 1000:
+                        break
+                    cap = nx
+                else:
+                    k = len(blocks)
+                with open(photos[0][0], "rb") as f:
+                    pm = self._tg("sendPhoto", {"chat_id": self.tg_chat, "caption": cap or photos[0][1][:1000], "parse_mode": "HTML"}, {"photo": (os.path.basename(photos[0][0]), f.read())})
+                link = photo_link = self.tg_link(pm)
+                rest = "\n\n".join(blocks[k:]) if cap else text
+                for part in split_text(rest, 4000) if rest.strip() else []:
+                    self._tg("sendMessage", {"chat_id": self.tg_chat, "text": part, "parse_mode": "HTML", "disable_web_page_preview": True})
+            except Exception as e:  # noqa: BLE001
+                log("Telegram: ошибка", e)
+        elif self.tg_chat:
             try:
                 first = None
                 for part in split_text(text, 4000):

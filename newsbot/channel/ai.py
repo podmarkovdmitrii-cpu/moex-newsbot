@@ -52,6 +52,10 @@ def check(lead, source):
     if bad_n or bad_t:
         _log("вступление отброшено: лишние числа", sorted(bad_n)[:5], "тикеры", sorted(bad_t)[:5])
         return False
+    cyr = len(re.findall(r"[А-Яа-яЁё]", lead))
+    if cyr < 0.5 * len(re.findall(r"[A-Za-zА-Яа-яЁё]", lead)) or re.match(r"(?i)\s*(the user|i need|let me|okay|here)", lead):
+        _log("вступление отброшено: ответ не по-русски / рассуждения модели")
+        return False
     if re.search(r"(?i)\b(покупайте|продавайте|рекомендуем|советуем|стоит купить|стоит продать)\b", lead):
         _log("вступление отброшено: похоже на рекомендацию")
         return False
