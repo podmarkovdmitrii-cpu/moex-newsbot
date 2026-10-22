@@ -51,6 +51,20 @@ jobs:
           BOT=$(find . -name bot.js -path '*newsbot*' | head -1)
           if [ -z "$BOT" ]; then echo "Не найден newsbot/bot.js — загрузите папку newsbot в репозиторий"; exit 1; fi
           node "$BOT"
+      - name: Аномалии цен и объёмов (акции 1–3 эшелона и сырьё)
+        continue-on-error: true
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_PUBLIC_TOKEN: ${{ secrets.TG_PUBLIC_TOKEN }}
+          TG_PUBLIC_CHAT: ${{ vars.TG_PUBLIC_CHAT }}
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/newsbot-state/channel
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://lenec.tech' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'claude-opus-5-5' }}
+          LLM_AUTH: ${{ vars.LLM_AUTH }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          MODE: anomaly
+        run: python newsbot/channel/jobs.py anomaly
       - name: Сохранить состояние бота
         if: always()
         uses: actions/cache/save@v4
