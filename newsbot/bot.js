@@ -27,6 +27,7 @@ const RELIAB = fs.existsSync(path.join(HERE, 'reliability.json')) ? JSON.parse(f
 const DIVS = JSON.parse(fs.readFileSync(path.join(HERE, 'divhist.json'), 'utf8'));
 const UNIVERSE = 'SBER SBERP GAZP LKOH ROSN NVTK GMKN YDEX T PLZL TATN TATNP SNGS SNGSP VTBR MGNT CHMF PHOR NLMK ALRS MOEX MTSS X5 IRAO RUAL AFLT OZON VKCO SMLT AFKS MAGN HEAD POSI SVCB BSPB UGLD ENPG SIBN TRNFP PIKK FLOT SGZH BELU MTLR HYDR FEES RTKM CBOM AGRO LENT MVID LSRG AKRN NMTP UPRO MSNG RASP KMAZ SELG BANEP GCHE'.split(' ');
 const KNOWN = new Set(UNIVERSE.concat(['IMOEX']));
+const KNOWN_NEWS = new Set(UNIVERSE.concat(Object.keys(N.ALIASES))); // новости: и 2–3 эшелон
 
 // ---------- каналы: тип источника и как часто проверять ----------
 const CHANNELS = {
@@ -131,7 +132,7 @@ async function collectNews(S) {
   // разметка
   return items.map(p => {
     const c = N.classify(p.tx);
-    let tks = N.tickersIn(p.tx, KNOWN).filter(t => t !== 'IMOEX');
+    let tks = N.subjectTickers(p.tx, KNOWN_NEWS).filter(t => t !== 'IMOEX');
     const types = c.types.length ? c.types : (tks.length && c.s ? [['tone', 0]] : []);
     let score = 0, best = null;
     for (const [ty, d0] of types) {

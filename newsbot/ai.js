@@ -98,7 +98,9 @@ async function lead(html, S) {
 
 // Новость целиком своими словами + подпись-мем для картинки + короткий факт для картинки.
 const NEWS_SYSTEM = 'Ты редактор русскоязычного паблика о рынке акций Мосбиржи. Тебе дают исходный текст новости из Telegram-канала и контекст (тикеры, тип события). ' +
-  'Верни строго JSON без пояснений: {"retell": "...", "fact": "...", "caption": "..."}. ' +
+  'Верни строго JSON без пояснений: {"relevant": true|false, "tickers": ["..."], "retell": "...", "fact": "...", "caption": "..."}. ' +
+  'relevant — влияет ли новость на российский фондовый рынок (акции Мосбиржи, ОФЗ, рубль, сырьё, ставка Банка России); новости о зарубежных компаниях и иностранных центробанках без связи с Россией, награды, протокольные встречи, культура, спорт — false. ' +
+  'tickers — только те тикеры из списка кандидатов, о компаниях которых новость НАПРЯМУЮ (компания — участник события); случайные упоминания, тёзки (самолёт как техника, «пик», «полюс» как слово), списки в конце поста — не включай. ' +
   'retell — новость ЦЕЛИКОМ своими словами: все ключевые факты, цифры, даты, кто что сказал или сделал, 2–5 предложений, до 700 знаков; не копируй фразы источника дословно; ' +
   'без эмодзи, хештегов, ссылок, HTML, Markdown и рекламы канала-источника. ' +
   'fact — суть одной фразой до 160 знаков. ' +
@@ -106,20 +108,21 @@ const NEWS_SYSTEM = 'Ты редактор русскоязычного пабл
   'если новость о гибели людей, катастрофах, атаках, болезнях или другой трагедии — caption нейтральная и серьёзная, без шуток. ' +
   'Только факты из исходного текста: не добавляй числа, даты и тикеры, которых там нет.';
 
-async function newsPack(S, srcText, ctx) {
+async function newsPack(S, srcText, ctx, cands) {
   const src = plain(srcText);
   const txt = await ask(S, `Контекст: ${ctx}\n\nИсходный текст новости:\n${src}`, NEWS_SYSTEM, 900);
   if (!txt) return null;
   let js;
   try { js = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1)); } catch (e) { log('ответ не JSON'); return null; }
   const clean = v => String(v || '').replace(/[*#]/g, '').replace(/\s+/g, ' ').trim();
-  const out = { retell: clean(js.retell), fact: clean(js.fact), caption: clean(js.caption).replace(/^[«"]|[»"]$/g, '') };
+  const out = { retell: clean(js.retell), fact: clean(js.fact), caption: clean(js.caption).replace(/^[«"]|[»"]$/g, ''),
+    relevant: js.relevant !== false, tickers: Array.isArray(js.tickers) ? js.tickers.map(t => String(t).replace(/^\$/, '').toUpperCase()).filter(t => !cands || cands.includes(t)) : null };
   const base = src + ' ' + ctx;
   const ok = v => { const sn = nums(base), st = tks(base); return ![...nums(v)].some(x => !sn.has(x)) && ![...tks(v)].some(x => !st.has(x)) && !/(покупайте|продавайте|рекомендуем|советуем|стоит купить|стоит продать)/i.test(v); };
   for (const k of ['retell', 'fact', 'caption']) if (out[k] && !ok(out[k])) { log('отброшено', k, ': числа/тикеры не из новости или похоже на совет'); out[k] = ''; }
   if (out.retell.length < 40) out.retell = '';
   if (out.caption.length > 120) out.caption = '';
-  log('новость пересказана:', out.retell ? 'да' : 'нет', '| подпись:', out.caption || '—');
+  log('новость:', out.relevant ? 'по делу' : 'НЕ влияет на рынок', '| тикеры:', (out.tickers || []).join(',') || '—', '| пересказ:', out.retell ? 'да' : 'нет', '| подпись:', out.caption || '—');
   return out;
 }
 

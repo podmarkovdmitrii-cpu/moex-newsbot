@@ -36,7 +36,7 @@ const SRC = {
 };
 const TRUSTED = new Set(Object.entries(SRC).filter(([, v]) => ['офиц', 'политик', 'агентство'].includes(v[1])).map(([k]) => k).concat(['rbc_news', 'vedomosti', 'kommersant']));
 const POLIT = new Set(Object.entries(SRC).filter(([, v]) => v[1] === 'политик' || v[1] === 'офиц').map(([k]) => k));
-const SEC_RU = { bank: 'банки', oil: 'нефтегаз', metal: 'металлурги', retail: 'ритейл', tech: 'IT и связь', power: 'энергетика', chem: 'химия', devel: 'девелоперы', transport: 'транспорт' };
+const SEC_RU = { consumer: 'потребсектор', industry: 'машиностроение', bank: 'банки', oil: 'нефтегаз', metal: 'металлурги', retail: 'ритейл', tech: 'IT и связь', power: 'энергетика', chem: 'химия', devel: 'девелоперы', transport: 'транспорт' };
 const TYPE_RU = {
   div_rec: 'дивиденды', div_cut: 'отказ от дивидендов', buyback: 'обратный выкуп', spo: 'допэмиссия/SPO', ipo: 'IPO', results_up: 'рост прибыли/выручки', results_down: 'снижение прибыли',
   guidance_up: 'прогноз повышен', guidance_down: 'прогноз понижен', analyst_up: 'аналитики повысили оценку', analyst_down: 'аналитики понизили оценку', sanctions: 'санкции', legal: 'суды, штрафы, обыски',
@@ -49,7 +49,10 @@ const STRONG_RUMOR = /источник|по данным|по информаци
 const INSIDER = /(член[а-я]* совета директоров|председател[а-я]* совета директоров|гендиректор|генеральн[а-я]* директор|глав[а-я]* компании|президент компании|председател[а-я]* правления|топ-менеджер|менеджмент|инсайдер|мажоритар|крупн[а-я]* акционер|основател[а-я]*|владел[а-я]*|акционер[а-я]*)[^.]{0,80}(купил|приобр[её]л|продал|увеличил[а-я]* (свою )?долю|снизил[а-я]* (свою )?долю|сократил[а-я]* (свою )?долю|нарастил|реализовал)/i;
 
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-const pc = (x, d = 1) => (x >= 0 ? '+' : '−') + Math.abs(x * 100).toFixed(d).replace('.', ',') + '%';
+const plural = (n, a, b, c) => { const m = n % 100, k = n % 10; return (m >= 11 && m <= 14) ? c : k === 1 ? a : (k >= 2 && k <= 4) ? b : c; };
+const cases = n => `${n} ${plural(n, 'случай', 'случая', 'случаев')}`;
+const fmt = (x, d = 2) => x == null ? '—' : Number(x).toLocaleString('ru-RU', { minimumFractionDigits: d, maximumFractionDigits: d }).replace(/\u00a0/g, ' ');
+const pc = (x, d = 1) => { const v = Math.abs(x * 100).toFixed(d); return (Number(v) === 0 ? '' : x >= 0 ? '+' : '−') + v.replace('.', ',') + '%'; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), '[паблик]', ...a);
 const src = ch => (SRC[ch] || [ch])[0];
@@ -68,14 +71,14 @@ function compLine(tk, ty, s) {
   const v = compImpact(tk, ty, s);
   if (!v) return `$${tk} — истории по такому типу новостей мало`;
   const arrow = v.a5 >= 0 ? '▲' : '▼';
-  return `$${tk} ${arrow} ${strength(v.a5)}: ${pc(v.a5, 2)} к индексу за 5 дн., ${pc(v.a1, 2)} за день; обгоняла индекс в ${Math.round(v.up5 * 100)}% случаев (${v.n} случаев${v.lvl !== 'бумага' ? ', оценка по ' + (v.lvl === 'сектор' ? 'сектору' : 'всем бумагам') : ''})` +
+  return `$${tk} ${arrow} ${strength(v.a5)}: ${pc(v.a5, 2)} к индексу за 5 дн., ${pc(v.a1, 2)} за день; обгоняла индекс в ${Math.round(v.up5 * 100)}% случаев (${cases(v.n)}${v.lvl !== 'бумага' ? ', оценка по ' + (v.lvl === 'сектор' ? 'сектору' : 'всем бумагам') : ''})` +
     (Math.abs(v.pre) >= 0.003 ? `; до публикации цена уже сдвигалась на ${pc(v.pre)}` : '');
 }
 function mktLines(ty, s) {
   const k = typeKey(ty, s), m = IMPACT.mkt[k];
   if (!m) return [];
   const secs = Object.entries(m.sec || {}).sort((a, b) => Math.abs(b[1].r5) - Math.abs(a[1].r5)).slice(0, 4);
-  return [`Индекс МосБиржи ${m.r5 >= 0 ? '▲' : '▼'} ${strength(m.r5)}: ${pc(m.r5, 2)} за 5 дн., ${pc(m.r1, 2)} за день; рост в ${Math.round(m.up5 * 100)}% случаев (${m.n} случаев)`,
+  return [`Индекс МосБиржи ${m.r5 >= 0 ? '▲' : '▼'} ${strength(m.r5)}: ${pc(m.r5, 2)} за 5 дн., ${pc(m.r1, 2)} за день; рост в ${Math.round(m.up5 * 100)}% случаев (${cases(m.n)})`,
     'Сильнее всего реагируют: ' + secs.map(([sec, v]) => `${SEC_RU[sec] || sec} ${pc(v.r5, 2)}`).join(', ')];
 }
 function rumorProb(c) {
@@ -172,7 +175,7 @@ async function publish(S, html, reply, useAi, photo) {
   if (photo && fs.existsSync(photo) && !DRY && TG_CHAT) {
     const [cap, rest] = splitCaption(full);
     id = await tgPhoto(photo, cap, reply);
-    if (id && rest) await tgSend(rest, id);
+    if (id && rest) await tgSend(rest); // продолжение отдельным сообщением (не ответом — без цитаты-дубля)
     if (!id) id = await tgSend(full, reply);
   } else {
     if (photo) console.log('[картинка] ' + photo);
@@ -216,31 +219,77 @@ function quoteFull(tx, link) {
 }
 function headline(c) { return srcFull(c).slice(0, 360); }
 // Текст новости для поста: пересказ целиком (ИИ) или цитата без обрыва; плюс картинка
-async function newsBody(S, c, label, tk, s) {
+// Российский рынок: новости «рынка» без связи с Россией (Netflix, IPO Anthropic, ЦБ Турции…) в паблик не идут
+const RU_REL = /росси|рф\b|рубл|мосбирж|imoex|ммвб|офз|банк росси|\bцб\b|минфин|набиуллин|силуанов|кремл|путин|песков|госдум|правительств|санкц|нефт|brent|urals|газ|опек|экспорт|импорт|украин|переговор|уиткофф|бюджет|ндпи|налог|инфляц|ключев/i;
+function marketRelevant(text) { return RU_REL.test(text) && !/^(?=.*(netflix|apple|tesla|nvidia|anthropic|openai|microsoft|google|amazon|meta\b))(?!.*(росси|рубл|мосбирж))/is.test(text); }
+
+// Сигнал по новости: направление — по истории реакций бумаги на такие новости, уровни — по дневному ATR (card.py)
+function newsSide(tk, ty, s) {
+  const v = compImpact(tk, ty, s);
+  if (!v || v.n < 15) return { side: 0, v, why: 'истории реакций по такому типу новостей мало' };
+  const edge = v.up5 - 0.5;
+  if (Math.abs(v.a5) < 0.0025 || Math.abs(edge) < 0.04 || Math.sign(v.a5) !== Math.sign(edge)) return { side: 0, v, why: 'историческая реакция слабая или неустойчивая' };
+  return { side: Math.sign(v.a5), v };
+}
+function sigBlock(tk, ns, card, rumor) {
+  const v = ns.v;
+  if (!ns.side) return `🎯 <b>Сигнал по $${tk}:</b> нет — ${ns.why}.`;
+  const dir = ns.side > 0 ? 'ЛОНГ' : 'ШОРТ';
+  let t = `🎯 <b>Сигнал: ${dir} $${tk}</b>${rumor ? ' — только если новость подтвердится' : ''}\n`;
+  if (card && card.entry) t += `Вход ≈ ${fmt(card.entry, 2)} · стоп ${fmt(card.stop, 2)} (${pc(-card.risk, 1)}) · тейк ${fmt(card.take, 2)} (${pc(2 * card.risk, 1)}) · горизонт до 5 дней\n`;
+  t += `Основание: после таких новостей $${tk} ${v.a5 >= 0 ? 'обгоняла' : 'отставала от'} индекс${v.a5 >= 0 ? '' : 'а'} в среднем на ${pc(Math.abs(v.a5), 2).replace(/^[+−]/, '')} за 5 дней, в ${Math.round((v.a5 >= 0 ? v.up5 : 1 - v.up5) * 100)}% случаев (выборка ${v.n}${v.lvl !== 'бумага' ? ', оценка по ' + (v.lvl === 'сектор' ? 'сектору' : 'всем бумагам') : ''}).`;
+  if (Math.sign(v.pre) === ns.side && Math.abs(v.pre) >= Math.abs(v.a5)) t += '\n⚠️ Обычно цена успевает сдвинуться ещё до публикации — часть реакции может быть уже отыграна.';
+  if (ns.side < 0) t += '\n⚠️ Шорт требует маржинальной торговли; перенос позиции платный.';
+  return t;
+}
+// Вероятная реакция рынка: сектор бумаги и индекс на такой тип новостей
+function reactBlock(tk, ty, s) {
+  const k = typeKey(ty, s), out = [];
+  const sec = tk && tk !== 'РЫНОК' ? (IMPACT.secOf[tk] || N.SEC_OF[tk]) : null;
+  const sv = sec && IMPACT.sec[sec + '|' + k];
+  if (sv && sv.n >= 30) out.push(`Сектор «${SEC_RU[sec] || sec}» ${sv.a5 >= 0 ? '▲' : '▼'} ${strength(sv.a5)}: ${pc(sv.a5, 2)} к индексу за 5 дн. (${cases(sv.n)})`);
+  out.push(...mktLines(ty, s));
+  return out.length ? '<b>Вероятная реакция рынка (история 2017–2026):</b>\n' + out.map(esc).join('\n') : '';
+}
+
+async function newsBody(S, c, label, tk, s, ty, rumor) {
   const p = srcPick(c);
   const link = p ? p[1].link : c.first.link;
   const full = srcFull(c);
-  const pack = AI.ON ? await AI.newsPack(S, full, `тикеры: ${(c.tks || []).map(t => '$' + t).join(' ') || 'рынок в целом'}; событие: ${label}`) : null;
+  if (tk === 'РЫНОК' && !marketRelevant(full)) return { skip: 'нет связи с российским рынком' };
+  const cands = (c.tks || []).filter(t => t !== 'РЫНОК');
+  const pack = AI.ON ? await AI.newsPack(S, full, `тикеры-кандидаты: ${cands.map(t => '$' + t + ' (' + ((N.ALIASES[t] || [])[0] || '').trim() + ')').join(', ') || 'нет — новость о рынке в целом'}; событие: ${label}`, cands) : null;
+  if (pack && pack.relevant === false) return { skip: 'ИИ: не влияет на российский рынок' };
+  let tks = cands;
+  if (pack && Array.isArray(pack.tickers) && cands.length) {
+    tks = cands.filter(t => pack.tickers.includes(t));
+    if (!tks.length || (tk !== 'РЫНОК' && !tks.includes(tk))) return { skip: `ИИ: новость не о $${tk}` };
+  }
+  const main = tk === 'РЫНОК' ? 'РЫНОК' : tk;
+  tks = [main].concat(tks.filter(t => t !== main));
   const body = pack && pack.retell ? { html: esc(pack.retell) } : quoteFull(full, link);
-  const photo = await makeCard({ t: tk === 'РЫНОК' ? 'РЫНОК' : (c.tks || [tk])[0], label, caption: (pack && pack.caption) || label, fact: (pack && pack.fact) || '', sign: s });
-  return { html: body.html, photo };
+  const ns = main !== 'РЫНОК' && ty ? newsSide(main, ty, s) : { side: 0 };
+  const card = await makeCard({ t: main, kind: main === 'РЫНОК' ? 'index' : 'share', tf: '1h', label, caption: (pack && pack.caption) || label, fact: (pack && pack.fact) || '', sign: s, side: rumor ? 0 : ns.side });
+  const sig = main !== 'РЫНОК' && ty ? sigBlock(main, ns, card, rumor) : '';
+  return { html: body.html, photo: card && card.png, tks, main, sig, react: ty ? reactBlock(main, ty, s) : '' };
 }
-// Иллюстрация: своя карточка (подпись-мем + график бумаги/индекса) — newsbot/channel/card.py (matplotlib)
+// Иллюстрация: своя карточка (свечи + подпись-мем + уровни) — newsbot/channel/card.py (matplotlib)
 async function makeCard(d) {
   if (process.env.NEWS_CARDS === '0') return null;
   try {
     const { execFileSync } = require('child_process');
     const dir = path.join(process.env.STATE_DIR || __dirname, 'cards');
     fs.mkdirSync(dir, { recursive: true });
+    for (const f of fs.readdirSync(dir)) if (Date.now() - fs.statSync(path.join(dir, f)).mtimeMs > 3600e3) fs.unlinkSync(path.join(dir, f));
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     const js = path.join(dir, id + '.json'), png = path.join(dir, id + '.png');
     fs.writeFileSync(js, JSON.stringify(d));
     const py = process.env.PYTHON || 'python3';
-    execFileSync(py, [path.join(__dirname, 'channel', 'card.py'), js, png], { timeout: 60000, stdio: ['ignore', 'ignore', 'pipe'], env: process.env });
+    const out = execFileSync(py, [path.join(__dirname, 'channel', 'card.py'), js, png].concat(process.argv.includes('--demo') ? ['--demo'] : []), { timeout: 90000, stdio: ['ignore', 'pipe', 'pipe'], env: process.env }).toString();
     fs.unlinkSync(js);
-    // старые картинки не копим в состоянии
-    for (const f of fs.readdirSync(dir)) if (Date.now() - fs.statSync(path.join(dir, f)).mtimeMs > 3600e3) fs.unlinkSync(path.join(dir, f));
-    return fs.existsSync(png) ? png : null;
+    const line = out.trim().split('\n').filter(l => l.startsWith('{')).pop();
+    const res = line ? JSON.parse(line) : {};
+    return fs.existsSync(png) ? Object.assign(res, { png }) : null;
   } catch (e) { log('картинка не сделана:', String(e.stderr || e.message).slice(-300)); return null; }
 }
 function sourcesLine(c) {
@@ -296,9 +345,9 @@ async function run(S, clusters, items) {
     // 2) заявления официальных лиц и ведомств о рынке, экономике, геополитике
     if (polit && tk === 'РЫНОК' && IMPACT.mkt[typeKey(ty, s)] && !c.pub.done && !done.has(firstLink)) {
       c.pub.done = true; mark(firstLink); n++;
-      const lines = mktLines(ty, s);
-      const nb = await newsBody(S, c, TYPE_RU[ty] || ty, tk, s);
-      c.pub.msg = await publish(S, `🏛 <b>Заявление</b> — ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}\n\n<b>Как рынок реагировал на такие заявления (2017–2026):</b>\n${lines.map(esc).join('\n')}`, null, false, nb.photo);
+      const nb = await newsBody(S, c, TYPE_RU[ty] || ty, tk, s, ty);
+      if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
+      c.pub.msg = await publish(S, `🏛 <b>Заявление</b> — ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}\n\n${nb.react}`, null, false, nb.photo);
       continue;
     }
     // 3) ранний сигнал (данные «источников») с оценкой вероятности подтверждения
@@ -306,9 +355,10 @@ async function run(S, clusters, items) {
       const p = rumorProb(c);
       if (p >= 0.1 || chs.length >= 2) {
         c.pub.rumor = true; mark(firstLink); n++;
-        const nb = await newsBody(S, c, (TYPE_RU[ty] || ty) + ' (слух)', tk, s);
-        c.pub.msg = await publish(S, `🕵️ <b>Ранний сигнал (не подтверждён)</b> — ${c.tks.map(t => '$' + t).join(' ')}: ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}\n` +
-          `Вероятность подтверждения: ~${Math.round(p * 100)}% — по тому, как часто подтверждались прошлые сообщения этих источников.\n\n<b>Если подтвердится, исторически:</b>\n${c.tks.slice(0, 4).map(t => esc(compLine(t, ty, s))).join('\n')}` + tags(c.tks), null, false, nb.photo);
+        const nb = await newsBody(S, c, (TYPE_RU[ty] || ty) + ' (слух)', tk, s, ty, true);
+        if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
+        c.pub.msg = await publish(S, `🕵️ <b>Ранний сигнал (не подтверждён)</b> — ${nb.tks.map(t => '$' + t).join(' ')}: ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}\n` +
+          `Вероятность подтверждения: ~${Math.round(p * 100)}% — по тому, как часто подтверждались прошлые сообщения этих источников.\n\n${nb.sig}\n\n${nb.react}` + tags(nb.tks), null, false, nb.photo);
       }
       continue;
     }
@@ -326,9 +376,10 @@ async function run(S, clusters, items) {
     if (!reliable || !relevant || done.has(firstLink)) continue;
     if (tk !== 'РЫНОК' && ty !== 'tone' && Math.abs(c.score) < 0.05 && !c.official) continue; // типы без заметной исторической реакции — пропускаем
     c.pub.done = true; mark(firstLink); n++;
-    const body = tk === 'РЫНОК' ? mktLines(ty, s).map(esc).join('\n') : c.tks.slice(0, 4).map(t => esc(compLine(t, ty, s))).join('\n');
-    const nb = await newsBody(S, c, TYPE_RU[ty] || ty, tk, s);
-    c.pub.msg = await publish(S, `${c.official ? '🏛' : '📰'} <b>${tk === 'РЫНОК' ? 'Рынок' : c.tks.map(t => '$' + t).join(' ')}</b> — ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}\n\n<b>Влияние (история реакций 2017–2026):</b>\n${body}` + tags(c.tks), null, false, nb.photo);
+    const nb = await newsBody(S, c, TYPE_RU[ty] || ty, tk, s, ty);
+    if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
+    const head = tk === 'РЫНОК' ? 'Рынок' : '$' + nb.main + (nb.tks.length > 1 ? ' (также ' + nb.tks.slice(1).map(t => '$' + t).join(' ') + ')' : '');
+    c.pub.msg = await publish(S, `${c.official ? '🏛' : '📰'} <b>${head}</b> — ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}` + (nb.sig ? `\n\n${nb.sig}` : '') + (nb.react ? `\n\n${nb.react}` : '') + tags(nb.tks), null, false, nb.photo);
   }
   if (n) log('опубликовано', n, 'за день', S.pub.count);
 }
