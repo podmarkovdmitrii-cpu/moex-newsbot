@@ -33,7 +33,7 @@ CBR_DAYS = ["2026-10-23", "2026-12-18", "2027-02-12", "2027-03-20", "2027-04-24"
 FAM_RU = {"mom": "импульс", "pull": "откат к EMA 20", "sbrk": "шорт пробоя"}
 SEC_RU = {"bank": "банки", "oil": "нефтегаз", "metal": "металлурги", "retail": "ритейл", "tech": "IT и связь", "power": "энергетика", "chem": "химия", "devel": "девелоперы", "transport": "транспорт"}
 SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "weekly", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
-         "45 10 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening", "20 6-18/2 * * 1-5": "pulse"}
+         "45 10 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening"}
 PUB = Publisher()
 DISCLAIMER_TXT = DISCLAIMER
 
@@ -391,70 +391,162 @@ def ofz():
 # =============================================================================================
 # Т-Пульс: посты самых читаемых авторов
 # =============================================================================================
-def pulse():
-    cache = load_json("pulse.json", {"ids": {}, "last": {}})
-    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=6)
-    items, fails = [], 0
-    for a in DATA["pulse"][:25]:
+# Пульс: только сделки сильных трейдеров (по истории заявленных сделок 2019–2026) и лента для подтверждения новостей.
+# Отдельные посты «что пишут авторы» убраны: сами по себе мнения из Пульса значения не имеют.
+P_BUY = re.compile(r"\b(купил|купила|покупаю|докупил|докупила|докупаю|добрал|добрала|набираю|набрал|беру|взял|взяла|вошел|вошёл|вошла|захожу|открыл лонг|в лонг|лонг|long|подбираю|усреднил)\b", re.I)
+P_SELL = re.compile(r"\b(продал|продала|продаю|скинул|скинула|сбросил|зафиксировал|зафиксировала|фиксирую|вышел|вышла|закрыл лонг|шорт|в шорт|short|шортанул|сократил|разгрузил)\b", re.I)
+PULSE_WF = "проверка по годам: лучшие авторы прошлых лет давали +0,29% к индексу в 2023, около нуля в 2024–2025 и +0,20% в 2026"
+
+
+def pulse_stance(tx):
+    b, s_ = bool(P_BUY.search(tx)), bool(P_SELL.search(tx))
+    return 1 if b and not s_ else -1 if s_ and not b else 0
+
+
+def pulse_posts(nick, cache, limit=12):
+    pid = cache["ids"].get(nick)
+    if not pid:
+        js = json.loads(http_get(f"https://www.tbank.ru/api/invest-gw/social/v1/profile/nickname/{nick}", timeout=15, tries=2))
+        pid = (js.get("payload") or {}).get("id")
+        if not pid:
+            return []
+        cache["ids"][nick] = pid
+    js = json.loads(http_get(f"https://www.tbank.ru/api/invest-gw/social/v1/profile/{pid}/post?limit={limit}", timeout=15, tries=2))
+    out = []
+    for p in (js.get("payload") or {}).get("items", []):
+        try:
+            when = dt.datetime.fromisoformat((p.get("inserted") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        cont = p.get("content") or {}
+        tx = html.unescape(re.sub(r"\s+", " ", cont.get("text") or p.get("text") or "")).strip()
+        ins = (cont.get("instruments") or []) + (p.get("instruments") or [])
+        tks = sorted({i.get("ticker") for i in ins if i and i.get("ticker") and re.fullmatch(r"[A-Z0-9]{2,7}", i.get("ticker"))})
+        out.append(dict(id=p.get("id"), ts=when.timestamp(), tx=tx, tks=tks))
+    return out
+
+
+def share_last(t):
+    try:
+        js = iss(f"engines/stock/markets/shares/boards/TQBR/securities/{t}.json", **{"iss.only": "marketdata", "marketdata.columns": "SECID,LAST"})
+        r = table(js, "marketdata")
+        return r[0].get("LAST") if r else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def pulse_eval(st_):
+    """Итог отслеживаемых сделок через 5 торговых сессий: доходность бумаги минус индекс (в сторону сделки)."""
+    now = time.time()
+    try:
+        ix = {b["t"]: b["c"] for b in index_candles("IMOEX", 40)}
+    except Exception:  # noqa: BLE001
+        return
+    for d in st_["deals"]:
+        if d.get("res") is not None or now - d["ts"] < 8 * 86400:
+            continue
+        try:
+            B = share_candles(d["t"], 40)
+        except Exception:  # noqa: BLE001
+            continue
+        day = dt.datetime.fromtimestamp(d["ts"], MSKTZ).date().isoformat()
+        j = next((k for k, b in enumerate(B) if b["t"] > day), None)
+        if j is None or j + 5 > len(B):
+            continue
+        e, x = B[j]["o"], B[j + 4]["c"]
+        i0, i1 = ix.get(B[j - 1]["t"]) if j else None, ix.get(B[j + 4]["t"])
+        d["res"] = d["side"] * ((x / e - 1) - ((i1 / i0 - 1) if i0 and i1 else 0))
+        time.sleep(0.05)
+
+
+def pulse_deals():
+    now = now_msk()
+    st_ = load_json("pulse_deals.json", {})
+    st_.setdefault("ids", {})
+    st_.setdefault("seen", [])
+    st_.setdefault("deals", [])
+    if st_.get("day") != now.date().isoformat():
+        st_["day"], st_["n"] = now.date().isoformat(), 0
+    top = {a["nick"]: a for a in DATA.get("pulse_top", [])}
+    crowd = {a["nick"]: a for a in DATA["pulse"][:40]}
+    feed = [x for x in load_json("pulse_feed.json", []) if time.time() - x["ts"] < 48 * 3600]
+    seen = set(st_["seen"])
+    new_deals, fails = [], 0
+    for nick in list(top) + [n for n in crowd if n not in top]:
         if fails >= 4:
             log("Пульс: API недоступен, прекращаю опрос")
             break
-        nick = a["nick"]
         try:
-            pid = cache["ids"].get(nick)
-            if not pid:
-                js = json.loads(http_get(f"https://www.tbank.ru/api/invest-gw/social/v1/profile/nickname/{nick}", timeout=15, tries=2))
-                pid = (js.get("payload") or {}).get("id")
-                if not pid:
-                    continue
-                cache["ids"][nick] = pid
-            js = json.loads(http_get(f"https://www.tbank.ru/api/invest-gw/social/v1/profile/{pid}/post?limit=20", timeout=15, tries=2))
+            posts = pulse_posts(nick, st_)
+            fails = 0
         except Exception as e:  # noqa: BLE001
             log("Пульс", nick, e)
             fails += 1
             continue
-        fails = 0
-        last = cache["last"].get(nick, "")
-        newest = last
-        for p in (js.get("payload") or {}).get("items", []):
-            ins = p.get("inserted") or ""
-            newest = max(newest, ins)
-            if ins <= last:
+        for p in posts:
+            if p["id"] in seen or time.time() - p["ts"] > 6 * 3600:
                 continue
-            try:
-                when = dt.datetime.fromisoformat(ins.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if when < since:
-                continue
-            cont = p.get("content") or {}
-            tx = re.sub(r"\s+", " ", cont.get("text") or p.get("text") or "").strip()
-            tks = sorted({i.get("ticker") for i in (cont.get("instruments") or []) + (p.get("instruments") or []) if i and i.get("ticker")})
-            if len(tx) < 80 and not tks:
-                continue
-            items.append(dict(a=a, id=p.get("id"), tx=tx, tks=tks, when=when))
-        cache["last"][nick] = newest
-        time.sleep(1.0)
-    save_json("pulse.json", cache)
-    log("Пульс: новых постов за 6 ч", len(items))
-    if not items:
+            seen.add(p["id"])
+            stance = pulse_stance(p["tx"])
+            feed.append(dict(nick=nick, top=nick in top, id=p["id"], ts=p["ts"], tks=p["tks"][:3], st=stance, tx=p["tx"][:300]))
+            if nick in top and stance and 1 <= len(p["tks"]) <= 2 and len(p["tx"]) >= 20:
+                for t in p["tks"]:
+                    if any(d["nick"] == nick and d["t"] == t and d["side"] == stance and p["ts"] - d["ts"] < 86400 for d in st_["deals"]):
+                        continue
+                    new_deals.append(dict(nick=nick, t=t, side=stance, ts=p["ts"], id=p["id"], tx=p["tx"]))
+        time.sleep(0.6)
+    st_["seen"] = list(seen)[-3000:]
+    save_json("pulse_feed.json", feed)
+    try:
+        pulse_eval(st_)
+    except Exception as e:  # noqa: BLE001
+        log("Пульс: оценка сделок", e)
+    posted = []
+    for d in new_deals:
+        price = share_last(d["t"])
+        if not price:
+            continue  # не акция Мосбиржи (фьючерс, фонд, облигация) — не отслеживаем
+        d["price"] = price
+        posted.append(d)
+    room = int(os.environ.get("PULSE_DEALS_PER_DAY", "8")) - st_["n"]
+    posted = posted[:max(0, min(3, room))]
+    for d in posted:
+        st_["deals"].append({k: d[k] for k in ("nick", "t", "side", "ts", "id", "price")})
+    st_["deals"] = st_["deals"][-600:]
+    save_json("pulse_deals.json", st_)
+    log("Пульс: постов в ленте", len(feed), "| новых сделок сильных трейдеров", len(new_deals), "| к публикации", len(posted))
+    if not posted:
         return
-    items.sort(key=lambda x: -(x["a"]["f"] or 0))
-    buys = sum(1 for x in items if re.search(r"\b(купил|докупил|покупаю|беру|лонг|набираю)\b", x["tx"], re.I))
-    sells = sum(1 for x in items if re.search(r"\b(продал|продаю|шорт|скинул|фиксирую|вышел)\b", x["tx"], re.I))
-    txt = ["👥 <b>Пульс: что пишут самые читаемые авторы</b>", ""]
-    for x in items[:8]:
-        a = x["a"]
-        acc = f"; заявленные сделки на истории: {a['n']}, в среднем {pc(a['mean'] / 100, 2)} к индексу за 5 дн." if a.get("n") and a.get("mean") is not None else ""
-        link = f"https://www.tbank.ru/invest/social/profile/{a['nick']}/{x['id']}/"
-        txt.append(f"👤 <b>{esc(a['nick'])}</b> ({fmt((a['f'] or 0) / 1000, 0)} тыс. подписчиков{acc})" + (" — " + " ".join("$" + t for t in x["tks"][:5]) if x["tks"] else ""))
-        txt.append(f"«{esc(x['tx'][:260])}{'…' if len(x['tx']) > 260 else ''}»")
-        txt.append(f"🔗 <a href=\"{link}\">пост в Пульсе</a>")
+    st_["n"] += 1
+    save_json("pulse_deals.json", st_)
+    cls = all_clusters()
+    txt = ["🧑‍💼 <b>Сделки сильных трейдеров Пульса</b>", ""]
+    for d in posted:
+        a = top[d["nick"]]
+        live = [x["res"] for x in st_["deals"] if x["nick"] == d["nick"] and x.get("res") is not None]
+        link = f"https://www.tbank.ru/invest/social/profile/{d['nick']}/{d['id']}/"
+        txt.append(f"👤 <b>{esc(d['nick'])}</b> — {'🟢 ПОКУПКА' if d['side'] > 0 else '🔴 ПРОДАЖА/ШОРТ'} <b>${d['t']}</b> (цена сейчас {fmt(d['price'], 2)})")
+        txt.append(f"История его заявленных сделок 2019–2026: {a['n']}, в среднем {pc(a['mean'] / 100, 2)} к индексу за 5 дней, в плюс {pc(a['hit'], 0, False)}"
+                   + (f"; доходность портфеля за 12 мес. {fmt(a['y12'], 0)}%" if a.get("y12") is not None else "") + ".")
+        if live:
+            txt.append(f"С начала отслеживания в канале: {len(live)} сделок, в среднем {pc(st.mean(live), 2)} к индексу за 5 дней.")
+        txt.append(f"«{esc(cut(d['tx'], 220))}» — <a href=\"{link}\">пост в Пульсе</a>")
+        nn = [c for c in news_pick(cls, time.time() - 36 * 3600, tks={d['t']}, min_pct=0.3, k=1)]
+        if nn:
+            c = nn[0]
+            agree = ((c.get("wt") or {}).get("dir") or (1 if (c.get("score") or 0) > 0 else -1)) == d["side"]
+            txt.append(("✅ Совпадает с новостным фоном: " if agree else "⚠️ Против новостного фона: ") + news_line(c, short=True))
+        else:
+            txt.append("Свежих весомых новостей по бумаге нет — сделка по собственной идее автора.")
         txt.append("")
-    if buys + sells >= 3:
-        txt.append(f"Настроение авторов: {buys} постов о покупках, {sells} о продажах. По нашей статистике 2019–2026 массовые покупки в Пульсе в среднем отставали от рынка, а продажи чаще оказывались правы — используйте как индикатор настроения толпы, а не как сигнал.")
-    txt.append("#пульс")
+    txt.append(f"<i>Авторы отобраны по истории заявленных сделок (не меньше 40, устойчивый перевес к индексу). Преимущество даже у лучших невелико, а {PULSE_WF}. Это наблюдение за чужими сделками, не сигнал.</i>")
+    txt.append("#пульс_сделки " + " ".join("#" + t for t in dict.fromkeys(d["t"] for d in posted)))
     PUB.post("\n".join(txt))
+
+
+def pulse():
+    """Старый режим «что пишут авторы» отключён: Пульс используется только для сделок сильных трейдеров и подтверждения новостей."""
+    pulse_deals()
 
 
 # =============================================================================================
@@ -775,6 +867,12 @@ def morning():
     top = news_pick(cls, since, k=6)
     B.append(("h3", "🌙 Главное за ночь"))
     B.append(("ul", [news_line(c) for c in top] if top else ["Весомых новостей за ночь не было — рынок откроется на старых драйверах."]))
+    pdl = [d for d in (load_json("pulse_deals.json", {}, os.path.join(NEWS_STATE, "channel")).get("deals") or []) if d["ts"] >= since]
+    if pdl:
+        ptop = {a["nick"]: a for a in DATA.get("pulse_top", [])}
+        B.append(("h4", "🧑‍💼 Сделки сильных трейдеров Пульса за ночь и вчера"))
+        B.append(("ul", [f"<b>{esc(d['nick'])}</b>: {'покупка' if d['side'] > 0 else 'продажа/шорт'} <b>${d['t']}</b> по ≈{fmt(d['price'], 2)}"
+                         + (f" (история: {ptop[d['nick']]['n']} сделок, в среднем {pc(ptop[d['nick']]['mean'] / 100, 2)} к индексу за 5 дн.)" if d["nick"] in ptop else "") for d in pdl[-8:]]))
     mnews = news_pick(cls, since, market=True, k=4)
     mnews = [c for c in mnews if c not in top]
     if mnews:
@@ -827,6 +925,9 @@ def morning():
         focus = {}
         for p in pl:
             focus.setdefault(p["t"], []).append("сигнал стратегии" if p["kind"] == "signal" else "сетап стратегии")
+        for d in pdl:
+            if d["t"] in tks:
+                focus.setdefault(d["t"], []).append(f"сделка сильного трейдера Пульса ({'покупка' if d['side'] > 0 else 'продажа'})")
         for c in nn:
             focus.setdefault(c["key"].split("|")[0], []).append("весомая новость, по истории реакция обычно " + ("вверх" if ((c.get("wt") or {}).get("dir") or (c.get("score") or 0)) > 0 else "вниз"))
         for r in dv:
@@ -1720,7 +1821,7 @@ def anomaly_post(x, md, by_sec, ixc):
     if cl:
         txt.append("Возможная причина — свежие новости:")
         for c in cl:
-            head = re.sub(r"\s+", " ", html.unescape(c["first"].get("tx") or ""))[:170]
+            head = cut(clean_tx(c["first"].get("tx")), 170)
             txt.append(f"• {esc(head)} — <a href=\"{c['first']['link']}\">{esc(c['first'].get('ch', ''))}</a>")
     elif x["kind"] == "fut":
         exp = (fut_fronts([x["asset"]]).get(x["asset"]) or {}).get("exp")
@@ -1783,7 +1884,7 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan}[mode]()
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals}[mode]()
 
 
 if __name__ == "__main__":
