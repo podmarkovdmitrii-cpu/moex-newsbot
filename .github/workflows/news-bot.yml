@@ -24,6 +24,12 @@ jobs:
           python-version: '3.12'
       - name: Библиотека для картинок к новостям
         run: pip install --quiet matplotlib
+      - name: Сертификаты НУЦ Минцифры (нужны для API Т-Пульса)
+        continue-on-error: true
+        run: |
+          for f in russian_trusted_root_ca_pem.crt russian_trusted_sub_ca_pem.crt; do
+            curl -sSfL --max-time 30 "https://gu-st.ru/content/lending/$f" >> "$RUNNER_TEMP/ru_ca.pem" && echo >> "$RUNNER_TEMP/ru_ca.pem"
+          done
       - name: Восстановить состояние бота
         uses: actions/cache/restore@v4
         with:
@@ -49,6 +55,8 @@ jobs:
           NEWS_LOOP_MIN: ${{ github.event.schedule == '17 */2 * * 0,6' && '0' || '26' }}
           NEWS_LOOP_SEC: '75'
           ANOMALY_EVERY_MIN: '5'
+          PULSE_EVERY_MIN: '15'
+          RU_CA: ${{ runner.temp }}/ru_ca.pem
           LLM_NEWS_PER_DAY: '45'
         run: |
           BOT=$(find . -name bot.js -path '*newsbot*' | head -1)

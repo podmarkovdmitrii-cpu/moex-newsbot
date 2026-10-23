@@ -1,4 +1,4 @@
-name: Паблик (план дня, потоки, ОФЗ, Пульс, итоги, статья недели)
+name: Паблик (план дня, потоки, ОФЗ, итоги, статья недели)
 
 on:
   schedule:
@@ -9,7 +9,6 @@ on:
     - cron: '45 10 * * 1-5'      # 13:45 МСК — ОФЗ, середина дня
     - cron: '10 16 * * 1-5'      # 19:10 МСК — ОФЗ, итоги дня
     - cron: '25 16 * * 1-5'      # 19:25 МСК — итоги дня
-    - cron: '20 6-18/2 * * 1-5'  # 09:20–21:20 МСК каждые 2 часа — Пульс
   workflow_dispatch:
     inputs:
       mode:
@@ -17,7 +16,7 @@ on:
         required: true
         default: 'morning'
         type: choice
-        options: [tg_check, test_post, aitest, morning_dry, evening_dry, anomaly, commod, morning, flows, ofz, pulse, evening, weekly]
+        options: [tg_check, test_post, aitest, morning_dry, evening_dry, anomaly, commod, morning, flows, ofz, pulse_deals, evening, weekly]
 
 concurrency:
   group: channel
