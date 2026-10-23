@@ -135,4 +135,5 @@ async function withLead(html, S, esc) {
   return i < 0 ? html + `\n\n🧠 <i>Коротко: ${esc(ld)}</i>` : html.slice(0, i) + `\n\n🧠 <i>Коротко: ${esc(ld)}</i>\n\n` + html.slice(i).replace(/^\n+/, '');
 }
 
-module.exports = { withLead, newsPack, check, ON };
+function newCycle() { RUN_N = 0; DOWN = false; }
+module.exports = { withLead, newsPack, check, ON, newCycle };

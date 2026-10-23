@@ -16,7 +16,7 @@ const TG_CHAT = process.env.TG_PUBLIC_CHAT || '';
 const VK_TOKEN = process.env.VK_GROUP_TOKEN || '';
 const VK_USER = process.env.VK_USER_TOKEN || '';
 const VK_GROUP = String(process.env.VK_GROUP_ID || '').replace(/^-/, '');
-const PER_DAY = +(process.env.PUBLIC_PER_DAY || 40);
+const PER_DAY = +(process.env.PUBLIC_PER_DAY || 60);
 const DRY = process.argv.includes('--dry-run') || (!TG_CHAT && !VK_TOKEN && !process.env.VK_USER_TOKEN);
 const ON = !!(TG_CHAT || VK_TOKEN || process.env.VK_USER_TOKEN || process.argv.includes('--dry-run'));
 const DISCLAIMER = 'Не является индивидуальной инвестиционной рекомендацией.';
@@ -33,8 +33,14 @@ const SRC = {
   economica: ['The Экономист', 'СМИ'], cbonds: ['Cbonds', 'СМИ'], markettwits: ['MarketTwits', 'лента'], headlines_for_traders: ['Headlines for traders', 'лента'],
   cbrstocks: ['ЦБ-акции', 'лента'], finamalert: ['Финам', 'лента'], smartlabnews: ['Смартлаб', 'лента'], AK47pfl: ['AK47pfl', 'лента'], bcs_express: ['БКС Экспресс', 'лента'],
   tb_invest_official: ['Т-Инвестиции', 'лента'], russianmacro: ['Russian Macro', 'лента'], if_stocks: ['ИФ Акции', 'лента'],
+  forbesrussia: ['Forbes Russia', 'СМИ'], thebell_io: ['The Bell', 'СМИ'], bloomberg_ru: ['Bloomberg на русском', 'СМИ'], expert_ra: ['Эксперт РА', 'СМИ'],
+  sberinvestments: ['СберИнвестиции', 'лента'], alfa_investments: ['Альфа-Инвестиции', 'лента'], omyinvestments: ['ВТБ Моя Аналитика', 'лента'],
+  bcs_world_of_investments: ['БКС Мир инвестиций', 'лента'], alorbroker: ['АЛОР', 'лента'], investfuture: ['InvestFuture', 'лента'], dohod: ['ДОХОДЪ', 'лента'],
+  if_market_news: ['IF News', 'лента'], oilfly: ['Oilfly', 'лента'],
+  nornickel_official: ['Норникель', 'компания'], sberbank: ['Сбер', 'компания'], aeroflot_official: ['Аэрофлот', 'компания'], magnit_retail: ['Магнит', 'компания'],
+  yandex: ['Яндекс', 'компания'], gazprom: ['Газпром', 'компания'],
 };
-const TRUSTED = new Set(Object.entries(SRC).filter(([, v]) => ['офиц', 'политик', 'агентство'].includes(v[1])).map(([k]) => k).concat(['rbc_news', 'vedomosti', 'kommersant']));
+const TRUSTED = new Set(Object.entries(SRC).filter(([, v]) => ['офиц', 'политик', 'агентство', 'компания'].includes(v[1])).map(([k]) => k).concat(['rbc_news', 'vedomosti', 'kommersant', 'forbesrussia', 'thebell_io', 'bloomberg_ru']));
 const POLIT = new Set(Object.entries(SRC).filter(([, v]) => v[1] === 'политик' || v[1] === 'офиц').map(([k]) => k));
 const SEC_RU = { consumer: 'потребсектор', industry: 'машиностроение', bank: 'банки', oil: 'нефтегаз', metal: 'металлурги', retail: 'ритейл', tech: 'IT и связь', power: 'энергетика', chem: 'химия', devel: 'девелоперы', transport: 'транспорт' };
 const TYPE_RU = {
@@ -80,6 +86,38 @@ function mktLines(ty, s) {
   const secs = Object.entries(m.sec || {}).sort((a, b) => Math.abs(b[1].r5) - Math.abs(a[1].r5)).slice(0, 4);
   return [`Индекс МосБиржи ${m.r5 >= 0 ? '▲' : '▼'} ${strength(m.r5)}: ${pc(m.r5, 2)} за 5 дн., ${pc(m.r1, 2)} за день; рост в ${Math.round(m.up5 * 100)}% случаев (${cases(m.n)})`,
     'Сильнее всего реагируют: ' + secs.map(([sec, v]) => `${SEC_RU[sec] || sec} ${pc(v.r5, 2)}`).join(', ')];
+}
+// ---------- вес новости по истории 135 тыс. новостей 2017–2026 и реакции рынка на них ----------
+// W = |ожидаемый эффект за 5 дней| × уверенность (z-оценка устойчивости знака, до 1) × вероятность, что новость правдива.
+// Процентиль W среди всех исторических пар «бумага × тип новости» (или «рынок × тип») — понятная шкала силы.
+const zConf = (up5, n) => Math.abs(up5 - 0.5) / Math.sqrt(0.25 / Math.max(1, n));
+const wOf = (a, up5, n) => Math.abs(a) * Math.min(1, zConf(up5, n) / 2);
+const PCT = {
+  comp: Object.values(IMPACT.comp).map(v => wOf(v.a5, v.up5, v.n)).sort((a, b) => a - b),
+  mkt: Object.values(IMPACT.mkt).map(v => wOf(v.r5, v.up5, v.n)).sort((a, b) => a - b),
+};
+const pctOf = (arr, x) => { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; } return arr.length ? lo / arr.length : 0; };
+function newsWeight(c) {
+  const [tk, ty] = c.key.split('|');
+  const s = c.best && c.best.v ? Math.sign(c.best.v) : 0;
+  const p = c.rumorOnly ? rumorProb(c) : 1;
+  if (tk === 'РЫНОК') {
+    const m = IMPACT.mkt[typeKey(ty, s)];
+    if (!m) return null;
+    const sec = Math.max(0, ...Object.values(m.sec || {}).map(v => Math.abs(v.r5)));
+    const E = Math.max(Math.abs(m.r5), sec / 2);
+    const W0 = E * Math.min(1, zConf(m.up5, m.n) / 2);
+    return { W: W0 * p, E, n: m.n, p, pct: pctOf(PCT.mkt, W0), dir: Math.sign(m.r5), lvl: 'рынок' };
+  }
+  const v = compImpact(tk, ty, s);
+  if (!v) return null;
+  const W0 = wOf(v.a5, v.up5, v.n);
+  return { W: W0 * p, E: Math.abs(v.a5), n: v.n, p, pct: pctOf(PCT.comp, W0), dir: Math.sign(v.a5), lvl: v.lvl };
+}
+function weightLine(w) {
+  if (!w) return '';
+  const lab = w.pct >= 0.9 ? 'высокий' : w.pct >= 0.75 ? 'повышенный' : 'средний';
+  return `⚖️ <b>Вес новости: ${lab}</b> — сильнее ${Math.round(w.pct * 100)}% новостей 2017–2026. Ожидаемое отклонение ${w.lvl === 'рынок' ? 'индекса/секторов' : 'от индекса'} за 5 дней ≈ ${pc(w.E * (w.dir || 1), 2)} (выборка: ${cases(w.n)}${w.lvl !== 'бумага' && w.lvl !== 'рынок' ? ', оценка по ' + (w.lvl === 'сектор' ? 'сектору' : 'всем бумагам') : ''})` + (w.p < 1 ? `; с поправкой на вероятность подтверждения ~${Math.round(w.p * 100)}%` : '') + '.';
 }
 function rumorProb(c) {
   let q = 1;
@@ -310,7 +348,7 @@ async function run(S, clusters, items) {
   const done = new Set(S.pub.links);
   const now = Date.now() / 1000;
   let n = 0;
-  const can = () => n < 6 && S.pub.count < PER_DAY;
+  const can = () => n < 4 && S.pub.count < PER_DAY;
   const mark = l => { done.add(l); S.pub.links.push(l); S.pub.links = S.pub.links.slice(-800); };
   // тексты источников (для заголовков)
   for (const it of items || []) for (const c of clusters) if (c.srcs[it.ch] && c.srcs[it.ch].link === it.link) c.srcs[it.ch].tx = it.tx;
@@ -330,10 +368,11 @@ async function run(S, clusters, items) {
   }
 
   const lastTs = c => Math.max(...Object.values(c.srcs).map(x => x.ts));
-  const MKTY = /^(oil_|ruble_|cbr_|geo_)/;
-  const fresh = clusters.filter(c => now - lastTs(c) < 3 * 3600)
-    .sort((a, b) => (MKTY.test(a.key.split('|')[1]) && a.key[0] !== 'Р') - (MKTY.test(b.key.split('|')[1]) && b.key[0] !== 'Р') || Math.abs(b.score) - Math.abs(a.score));
-  for (const c of fresh) {
+  const TH_COMP = +(process.env.NEWS_PCT_COMP || 0.75), TH_MKT = +(process.env.NEWS_PCT_MKT || 0.8);
+  // сначала самые весомые: по исторической реакции рынка на такие новости
+  const fresh = clusters.filter(c => now - lastTs(c) < 2 * 3600).map(c => ({ c, w: newsWeight(c) })).filter(x => x.w)
+    .sort((a, b) => b.w.W - a.w.W);
+  for (const { c, w } of fresh) {
     if (!can()) break;
     const [tk, ty] = c.key.split('|');
     if (!(c.pub && (c.pub.rumor || c.pub.done)) && isDigest(c)) continue;
@@ -344,27 +383,8 @@ async function run(S, clusters, items) {
     const polit = chs.some(ch => (SRC[ch] || [])[1] === 'политик') || (chs.some(ch => POLIT.has(ch)) && tk === 'РЫНОК');
     const trustedFact = chs.some(ch => TRUSTED.has(ch) && !c.srcs[ch].rumor);
     const indepFacts = chs.filter(ch => !c.srcs[ch].rumor && (SRC[ch] || [])[1] !== 'автор').length;
+    const th = tk === 'РЫНОК' ? TH_MKT : TH_COMP;
 
-    // 2) заявления официальных лиц и ведомств о рынке, экономике, геополитике
-    if (polit && tk === 'РЫНОК' && IMPACT.mkt[typeKey(ty, s)] && !c.pub.done && !done.has(firstLink)) {
-      c.pub.done = true; mark(firstLink); n++;
-      const nb = await newsBody(S, c, TYPE_RU[ty] || ty, tk, s, ty);
-      if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
-      c.pub.msg = await publish(S, `🏛 <b>Заявление</b> — ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}\n\n${nb.react}`, null, false, nb.photo);
-      continue;
-    }
-    // 3) ранний сигнал (данные «источников») с оценкой вероятности подтверждения
-    if (c.rumorOnly && tk !== 'РЫНОК' && ty !== 'tone' && !c.pub.rumor && STRONG_RUMOR.test(c.first.tx || '')) {
-      const p = rumorProb(c);
-      if (p >= 0.1 || chs.length >= 2) {
-        c.pub.rumor = true; mark(firstLink); n++;
-        const nb = await newsBody(S, c, (TYPE_RU[ty] || ty) + ' (слух)', tk, s, ty, true);
-        if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
-        c.pub.msg = await publish(S, `🕵️ <b>Ранний сигнал (не подтверждён)</b> — ${nb.tks.map(t => '$' + t).join(' ')}: ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}\n` +
-          `Вероятность подтверждения: ~${Math.round(p * 100)}% — по тому, как часто подтверждались прошлые сообщения этих источников.\n\n${nb.sig}\n\n${nb.react}` + tags(nb.tks), null, false, nb.photo);
-      }
-      continue;
-    }
     // 4) подтверждение раннего сигнала
     if (c.pub.rumor && !c.pub.confirm && !c.rumorOnly) {
       c.pub.confirm = true; n++;
@@ -372,17 +392,37 @@ async function run(S, clusters, items) {
       await publish(S, `✔️ <b>Подтверждено</b> — ${c.tks.map(t => '$' + t).join(' ')}: ${esc(TYPE_RU[ty] || ty)}\n🔗 <a href="${off[1].link}">${esc(src(off[0]))}</a> · через ${Math.round((off[1].ts - c.ts) / 60)} мин после первого сообщения`, c.pub.msg);
       continue;
     }
-    // 5) достоверная новость о компании или рынке
-    if (c.pub.done || c.first.rumor && !trustedFact) continue;
-    const reliable = trustedFact || indepFacts >= 2;
-    const relevant = tk === 'РЫНОК' ? !!IMPACT.mkt[typeKey(ty, s)] && (c.official || trustedFact) : (ty !== 'tone' || Math.abs(c.score) >= 0.15);
-    if (!reliable || !relevant || done.has(firstLink)) continue;
-    if (tk !== 'РЫНОК' && ty !== 'tone' && Math.abs(c.score) < 0.05 && !c.official) continue; // типы без заметной исторической реакции — пропускаем
+    if (c.pub.done || c.pub.rumor || done.has(firstLink)) continue;
+    // 2) заявления официальных лиц и ведомств — сразу, если по истории такие заявления двигали рынок
+    if (polit && tk === 'РЫНОК' && w.pct >= th - 0.2) {
+      c.pub.done = true; mark(firstLink); n++;
+      const nb = await newsBody(S, c, TYPE_RU[ty] || ty, tk, s, ty);
+      if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
+      c.pub.msg = await publish(S, `🏛 <b>Заявление</b> — ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}\n\n${weightLine(w)}\n\n${nb.react}`, null, false, nb.photo);
+      continue;
+    }
+    // 3) ранний сигнал (данные «источников») — сразу, если весомый; с вероятностью подтверждения
+    if (c.rumorOnly) {
+      if (tk === 'РЫНОК' || ty === 'tone' || !STRONG_RUMOR.test(c.first.tx || '') || w.p < 0.1 || w.pct < th) continue;
+      c.pub.rumor = true; mark(firstLink); n++;
+      const nb = await newsBody(S, c, (TYPE_RU[ty] || ty) + ' (слух)', tk, s, ty, true);
+      if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
+      c.pub.msg = await publish(S, `🕵️ <b>Ранний сигнал (не подтверждён)</b> — ${nb.tks.map(t => '$' + t).join(' ')}: ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}\n` +
+        `Вероятность подтверждения: ~${Math.round(w.p * 100)}% — по тому, как часто подтверждались прошлые сообщения этих источников.\n\n${weightLine(w)}\n\n${nb.sig}\n\n${nb.react}` + tags(nb.tks), null, false, nb.photo);
+      continue;
+    }
+    // 5) факт — публикуем сразу по первому источнику, если вес высокий; иначе ждём второго источника или надёжного СМИ
+    if (c.first.rumor && !trustedFact) continue;
+    if (w.pct < th) continue;
+    const single = !(trustedFact || indepFacts >= 2);
+    if (single && !chs.some(ch => (SRC[ch] || [])[1] && (SRC[ch] || [])[1] !== 'автор' && !c.srcs[ch].rumor)) continue; // авторские каналы в одиночку — не источник
+    if (tk === 'РЫНОК' && !(c.official || trustedFact || w.pct >= 0.9)) continue;
     c.pub.done = true; mark(firstLink); n++;
     const nb = await newsBody(S, c, TYPE_RU[ty] || ty, tk, s, ty);
     if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
     const head = tk === 'РЫНОК' ? 'Рынок' : '$' + nb.main + (nb.tks.length > 1 ? ' (также ' + nb.tks.slice(1).map(t => '$' + t).join(' ') + ')' : '');
-    c.pub.msg = await publish(S, `${c.official ? '🏛' : '📰'} <b>${head}</b> — ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}` + (nb.sig ? `\n\n${nb.sig}` : '') + (nb.react ? `\n\n${nb.react}` : '') + tags(nb.tks), null, false, nb.photo);
+    c.pub.msg = await publish(S, `${w.pct >= 0.9 ? '⚡️' : c.official ? '🏛' : '📰'} <b>${head}</b> — ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}` + (single ? ' · <i>пока один источник</i>' : '') +
+      `\n\n${weightLine(w)}` + (nb.sig ? `\n\n${nb.sig}` : '') + (nb.react ? `\n\n${nb.react}` : '') + tags(nb.tks), null, false, nb.photo);
   }
   if (n) log('опубликовано', n, 'за день', S.pub.count);
 }

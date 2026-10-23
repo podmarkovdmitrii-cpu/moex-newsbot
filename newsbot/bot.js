@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const RG = require('./regime.js');
 const N = require('./nlp.js');
+const AI = require('./ai.js');
 
 const HERE = __dirname;
 const STATE_DIR = process.env.STATE_DIR || path.join(HERE, 'state');
@@ -44,8 +45,13 @@ const CHANNELS = {
   // ведомства и официальные лица (заявления о экономике, санкциях, переговорах) — для паблика
   minec_russia: 'офиц', minenergo_official: 'офиц', minpromtorg_ru: 'офиц', fnsru: 'офиц', rosstat_official: 'офиц', news_kremlin: 'политик',
   MariaVladimirovnaZakharova: 'политик', medvedev_telegram: 'политик', vv_volodin: 'политик', kadmitriev: 'политик',
+  // ещё СМИ, брокеры и официальные каналы компаний (22.10.2026)
+  forbesrussia: 'СМИ', thebell_io: 'СМИ', bloomberg_ru: 'СМИ', expert_ra: 'СМИ',
+  sberinvestments: 'лента', alfa_investments: 'лента', omyinvestments: 'лента', bcs_world_of_investments: 'лента', alorbroker: 'лента', investfuture: 'лента', dohod: 'лента',
+  if_market_news: 'лента', oilfly: 'лента',
+  nornickel_official: 'офиц', sberbank: 'офиц', aeroflot_official: 'офиц', magnit_retail: 'офиц', yandex: 'офиц', gazprom: 'офиц',
 };
-const PRIORITY = ['markettwits', 'interfaxonline', 'ifax_go', 'prime1', 'tass_agency', 'rbc_news', 'cbrstocks', 'centralbank_russia', 'minfin', 'headlines_for_traders', 'moscowexchangeofficial', 'government_rus', 'news_kremlin', 'kadmitriev'];
+const PRIORITY = ['markettwits', 'interfaxonline', 'ifax_go', 'prime1', 'tass_agency', 'rbc_news', 'cbrstocks', 'centralbank_russia', 'minfin', 'headlines_for_traders', 'moscowexchangeofficial', 'government_rus', 'news_kremlin', 'kadmitriev', 'if_market_news', 'bloomberg_ru'];
 const CH = require('./channel.js');
 const TYPE_RU = {
   div_rec: 'дивиденды', div_cut: 'отказ от дивидендов', buyback: 'обратный выкуп', spo: 'допэмиссия/SPO', ipo: 'IPO', results_up: 'отчётность: рост', results_down: 'отчётность: снижение',
@@ -405,4 +411,30 @@ function writeSignals(S, res, data, today) {
     try { writeSignals(S, res, data, today); } catch (e) { log('signals.json: ошибка', e.message); }
   } catch (e) { log('стратегия: ошибка', e.stack || e.message); }
   saveState(S);
+  // 3) режим «почти реального времени»: запуск по расписанию держится NEWS_LOOP_MIN минут и проверяет каналы каждые NEWS_LOOP_SEC секунд,
+  //    чтобы весомые новости уходили в паблик сразу, а не раз в 5–30 минут (расписание GitHub часто запаздывает)
+  const LOOP_MIN = +(process.env.NEWS_LOOP_MIN || 0), LOOP_SEC = +(process.env.NEWS_LOOP_SEC || 75);
+  const t0 = Date.now();
+  let lastAn = 0;
+  while (LOOP_MIN && Date.now() - t0 < LOOP_MIN * 60e3) {
+    // аномалии цен/объёмов — каждые ~5 минут
+    if (process.env.ANOMALY_EVERY_MIN && Date.now() - lastAn >= +process.env.ANOMALY_EVERY_MIN * 60e3) {
+      lastAn = Date.now();
+      try {
+        require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py'), 'anomaly'],
+          { timeout: 240e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: 'anomaly', CHANNEL_STATE: path.join(STATE_DIR, 'channel'), NEWS_STATE: STATE_DIR }) });
+      } catch (e) { log('аномалии: ошибка', e.message); }
+    }
+    await sleep(LOOP_SEC * 1000);
+    try {
+      AI.newCycle();
+      const items = await collectNews(S);
+      const cl = cluster(S, items);
+      if (items.length) log('новых постов', items.length, 'кластеров', cl.length);
+      const recent = Object.values(S.cl || {}).filter(c => Date.now() / 1000 - c.ts < 2 * 86400);
+      await newsMessages(S, recent);
+      try { await CH.run(S, recent, items); } catch (e) { log('паблик: ошибка', e.stack || e.message); }
+      saveState(S);
+    } catch (e) { log('цикл новостей: ошибка', e.message); }
+  }
 })();
