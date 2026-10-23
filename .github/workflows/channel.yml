@@ -17,7 +17,7 @@ on:
         required: true
         default: 'morning'
         type: choice
-        options: [tg_check, test_post, aitest, anomaly, commod, morning, flows, ofz, pulse, evening, weekly]
+        options: [tg_check, test_post, aitest, morning_dry, evening_dry, anomaly, commod, morning, flows, ofz, pulse, evening, weekly]
 
 concurrency:
   group: channel
