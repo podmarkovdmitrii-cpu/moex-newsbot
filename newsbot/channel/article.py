@@ -156,6 +156,8 @@ def publish(pub, title, blocks, teaser, photos=None, fname="article"):
     os.makedirs(OUT, exist_ok=True)
     with open(os.path.join(OUT, fname + ".html"), "w", encoding="utf-8") as f:  # копия статьи для проверки
         f.write(f"<meta charset='utf-8'><h1>{_html.escape(title)}</h1>" + to_html(blocks))
+    if getattr(pub, "dry", False):
+        print("----- СТАТЬЯ (без публикации) -----\n" + title + "\n" + _html.unescape(re.sub(r"<[^>]+>", "", to_html(blocks).replace("</p>", "\n").replace("</li>", "\n").replace("</h3>", "\n").replace("</h4>", "\n"))), flush=True)
     chan = os.environ.get("TG_PUBLIC_CHAT", "")
     url = None
     if TOKEN and not DRY and not DEMO:

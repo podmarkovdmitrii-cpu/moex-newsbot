@@ -1772,6 +1772,10 @@ def main():
     if not mode:
         h = now_msk().strftime("%H:%M")
         mode = "morning" if "06:00" <= h < "08:30" else "pulse"
+    if mode in ("morning_dry", "evening_dry"):  # проверка без публикации: всё собирается, текст — в журнал
+        PUB.dry = True
+        PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
+        mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
     {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan}[mode]()
 

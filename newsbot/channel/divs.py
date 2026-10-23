@@ -125,7 +125,9 @@ def describe(t, s):
     from common import pc, fmt
     parts = [f"за 20 дней до отсечки бумага {'обгоняла' if s['run'] >= 0 else 'отставала от'} индекс{'' if s['run'] >= 0 else 'а'} в среднем на {pc(abs(s['run']), 1).lstrip('+')} "
              f"(рост к индексу в {round(s['run_up'] * 100)}% случаев)",
-             f"гэп в день отсечки ≈ {round((s['share'] or 0) * 100)}% дивиденда"]
+             f"гэп в день отсечки ≈ {round((s['share'] or 0) * 100)}% дивиденда".replace("-", "−")]
     if s.get("close_med") is not None:
         parts.append(f"гэп закрывался в среднем за {fmt(s['close_med'], 0)} торг. дней, за 60 дней — в {round(s['close60'] * 100)}% случаев")
-    return "; ".join(parts) + f" ({s['n']} отсечек с 2012 г.)"
+    n = s["n"]
+    w = "отсечка" if n % 10 == 1 and n % 100 != 11 else "отсечки" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "отсечек"
+    return "; ".join(parts) + f" ({n} {w} с 2012 г.)"
