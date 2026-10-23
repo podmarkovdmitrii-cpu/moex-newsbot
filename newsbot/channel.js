@@ -340,6 +340,13 @@ function tags(tks) { return tks.length ? '\n' + tks.slice(0, 6).map(t => '#' + t
 
 // ---------- основной отбор ----------
 async function run(S, clusters, items) {
+  // вес каждой новости сохраняется в кластере — по нему утренний план ранжирует ночные новости, вечерний — новости дня
+  for (const c of clusters) {
+    try {
+      const w = newsWeight(c);
+      if (w) c.wt = { W: +w.W.toFixed(5), pct: +w.pct.toFixed(3), E: +w.E.toFixed(4), dir: w.dir, n: w.n, p: +w.p.toFixed(2), lvl: w.lvl };
+    } catch (e) { /* вес не критичен */ }
+  }
   if (!ON) return;
   S.pub = S.pub || { day: '', count: 0, links: [], msg: {} };
   const today = new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10);
