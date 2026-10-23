@@ -21,7 +21,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (BG, BLUE, DEMO, DN, FG, GRID, NEWS_STATE, ORANGE, OUT, UP, VIOLET, Publisher, bln, candle_chart, currency_candles, ema, esc, fmt, hbars,  # noqa: E402
+from common import (DISCLAIMER, MSK as MSKTZ, BG, BLUE, DEMO, DN, FG, GRID, NEWS_STATE, ORANGE, OUT, UP, VIOLET, Publisher, bln, candle_chart, currency_candles, ema, esc, fmt, hbars,  # noqa: E402
                     http_get, index_candles, iss, load_json, log, now_msk, pc, plt, save_json, share_candles, style, table,
                     FUT, FUT_CODE, fut_continuous, fut_fronts, fut_candles, tf_bars, atr, TF_RU)
 
@@ -35,6 +35,7 @@ SEC_RU = {"bank": "банки", "oil": "нефтегаз", "metal": "метал�
 SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "weekly", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
          "45 10 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening", "20 6-18/2 * * 1-5": "pulse"}
 PUB = Publisher()
+DISCLAIMER_TXT = DISCLAIMER
 
 
 def wd_ru(d):
@@ -462,37 +463,241 @@ def pulse():
 DIGEST = re.compile(r"Что произошло за|Главное за|Главное к|Итоги дня|Итоги недели|дайджест|#крипто|биткоин|#BTC|Утренний обзор|Вечерний обзор", re.I)
 
 
-def news_background(hours=18, k=6):
+SECTORS = [("oil", "🛢 Нефть и газ", "MOEXOG"), ("bank", "🏦 Банки и финансы", "MOEXFN"), ("metal", "⛏ Металлы и добыча", "MOEXMM"), ("tech", "💻 IT и связь", "MOEXIT"),
+           ("retail", "🛒 Ритейл", "MOEXCN"), ("consumer", "🧺 Потребительский сектор", "MOEXCN"), ("power", "⚡️ Электроэнергетика", "MOEXEU"), ("chem", "🧪 Химия и удобрения", "MOEXCH"),
+           ("devel", "🏗 Девелоперы", "MOEXRE"), ("transport", "✈️ Транспорт", "MOEXTN"), ("industry", "🏭 Машиностроение", None), ("other", "📦 Прочие компании", None)]
+
+
+def prev_wd(d):
+    d -= dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= dt.timedelta(days=1)
+    return d
+
+
+def next_wd(d):
+    d += dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d += dt.timedelta(days=1)
+    return d
+
+
+def ddmm(s):
+    return f"{s[8:10]}.{s[5:7]}" if s else "—"
+
+
+def clean_tx(tx):
+    s = html.unescape(html.unescape(tx or ""))
+    s = re.sub(r"https?://\S+|#\w+|@\w+", " ", s)
+    s = re.sub(r"Канал [^.\n]{0,60}«Максе?»\.?", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return re.sub(r"^[^\wА-Яа-яЁё$«\"(]+", "", s)
+
+
+def cut(s, n):
+    if len(s) <= n:
+        return s
+    s = s[:n]
+    return s[:s.rfind(" ")].rstrip(",;:—- ") + "…"
+
+
+def eq_set():
+    if DEMO:
+        return None
+    try:
+        js = iss("engines/stock/markets/shares/boards/TQBR/securities.json", **{"iss.only": "securities", "securities.columns": "SECID,INSTRID"})
+        return {r["SECID"] for r in table(js, "securities") if (r.get("INSTRID") or "EQIN") == "EQIN"}
+    except Exception as e:  # noqa: BLE001
+        log("список акций", e)
+        return None
+
+
+def hist_day(ds):
+    rows, start = [], 0
+    while True:
+        part = table(iss("history/engines/stock/markets/shares/boards/TQBR/securities.json", date=ds, start=start,
+                         **{"iss.only": "history", "history.columns": "SECID,SHORTNAME,CLOSE,LEGALCLOSEPRICE,VALUE"}), "history")
+        rows += part
+        if len(part) < 100:
+            break
+        start += len(part)
+    return rows
+
+
+def day_moves():
+    """Изменения цен акций за последний завершённый торговый день (история торгов Мосбиржи): (дата, {SECID: dict(name, close, chg, val)})."""
+    if DEMO:
+        import random
+        rnd = random.Random(7)
+        return prev_wd(now_msk().date()).isoformat(), {t: dict(name=t, close=100, chg=rnd.uniform(-0.05, 0.05), val=rnd.uniform(5e6, 5e9)) for t in sec_of_cache()}
+    d = now_msk().date()
+    found, k = [], 0
+    while len(found) < 2 and k < 12:
+        k += 1
+        day = d - dt.timedelta(days=k)
+        if day.weekday() >= 5:
+            continue
+        try:
+            rows = [r for r in hist_day(day.isoformat()) if r.get("CLOSE") or r.get("LEGALCLOSEPRICE")]
+        except Exception as e:  # noqa: BLE001
+            log("история торгов", day, e)
+            rows = []
+        if rows:
+            found.append((day.isoformat(), rows))
+    if len(found) < 2:
+        return None, {}
+    (d1, r1), (_, r0) = found
+    eq = eq_set()
+    prev = {r["SECID"]: r.get("CLOSE") or r.get("LEGALCLOSEPRICE") for r in r0}
+    out = {}
+    for r in r1:
+        c, p = r.get("CLOSE") or r.get("LEGALCLOSEPRICE"), prev.get(r["SECID"])
+        if c and p and (eq is None or r["SECID"] in eq):
+            out[r["SECID"]] = dict(name=r.get("SHORTNAME") or r["SECID"], close=c, chg=c / p - 1, val=r.get("VALUE") or 0)
+    return d1, out
+
+
+def all_clusters():
     S = load_json("newsbot.json", {}, NEWS_STATE)
-    now = time.time()
-    cl = [c for c in (S.get("cl") or {}).values() if now - c.get("ts", 0) < hours * 3600 and not c.get("rumorOnly") and abs(c.get("score") or 0) >= 0.1]
-    cl.sort(key=lambda c: -abs(c.get("score") or 0))
+    return list((S.get("cl") or {}).values())
+
+
+def cl_weight(c):
+    w = c.get("wt")
+    return w["W"] if w else abs(c.get("score") or 0) * 1e-3
+
+
+def news_pick(cls, since, tks=None, market=False, min_pct=0.5, k=5):
+    """Новости после since (unix), по тикерам tks или рыночные; самые весомые первыми. Дайджесты и слабые типы — мимо."""
     out, seen = [], set()
-    for c in cl:
-        if c["first"]["link"] in seen:
+    for c in sorted(cls, key=lambda c: -cl_weight(c)):
+        if c.get("ts", 0) < since:
+            continue
+        tk = (c.get("key") or "|").split("|")[0]
+        if market and tk != "РЫНОК":
+            continue
+        if tks is not None and tk not in tks:
+            continue
+        w = c.get("wt")
+        if w and w["pct"] < min_pct:
+            continue
+        if not w and abs(c.get("score") or 0) < 0.3:
+            continue
+        raw = clean_tx(c["first"].get("tx"))
+        if DIGEST.search(raw) or c["first"]["link"] in seen or len(raw) < 25:
             continue
         seen.add(c["first"]["link"])
-        tk = c["key"].split("|")[0]
-        mark = "🟢" if (c.get("score") or 0) > 0 else "🔴"
-        raw = html.unescape(html.unescape(c["first"]["tx"] or ""))
-        if DIGEST.search(raw):
-            continue
-        head = re.sub(r"\s+", " ", raw)[:150]
-        who = "$" + tk if tk != "РЫНОК" else "Рынок"
-        out.append(f"{mark} {who}: {esc(head)} — <a href=\"{c['first']['link']}\">{esc(c['first']['ch'])}</a>")
+        out.append(c)
         if len(out) >= k:
             break
     return out
 
 
+def news_line(c, n=230, short=False):
+    tk = (c.get("key") or "|").split("|")[0]
+    w = c.get("wt") or {}
+    s = c.get("score") or 0
+    mark = "🟢" if s > 0 else "🔴" if s < 0 else "⚪"
+    head = cut(clean_tx(c["first"].get("tx")), 110 if short else n)
+    who = "$" + tk if tk != "РЫНОК" else "Рынок"
+    tm = dt.datetime.fromtimestamp(c.get("ts", 0), MSKTZ).strftime("%H:%M")
+    rumor = " <i>(не подтверждено)</i>" if c.get("rumorOnly") else ""
+    line = f"{mark} <b>{who}</b>, {tm}: {esc(head)}{rumor} — <a href=\"{c['first']['link']}\">{esc(src_name(c['first'].get('ch', '')))}</a>"
+    if w and not short:
+        lab = "высокий" if w["pct"] >= 0.9 else "повышенный" if w["pct"] >= 0.75 else "средний"
+        line += (f". Вес: {lab} (сильнее {round(w['pct'] * 100)}% новостей); по истории реакция {'индекса' if w.get('lvl') == 'рынок' else 'бумаги к индексу'} за 5 дней "
+                 f"≈ {pc(w['E'] * (w.get('dir') or 1), 1)} (случаев: {w['n']})")
+    return line
+
+
+def src_name(ch):
+    return {"rbc_news": "РБК", "interfaxonline": "Интерфакс", "tass_agency": "ТАСС", "ria_novosti": "РИА Новости", "markettwits": "MarketTwits", "kommersant": "Коммерсантъ",
+            "vedomosti": "Ведомости", "if_market_news": "ИФ Market News", "bloomberg_ru": "Bloomberg (рус.)", "forbesrussia": "Forbes", "thebell_io": "The Bell"}.get(ch, ch)
+
+
+def run20(t, ixd):
+    """Доходность бумаги к индексу за 20 торговых дней."""
+    try:
+        B = share_candles(t, 45)
+    except Exception:  # noqa: BLE001
+        return None
+    if len(B) < 22:
+        return None
+    a, b = B[-21], B[-1]
+    i0, i1 = ixd.get(a["t"]), ixd.get(b["t"])
+    return (b["c"] / a["c"] - 1) - ((i1 / i0 - 1) if i0 and i1 else 0)
+
+
+def div_item(r, s, mkt_share, cur, cls, today):
+    t = r["t"]
+    lb = r.get("last_buy")
+    dleft = (dt.date.fromisoformat(lb) - today).days if lb else None
+    head = (f"💰 <b>${t}</b> ({esc(r['name'])}) — {esc(r['period'])}: {fmt(r['amount'], 2)} ₽ на акцию, доходность {pc(r['yld'], 1, False)}. "
+            f"Последний день покупки {ddmm(lb)}" + (f" ({'сегодня' if dleft == 0 else 'завтра' if dleft == 1 else 'через ' + str(dleft) + ' дн.'})" if dleft is not None else "") +
+            f", закрытие реестра {ddmm(r['reg'])}.")
+    parts = [head]
+    share = (s or {}).get("share")
+    if s:
+        parts.append("История: " + divs_describe(t, s) + ".")
+    else:
+        parts.append(f"История отсечек по бумаге короткая; в среднем по рынку гэп в день отсечки ≈ {round((mkt_share or 0.8) * 100)}% дивиденда.")
+    g = (share if share is not None else (mkt_share or 0.8)) * r["yld"]
+    parts.append(f"Ожидаемый гэп в день отсечки ≈ {pc(-abs(g), 1)} цены.")
+    if cur is not None:
+        txt = f"Сейчас за 20 дней бумага {pc(cur, 1)} к индексу"
+        if s and cur > s["run"] + 0.03:
+            txt += " — сильнее обычного дивидендного ралли: заметная часть выплаты, вероятно, уже в цене"
+        elif s and dleft is not None and dleft <= 25 and cur < s["run"] - 0.02 and s["run_up"] >= 0.55:
+            txt += f" — обычного дивидендного ралли пока нет (исторически в {round(s['run_up'] * 100)}% случаев бумага перед отсечкой обгоняла индекс)"
+        parts.append(txt + ".")
+    nc = [c for c in cls if (c.get("key") or "|").split("|")[0] == t and time.time() - c.get("ts", 0) < 7 * 86400]
+    nc = sorted(nc, key=lambda c: -cl_weight(c))[:2]
+    if nc:
+        parts.append("Новости по бумаге за неделю: " + " ".join(news_line(c, short=True) for c in nc))
+        neg = [c for c in nc if (c.get("score") or 0) < 0 and (c.get("wt") or {}).get("pct", 0) >= 0.7]
+        pos = [c for c in nc if (c.get("score") or 0) > 0]
+        if neg:
+            parts.append("⚠️ <b>Вывод:</b> весомый негативный новостной фон может перевесить дивидендный фактор — дивиденд не защищает от падения цены.")
+        elif pos:
+            parts.append("<b>Вывод:</b> новости поддерживают бумагу вместе с дивидендным фактором.")
+    else:
+        parts.append("Значимых новостей по бумаге за неделю не было — в цене в основном дивидендный фактор.")
+    return " ".join(parts)
+
+
+def divs_describe(t, s):
+    import divs
+    return divs.describe(t, s)
+
+
+def sector_trend(code):
+    if not code:
+        return None
+    try:
+        B = index_candles(code, 160)
+    except Exception as e:  # noqa: BLE001
+        log("отраслевой индекс", code, e)
+        return None
+    if len(B) < 60:
+        return None
+    c = [b["c"] for b in B]
+    e20, e50 = ema(c, 20)[-1], ema(c, 50)[-1]
+    tr = 1 if c[-1] > e50 and e20 > e50 else -1 if c[-1] < e50 and e20 < e50 else 0
+    return dict(last=c[-1], d1=c[-1] / c[-2] - 1, m1=c[-1] / c[-22] - 1, tr=tr, day=B[-1]["t"])
+
+
 def morning():
     now = now_msk()
+    today = now.date()
     sig = load_json("signals.json", None, NEWS_STATE)
     fam = DATA["fam"]
+    secs = sec_of_cache()
     imgs = []
     # индекс и режим
+    ixd = {}
     try:
         ix = index_candles("IMOEX", 420)
+        ixd = {b["t"]: b["c"] for b in ix}
         c = [b["c"] for b in ix]
         e50, e200 = ema(c, 50)[-1], ema(c, 200)[-1]
         ch1 = ix[-1]["c"] / ix[-2]["c"] - 1
@@ -504,58 +709,174 @@ def morning():
         ixt = ""
     ofzl = load_json("ofz_last.json", None)
     fl = load_json("flows_last.json", None)
-    txt = [f"☀️ <b>Торговый план на {now.strftime('%d.%m')}, {wd_ru(now)}</b>", ""]
-    if sig:
-        txt.append(f"<b>Режим рынка:</b> {esc(sig.get('regimeText', ''))}. {ixt}")
-    elif ixt:
-        txt.append("<b>Рынок:</b> " + ixt)
-    if ofzl:
-        txt.append(f"<b>ОФЗ:</b> {esc(ofzl['concl'])}")
-    if fl:
-        txt.append("<b>Перевес вчера к закрытию:</b> покупатели — " + ", ".join(f"${t} {pc(v, 0)}" for t, v in fl["buyers"][:3]) + "; продавцы — " + ", ".join(f"${t} {pc(v, 0)}" for t, v in fl["sellers"][:3]))
-    cbr = next_cbr()
-    if cbr:
-        dd = (dt.date.fromisoformat(cbr) - now.date()).days
-        txt.append(f"<b>Заседание ЦБ по ставке:</b> {dt.date.fromisoformat(cbr).strftime('%d.%m')}" + (f" (через {dd} дн.)" if dd <= 14 else ""))
-    txt.append("")
+    since_d = prev_wd(today)
+    since = dt.datetime(since_d.year, since_d.month, since_d.day, 19, 0, tzinfo=MSKTZ).timestamp()
+    cls = all_clusters()
+    dday, moves = day_moves()
+    # дивиденды
+    try:
+        import divs
+        upc = divs.upcoming(45)
+        dst = divs.history_stats()
+    except Exception as e:  # noqa: BLE001
+        log("дивиденды", e)
+        upc, dst = [], {}
+    shares_all = [v["share"] for v in dst.values() if v.get("share") is not None]
+    mkt_share = st.median(shares_all) if shares_all else None
+    # сигналы стратегии
     plan = []
     if sig:
         for q in sig.get("pend", []):
             plan.append(dict(q, kind="signal"))
         held = {q["t"] for q in sig.get("pend", [])}
         for w in sig.get("watch", []):
-            if w["t"] in held:
-                continue
-            if w["kind"] == "mom" and (w.get("ext") or 0) > 0.10:
+            if w["t"] in held or (w["kind"] == "mom" and (w.get("ext") or 0) > 0.10):
                 continue
             plan.append(dict(w, fam=w["kind"], kind="watch"))
-    if sig and sig.get("pend"):
-        txt.append("🎯 <b>Сигналы стратегии на открытие</b>:")
-        for q in sig["pend"]:
-            f = fam.get(q["fam"], {})
-            txt.append(f"• <b>${q['t']}</b> {'покупка' if q['side'] > 0 else 'шорт'} ({FAM_RU.get(q['fam'], q['fam'])}) ≈ {fmt(q['entry'], 2)}, стоп {fmt(q['stop'], 2)}" +
-                       (f", цель {fmt(q['take'], 2)}" if q.get("take") else "") + (f"\n  исторически: прибыльных {pc(f['win'], 0, False)}, средний результат {fmt(f['avgR'], 2)}R" if f else ""))
-        txt.append("")
-    watch = [p for p in plan if p["kind"] == "watch"][:8]
-    if watch:
-        txt.append("👀 <b>Наиболее вероятные сделки дня (условия входа)</b>:")
-        for w in watch:
-            txt.append(f"• <b>${w['t']}</b> — {esc(w['note'])}" + (f"; стоп {fmt(w['stop'], 2)}" if w.get("stop") else "") + (f", цель {fmt(w['take'], 2)}" if w.get("take") else ""))
-        txt.append("")
+
+    def plan_line(p):
+        f = fam.get(p["fam"], {})
+        if p["kind"] == "signal":
+            return (f"🎯 <b>${p['t']}</b> — сигнал на открытие: {'покупка' if p['side'] > 0 else 'шорт'} ({FAM_RU.get(p['fam'], p['fam'])}) ≈ {fmt(p['entry'], 2)}, стоп {fmt(p['stop'], 2)}"
+                    + (f", цель {fmt(p['take'], 2)}" if p.get("take") else "") + (f". На истории: прибыльных {pc(f['win'], 0, False)}, средний результат {fmt(f['avgR'], 2)}R" if f else ""))
+        return (f"👀 <b>${p['t']}</b> — {'лонг' if p['side'] > 0 else 'шорт'} при условии: {esc(p.get('note') or '')}" + (f"; стоп {fmt(p['stop'], 2)}" if p.get("stop") else "")
+                + (f", цель {fmt(p['take'], 2)}" if p.get("take") else ""))
+
+    title = f"Торговый план на {today.strftime('%d.%m.%Y')}, {wd_ru(today)}"
+    B = []
+    B.append(("p", f"<i>План собран в {now.strftime('%H:%M')} МСК: режим рынка, ночные новости с весом по исторической реакции рынка, сигналы стратегии, дивиденды и разбор по секторам. "
+                   f"Цены — за торги {ddmm(dday) if dday else 'прошлого дня'}.</i>"))
+    # рынок в целом
+    B.append(("h3", "📊 Рынок в целом"))
+    mk = []
+    if sig:
+        mk.append(f"<b>Режим рынка:</b> {esc(sig.get('regimeText', ''))}. {ixt}")
+    elif ixt:
+        mk.append("<b>Индекс:</b> " + ixt)
+    if ofzl:
+        mk.append(f"<b>ОФЗ:</b> {esc(ofzl['concl'])}")
+    if fl:
+        bs = ", ".join(f"${t} {pc(v, 0)}" for t, v in fl["buyers"][:3])
+        ss = ", ".join(f"${t} {pc(v, 0)}" for t, v in fl["sellers"][:3])
+        if bs or ss:
+            mk.append("<b>Перевес к закрытию прошлого дня:</b> " + "; ".join(x for x in (("покупатели — " + bs) if bs else "", ("продавцы — " + ss) if ss else "") if x))
+    cbr = next_cbr()
+    if cbr:
+        dd = (dt.date.fromisoformat(cbr) - today).days
+        mk.append(f"<b>Заседание Банка России по ставке:</b> {ddmm(cbr)}" + (" — сегодня" if dd == 0 else f" (через {dd} дн.)" if dd <= 14 else ""))
+    if today.weekday() == 2:
+        mk.append("<b>Среда:</b> аукционы Минфина по ОФЗ — спрос на них влияет на доходности и банковский сектор.")
+    B.append(("ul", mk))
+    top = news_pick(cls, since, k=6)
+    B.append(("h3", "🌙 Главное за ночь"))
+    B.append(("ul", [news_line(c) for c in top] if top else ["Весомых новостей за ночь не было — рынок откроется на старых драйверах."]))
+    mnews = news_pick(cls, since, market=True, k=4)
+    mnews = [c for c in mnews if c not in top]
+    if mnews:
+        B.append(("h4", "Новости для всего рынка"))
+        B.append(("ul", [news_line(c) for c in mnews]))
+    # дивидендный календарь
+    if upc:
+        B.append(("h3", "💰 Дивидендный календарь (объявленные выплаты, 45 дней)"))
+        B.append(("ul", [f"<b>${r['t']}</b> — {fmt(r['amount'], 2)} ₽ ({pc(r['yld'], 1, False)}), последний день покупки {ddmm(r.get('last_buy'))}, реестр {ddmm(r['reg'])}"
+                         for r in sorted(upc, key=lambda r: r.get("last_buy") or r["reg"])[:20]]))
+        B.append(("p", "<i>Разбор каждой выплаты — с исторической реакцией бумаги на отсечки и новостями по ней — в разделе её сектора ниже.</i>"))
+    # сектора
+    by_sec = {}
+    for t in set(moves) | {p["t"] for p in plan} | {r["t"] for r in upc}:
+        by_sec.setdefault(secs.get(t, "other"), set()).add(t)
+    sect_out = []
+    for key, name, code in SECTORS:
+        tks = by_sec.get(key, set())
+        if key == "other":
+            tks = {t for t in tks if (moves.get(t) or {}).get("val", 0) >= 50e6 or t in {p["t"] for p in plan} or t in {r["t"] for r in upc}}
+        if not tks and not code:
+            continue
+        blocks, score = [], 0
+        tr = sector_trend(code)
+        if tr:
+            blocks.append(("p", f"Отраслевой индекс {code}: {fmt(tr['last'], 0)} ({pc(tr['d1'], 1)} за день, {pc(tr['m1'], 1)} за месяц) — "
+                                f"{ {1: 'восходящий тренд (выше EMA 20 и EMA 50)', -1: 'нисходящий тренд (ниже EMA 20 и EMA 50)', 0: 'без выраженного тренда'}[tr['tr']] }."))
+        mv = sorted([(t, moves[t]) for t in tks if t in moves and moves[t]["val"] >= 10e6], key=lambda x: -x[1]["chg"])
+        if mv:
+            ups = [f"${t} {pc(m['chg'], 1)}" for t, m in mv[:3] if m["chg"] > 0]
+            dns = [f"${t} {pc(m['chg'], 1)}" for t, m in mv[::-1][:3] if m["chg"] < 0]
+            vsum = sum(m["val"] for _, m in mv)
+            blocks.append(("p", "Прошлый день: " + ("лидеры — " + ", ".join(ups) if ups else "роста не было") + "; " + ("аутсайдеры — " + ", ".join(dns) if dns else "падения не было") + f". Оборот сектора {bln(vsum)}."))
+        nn = news_pick(cls, since, tks=tks, k=4)
+        if nn:
+            blocks += [("h4", "Новости за ночь"), ("ul", [news_line(c) for c in nn])]
+            score += 3 * len(nn)
+        pl = [p for p in plan if p["t"] in tks]
+        if pl:
+            blocks += [("h4", "Сигналы и сетапы стратегии"), ("ul", [plan_line(p) for p in pl])]
+            score += 4 * len(pl)
+        dv = [r for r in upc if r["t"] in tks]
+        if dv:
+            items = []
+            for r in sorted(dv, key=lambda r: r.get("last_buy") or r["reg"])[:4]:
+                items.append(div_item(r, dst.get(r["t"]), mkt_share, run20(r["t"], ixd) if ixd else None, cls, today))
+            blocks += [("h4", "Дивиденды"), ("ul", items)]
+            score += 3 * len(dv)
+        # фокус сектора: какие бумаги и почему
+        focus = {}
+        for p in pl:
+            focus.setdefault(p["t"], []).append("сигнал стратегии" if p["kind"] == "signal" else "сетап стратегии")
+        for c in nn:
+            focus.setdefault(c["key"].split("|")[0], []).append("весомая новость" + (" (+)" if (c.get("score") or 0) > 0 else " (−)"))
+        for r in dv:
+            if r.get("last_buy") and 0 <= (dt.date.fromisoformat(r["last_buy"]) - today).days <= 10:
+                focus.setdefault(r["t"], []).append("скоро отсечка")
+        for t, m in mv[:2] + mv[-2:]:
+            if abs(m["chg"]) >= 0.04:
+                focus.setdefault(t, []).append(f"сильное движение {pc(m['chg'], 1)}")
+        if focus:
+            blocks.append(("p", "🔎 <b>Фокус сектора сегодня:</b> " + "; ".join(f"${t} — {', '.join(dict.fromkeys(v))}" for t, v in sorted(focus.items(), key=lambda x: -len(x[1]))[:5]) + "."))
+            score += len(focus)
+        if len(blocks) <= 1 and not focus:
+            if not tr:
+                continue
+        score += (sum(m["val"] for _, m in mv) / 1e11) if mv else 0
+        sect_out.append((score, name, blocks))
+    sect_out.sort(key=lambda x: -x[0])
+    if sect_out:
+        B.append(("hr",))
+        B.append(("h3", "🧭 Разбор по секторам"))
+        B.append(("p", "<i>Сектора — по убыванию количества событий: сигналы, ночные новости, дивиденды, сильные движения.</i>"))
+        for _, name, blocks in sect_out:
+            B.append(("h3", name))
+            B += blocks
     if sig and sig.get("open"):
-        txt.append("📂 <b>Открытые позиции модельного портфеля</b>:")
-        for p in sig["open"]:
-            txt.append(f"• ${p['t']} {'лонг' if p['side'] > 0 else 'шорт'} с {p['d0'][8:10]}.{p['d0'][5:7]} по {fmt(p['entry'], 2)} · сейчас {pc(p['pnl'], 1)} · стоп {fmt(p['stop'], 2)}")
+        B.append(("hr",))
+        B.append(("h3", "📂 Модельный портфель"))
+        it = [f"${p['t']} {'лонг' if p['side'] > 0 else 'шорт'} с {ddmm(p['d0'])} по {fmt(p['entry'], 2)} · сейчас {pc(p['pnl'], 1)} · стоп {fmt(p['stop'], 2)}" for p in sig["open"]]
         eq = sig.get("equity") or 0
-        txt.append(f"Модельный счёт: {fmt(eq, 0)} ₽ ({pc(eq / sig['capital'] - 1, 1)} с {sig['start'][8:10]}.{sig['start'][5:7]}.{sig['start'][:4]}), сделок {sig['trades']}, прибыльных {sig['wins']}.")
-        txt.append("")
-    nb = news_background()
-    if nb:
-        txt += ["📰 <b>Главные новости за ночь</b>:", *nb, ""]
-    txt.append(f"<i>Стратегия «{esc((sig or {}).get('strategy', 'совмещённая v2'))}»: риск 1% на сделку, стоп 3%. Сигналы — по закрытию прошлого дня, вход на открытии. "
-               "Статистика по истории 2008–2026 не гарантирует будущих результатов.</i>")
-    txt.append("#план_дня")
-    # графики сделок
+        it.append(f"Модельный счёт: {fmt(eq, 0)} ₽ ({pc(eq / sig['capital'] - 1, 1)} с {ddmm(sig['start'])}.{sig['start'][:4]}), сделок {sig['trades']}, прибыльных {sig['wins']}.")
+        B.append(("ul", it))
+    B.append(("hr",))
+    B.append(("h3", "Как читать план"))
+    B.append(("ul", [f"Стратегия «{esc((sig or {}).get('strategy', 'совмещённая v2'))}»: риск 1% на сделку, сигналы — по закрытию прошлого дня, вход на открытии.",
+                     "Вес новости — насколько сильно рынок исторически реагировал на такие новости (2017–2026): процентиль среди всех типов, средняя реакция за 5 дней и число случаев.",
+                     "Дивиденды: «гэп» — на сколько цена снижалась в день отсечки (в долях дивиденда); «закрытие гэпа» — за сколько дней цена возвращалась к уровню до отсечки; ралли — как бумага обгоняла индекс за 20 дней до отсечки.",
+                     "Только публичные данные: Мосбиржа, dohod.ru, открытые Telegram-каналы. Статистика прошлого не гарантирует будущих результатов.",
+                     DISCLAIMER_TXT]))
+    # анонс в Telegram
+    tz = [f"☀️ <b>{title}</b>", ""]
+    if sig:
+        tz.append(f"<b>Режим рынка:</b> {esc(sig.get('regimeText', ''))}. {ixt}")
+    elif ixt:
+        tz.append(ixt)
+    if top:
+        tz += ["", "🌙 <b>Главное за ночь:</b>"] + [news_line(c, short=True) for c in top[:3]]
+    if sig and sig.get("pend"):
+        tz += ["", "🎯 <b>Сигналы на открытие:</b> " + ", ".join(f"${q['t']} {'покупка' if q['side'] > 0 else 'шорт'}" for q in sig["pend"])]
+    near = [r for r in upc if r.get("last_buy") and 0 <= (dt.date.fromisoformat(r["last_buy"]) - today).days <= 14]
+    if near:
+        tz += ["💰 <b>Скоро отсечки:</b> " + ", ".join(f"${r['t']} ({pc(r['yld'], 1, False)}, купить до {ddmm(r['last_buy'])})" for r in sorted(near, key=lambda r: r["last_buy"])[:4])]
+    if sect_out:
+        tz += ["🧭 <b>В фокусе секторов:</b> " + ", ".join(n.split(" ", 1)[1] for _, n, _ in sect_out[:4])]
+    tz += ["", "{LINK}", "#план_дня"]
+    # графики сделок — альбомом к анонсу
     for k, p in enumerate(plan[:7]):
         try:
             bars = share_candles(p["t"], 300)
@@ -569,10 +890,11 @@ def morning():
         emas = {"mom": ((20, BLUE, "EMA 20"), (150, ORANGE, "EMA 150")), "pull": ((20, BLUE, "EMA 20"), (100, ORANGE, "EMA 100"))}.get(p["fam"], ((50, BLUE, "EMA 50"), (200, ORANGE, "EMA 200")))
         f = fam.get(p["fam"], {})
         note = (p.get("note") or "; ".join((p.get("why") or [])[:2])) + (f". Модуль «{FAM_RU.get(p['fam'])}» на истории: прибыльных {pc(f['win'], 0, False)}, средний результат {fmt(f['avgR'], 2)}R, держали в среднем {fmt(f['days'], 0)} дн." if f else "")
-        title = f"{p['t']} · {FAM_RU.get(p['fam'], p['fam'])} · {'ЛОНГ' if side > 0 else 'ШОРТ'} · {'сигнал на открытие' if p['kind'] == 'signal' else 'ждём условия'}"
-        path = candle_chart(bars, os.path.join(OUT, f"m_{k}_{p['t']}.png"), title, lines=lines, emas=emas, note=note, mark="СИГНАЛ" if p["kind"] == "signal" else "ЖДЁМ")
+        ttl = f"{p['t']} · {FAM_RU.get(p['fam'], p['fam'])} · {'ЛОНГ' if side > 0 else 'ШОРТ'} · {'сигнал на открытие' if p['kind'] == 'signal' else 'ждём условия'}"
+        path = candle_chart(bars, os.path.join(OUT, f"m_{k}_{p['t']}.png"), ttl, lines=lines, emas=emas, note=note, mark="СИГНАЛ" if p["kind"] == "signal" else "ЖДЁМ")
         imgs.append((path, f"${p['t']}: {FAM_RU.get(p['fam'], '')}, {'лонг' if side > 0 else 'шорт'}"))
-    PUB.post("\n".join(txt), imgs)
+    import article
+    article.publish(PUB, title, B, "\n".join(tz), imgs, fname=f"plan_{today.isoformat()}")
     try:
         commod_plan()
     except Exception as e:  # noqa: BLE001
@@ -693,6 +1015,16 @@ def evening():
     pubc = (S.get("pub") or {}).get("count")
     if pubc:
         txt.append(f"📰 Опубликовано новостей и заявлений за день: {pubc}.")
+    try:
+        tmr, focus, notes = watch_tomorrow(md, now)
+    except Exception as e:  # noqa: BLE001
+        log("на завтра", e)
+        tmr, focus, notes = None, {}, []
+    if focus or notes:
+        txt += ["", f"👀 <b>На что обратить внимание завтра, {tmr.strftime('%d.%m')} ({wd_ru(tmr)}):</b>"]
+        for t, why in sorted(focus.items(), key=lambda x: -len(x[1]))[:10]:
+            txt.append(f"• <b>${t}</b> — " + "; ".join(dict.fromkeys(why)))
+        txt += notes
     txt.append("#итоги_дня")
     img = hbars([(n, v / 100, None) for n, v in sorted(secs, key=lambda x: -x[1])], os.path.join(OUT, "evening.png"), f"Отраслевые индексы МосБиржи за {now.strftime('%d.%m')}", fmt_v=lambda v: pc(v, 2)) if secs else None
     PUB.post("\n".join(txt), [(img, "Отраслевые индексы за день")] if img else None)
@@ -1085,6 +1417,181 @@ def news_for(tks, hours=6, types=None):
     return out[:2]
 
 
+def ix_weights():
+    """Веса бумаг в индексе МосБиржи (доли), обновляются раз в день."""
+    w = load_json("ix_weights.json", {})
+    today = now_msk().date().isoformat()
+    if w.get("date") == today or DEMO:
+        return w.get("w", {})
+    try:
+        rows, start = [], 0
+        while True:
+            part = table(iss("statistics/engines/stock/markets/index/analytics/IMOEX.json", start=start, limit=100, **{"iss.only": "analytics"}), "analytics")
+            rows += part
+            if len(part) < 100:
+                break
+            start += len(part)
+        ww = {(r.get("secids") or r.get("ticker")): (r.get("weight") or 0) / 100 for r in rows}
+        if ww:
+            save_json("ix_weights.json", dict(date=today, w=ww))
+            return ww
+    except Exception as e:  # noqa: BLE001
+        log("веса индекса", e)
+    return w.get("w", {})
+
+
+def index_markets():
+    js = iss("engines/stock/markets/index/securities.json", **{"iss.only": "marketdata", "marketdata.columns": "SECID,CURRENTVALUE,LASTCHANGEPRC,HIGH,LOW,VALTODAY"})
+    return {r["SECID"]: r for r in table(js, "marketdata")}
+
+
+def index_move(stt, md):
+    """Заметное движение индекса МосБиржи (каждый новый 1% за день или рывок от 0,7% за ~30 минут) — пост о бумагах, которые его двигают."""
+    try:
+        ixm = index_markets()
+    except Exception as e:  # noqa: BLE001
+        log("индекс: нет данных", e)
+        return False
+    im = ixm.get("IMOEX") or {}
+    cur = im.get("CURRENTVALUE")
+    if not cur:
+        return False
+    chg = (im.get("LASTCHANGEPRC") or 0) / 100
+    s = stt.setdefault("ix", {"lv": 0, "hist": [], "jump_ts": 0})
+    now = time.time()
+    s["hist"] = [h for h in s["hist"] if now - h[0] < 3600] + [[now, cur]]
+    lv = int(abs(chg) * 100) * (1 if chg > 0 else -1)
+    reason, jump = None, None
+    if abs(lv) >= 1 and (s["lv"] == 0 or (lv > 0) != (s["lv"] > 0) or abs(lv) > abs(s["lv"])):
+        reason = "level"
+    else:
+        old = [h for h in s["hist"] if 25 * 60 <= now - h[0] <= 40 * 60]
+        if old:
+            jump = cur / old[0][1] - 1
+            if abs(jump) >= float(os.environ.get("IX_JUMP", "0.007")) and now - s.get("jump_ts", 0) > 3600:
+                reason = "jump"
+    if not reason:
+        return False
+    W = ix_weights()
+    up = (jump if reason == "jump" else chg) > 0
+    rows = [dict(t=r["SECID"], chg=(r.get("LASTTOPREVPRICE") or 0) / 100, val=r.get("VALTODAY") or 0) for r in md]
+    for r in rows:
+        r["con"] = W.get(r["t"], 0) * r["chg"]
+    drivers = sorted([r for r in rows if r["t"] in W], key=lambda r: -r["con"] if up else r["con"])
+    liquid = [r for r in rows if r["val"] >= 50e6]
+    tops = sorted(liquid, key=lambda r: -r["chg"])
+    head = (f"📊 <b>Индекс МосБиржи {pc(chg, 2)}</b> — " + (f"{'рост' if up else 'снижение'} больше {abs(lv)}% за день" if reason == "level" else f"рывок {pc(jump, 1)} за полчаса"))
+    txt = [head, f"IMOEX {fmt(cur, 0)}, диапазон дня {fmt(im.get('LOW'), 0)}–{fmt(im.get('HIGH'), 0)}, оборот по бумагам индекса {bln(im.get('VALTODAY') or 0)}.", ""]
+    if drivers:
+        txt.append(f"⚙️ <b>Кто {'тянет индекс вверх' if up else 'тянет индекс вниз'}</b> (вклад = вес в индексе × изменение цены):")
+        txt += [f"• ${r['t']} {pc(r['chg'], 1)} — вклад {pc(r['con'], 2)} (вес {pc(W[r['t']], 1, False)})" for r in drivers[:5] if (r["con"] > 0) == up and r["con"]]
+        against = [r for r in drivers[::-1][:3] if r["con"] and (r["con"] > 0) != up]
+        if against:
+            txt.append("Против рынка: " + ", ".join(f"${r['t']} {pc(r['chg'], 1)}" for r in against))
+        txt.append("")
+    if tops:
+        txt.append("📈 <b>Сильнее всех выросли:</b> " + ", ".join(f"${r['t']} {pc(r['chg'], 1)}" for r in tops[:6] if r["chg"] > 0))
+        txt.append("📉 <b>Сильнее всех упали:</b> " + ", ".join(f"${r['t']} {pc(r['chg'], 1)}" for r in tops[::-1][:6] if r["chg"] < 0))
+        n_up = sum(1 for r in liquid if r["chg"] > 0)
+        share = n_up / len(liquid)
+        breadth = share if up else 1 - share
+        txt.append(f"Ширина рынка: {'растут' if up else 'снижаются'} {round(breadth * 100)}% ликвидных акций — " +
+                   ("движение широкое, участвует почти весь рынок." if breadth >= 0.7 else "движение держится на части бумаг, остальной рынок не подтверждает." if breadth < 0.55 else "движение умеренно широкое."))
+    secs = [(name, (ixm.get(c) or {}).get("LASTCHANGEPRC")) for c, name in SECT_IX if (ixm.get(c) or {}).get("LASTCHANGEPRC") is not None]
+    if secs:
+        secs.sort(key=lambda x: -x[1])
+        worst = [x for x in secs[::-1] if x not in secs[:3]][:3]
+        txt.append("🏭 Отраслевые индексы: сильнее всех — " + ", ".join(f"{n} {pc(v / 100, 1)}" for n, v in secs[:3]) + ("; слабее всех — " + ", ".join(f"{n} {pc(v / 100, 1)}" for n, v in worst) if worst else ""))
+    cls = all_clusters()
+    nn = news_pick(cls, now - 4 * 3600, market=True, min_pct=0.3, k=2) + news_pick(cls, now - 4 * 3600, tks={r["t"] for r in drivers[:3]}, min_pct=0.3, k=2)
+    if nn:
+        txt += ["", "📰 <b>Возможные причины — свежие новости:</b>"] + [news_line(c, short=True) for c in nn[:3]]
+    else:
+        txt += ["", "📰 Весомых новостей за 4 часа нет — вероятно, движение за счёт потоков крупных участников, внешнего фона (нефть, рубль) или технических уровней."]
+    txt += ["", "<i>Пост выходит, когда индекс за день проходит очередной 1% или делает рывок от 0,7% за полчаса.</i>", "#индекс #рынок"]
+    import card as cardmod
+    src, img = os.path.join(OUT, "ix_move.json"), os.path.join(OUT, "ix_move.png")
+    json.dump({"t": "РЫНОК", "kind": "index", "tf": "1h", "label": "движение индекса", "sign": 1 if up else -1,
+               "caption": "Рынок пошёл вверх — кто ведёт" if up else "Рынок под давлением — кто тянет вниз",
+               "fact": "Лидеры движения: " + ", ".join(f"{r['t']} {pc(r['chg'], 1)}" for r in drivers[:4])}, open(src, "w", encoding="utf-8"), ensure_ascii=False)
+    try:
+        cardmod.main(src, img)
+    except Exception as e:  # noqa: BLE001
+        log("картинка индекса", e)
+        img = None
+    PUB.post("\n".join(txt), [(img, "Индекс МосБиржи: свечи 1 час")] if img and os.path.exists(img) else None)
+    if reason == "level":
+        s["lv"] = lv
+    else:
+        s["jump_ts"] = now
+    return True
+
+
+def watch_tomorrow(md, now):
+    """«На что обратить внимание завтра»: конкретные бумаги и почему."""
+    tmr = next_wd(now.date())
+    focus, notes = {}, []
+
+    def add(t, why):
+        focus.setdefault(t, []).append(why)
+    # дивиденды
+    try:
+        import divs
+        upc = divs.upcoming(45)
+        dst = divs.history_stats()
+    except Exception as e:  # noqa: BLE001
+        log("дивиденды", e)
+        upc, dst = [], {}
+    for r in upc:
+        if r.get("last_buy") == tmr.isoformat():
+            add(r["t"], f"последний день покупки под дивиденд {fmt(r['amount'], 2)} ₽ ({pc(r['yld'], 1, False)})")
+        if r["reg"] == tmr.isoformat() or (r.get("last_buy") == now.date().isoformat()):
+            s = dst.get(r["t"]) or {}
+            g = (s.get("share") if s.get("share") is not None else 0.8) * r["yld"]
+            add(r["t"], f"дивидендный гэп (отсечка): ожидаемо около {pc(-abs(g), 1)}" + (f", гэп исторически закрывался в среднем за {fmt(s['close_med'], 0)} торг. дн." if s.get("close_med") is not None else ""))
+    # сигналы стратегии
+    sig = load_json("signals.json", None, NEWS_STATE)
+    for q in (sig or {}).get("pend", []):
+        add(q["t"], f"сигнал стратегии на открытие: {'покупка' if q['side'] > 0 else 'шорт'} ≈ {fmt(q['entry'], 2)}, стоп {fmt(q['stop'], 2)}")
+    # аномалии дня
+    an = load_json("anomaly.json", {}, os.path.join(NEWS_STATE, "channel")) or load_json("anomaly.json", {})
+    if an.get("date") == now.date().isoformat():
+        for t, v in (an.get("sent") or {}).items():
+            if re.fullmatch(r"[A-Z0-9]{2,6}", t) and not re.search(r"[FGHJKMNQUVXZ]\d$", t):
+                add(t, f"аномалия сегодня ({pc(v[1], 1)} за день) — проверить, продолжится ли движение")
+    # весомые новости дня
+    t0 = dt.datetime(now.year, now.month, now.day, tzinfo=MSKTZ).timestamp()
+    for c in news_pick(all_clusters(), t0, min_pct=0.75, k=12):
+        tk = c["key"].split("|")[0]
+        if tk != "РЫНОК":
+            add(tk, f"весомая {'позитивная' if (c.get('score') or 0) > 0 else 'негативная'} новость: «{esc(cut(clean_tx(c['first'].get('tx')), 90))}»")
+    # пробои 20-дневных уровней среди самых торгуемых
+    for r in sorted(md, key=lambda r: -(r.get("VALTODAY") or 0))[:40]:
+        t = r["SECID"]
+        try:
+            B = share_candles(t, 45)
+        except Exception:  # noqa: BLE001
+            continue
+        if len(B) < 22 or B[-1]["t"] != now.date().isoformat():
+            continue
+        hi, lo = max(b["h"] for b in B[-21:-1]), min(b["l"] for b in B[-21:-1])
+        if B[-1]["c"] > hi:
+            add(t, f"закрылась выше 20-дневного максимума {fmt(hi, 2)} — пробой вверх")
+        elif B[-1]["c"] < lo:
+            add(t, f"закрылась ниже 20-дневного минимума {fmt(lo, 2)} — пробой вниз")
+        time.sleep(0.05)
+    # события рынка
+    cbr = next_cbr()
+    if cbr and 0 <= (dt.date.fromisoformat(cbr) - tmr).days <= 1:
+        notes.append(f"🏦 Заседание Банка России по ставке — {ddmm(cbr)}: чувствительны банки, девелоперы, ОФЗ и бумаги с высоким долгом.")
+    if tmr.weekday() == 2:
+        notes.append("🏛 Среда — аукционы Минфина по ОФЗ, вечером Росстат публикует недельную инфляцию.")
+    nxt = [r for r in upc if r.get("last_buy") and tmr.isoformat() < r["last_buy"] <= (tmr + dt.timedelta(days=7)).isoformat()]
+    if nxt:
+        notes.append("💰 Отсечки в ближайшую неделю: " + ", ".join(f"${r['t']} (купить до {ddmm(r['last_buy'])}, {pc(r['yld'], 1, False)})" for r in nxt[:6]))
+    return tmr, focus, notes
+
+
 def anomaly():
     now = now_msk()
     hm = now.strftime("%H:%M")
@@ -1111,6 +1618,10 @@ def anomaly():
     secs = sec_of()
     mins = (now.hour * 60 + now.minute) - 600
     frac = max(0.06, min(1.0, mins / 530)) if mins < 530 else min(1.25, 1 + (mins - 540) / 1700)
+    try:
+        index_move(stt, md)
+    except Exception as e:  # noqa: BLE001
+        log("движение индекса", e)
     found = []
     by_sec = {}
     for r in md:
