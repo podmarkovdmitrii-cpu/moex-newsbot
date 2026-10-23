@@ -1488,8 +1488,8 @@ def index_move(stt, md):
     head = (f"📊 <b>Индекс МосБиржи {pc(chg, 2)}</b> — " + (f"{'рост' if up else 'снижение'} больше {abs(lv)}% за день" if reason == "level" else f"рывок {pc(jump, 1)} за полчаса"))
     txt = [head, f"IMOEX {fmt(cur, 0)}, диапазон дня {fmt(im.get('LOW'), 0)}–{fmt(im.get('HIGH'), 0)}, оборот по бумагам индекса {bln(im.get('VALTODAY') or 0)}.", ""]
     if drivers:
-        txt.append(f"⚙️ <b>Кто {'тянет индекс вверх' if up else 'тянет индекс вниз'}</b> (вклад = вес в индексе × изменение цены):")
-        txt += [f"• ${r['t']} {pc(r['chg'], 1)} — вклад {pc(r['con'], 2)} (вес {pc(W[r['t']], 1, False)})" for r in drivers[:5] if (r["con"] > 0) == up and r["con"]]
+        txt.append(f"⚙️ <b>Кто {'тянет индекс вверх' if up else 'тянет индекс вниз'}</b> (вклад в процентных пунктах = вес в индексе × изменение цены):")
+        txt += [f"• ${r['t']} {pc(r['chg'], 1)} — вклад {'+' if r['con'] > 0 else '−'}{fmt(abs(r['con']) * 100, 2)} п.п. индекса (вес {pc(W[r['t']], 1, False)})" for r in drivers[:5] if (r["con"] > 0) == up and r["con"]]
         against = [r for r in drivers[::-1][:3] if r["con"] and (r["con"] > 0) != up]
         if against:
             txt.append("Против рынка: " + ", ".join(f"${r['t']} {pc(r['chg'], 1)}" for r in against))
