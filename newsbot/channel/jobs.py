@@ -463,7 +463,7 @@ def pulse():
 NOISE = re.compile(r"Идея:|Тикер:|Стоп-приказ|Потенциал идеи|Друзья,|Топ[- ]\d*\s*(дивидендн|акци)|подписывайтесь|#реклама|розыгрыш|Краткий обзор", re.I)
 TRUST_CH = {"interfaxonline", "ifax_go", "if_market_news", "tass_agency", "rbc_news", "ria_novosti", "prime1", "vedomosti", "kommersant", "bloomberg_ru", "forbesrussia",
             "thebell_io", "cbrstocks", "centralbank_russia", "minfin", "MID_Russia", "kremlinnews"}
-DIGEST = re.compile(r"Что произошло за|Главное за|Главное к|Главные новости|к этому часу|Итоги дня|Итоги недели|дайджест|#крипто|биткоин|#BTC|Утренний обзор|Вечерний обзор", re.I)
+DIGEST = re.compile(r"Что произошло за|Главное за|Главное к|Главные новости|к этому часу|новости к утру|новости к вечеру|Итоги дня|Итоги недели|дайджест|#крипто|биткоин|#BTC|Утренний обзор|Вечерний обзор", re.I)
 
 
 SECTORS = [("oil", "🛢 Нефть и газ", "MOEXOG"), ("bank", "🏦 Банки и финансы", "MOEXFN"), ("metal", "⛏ Металлы и добыча", "MOEXMM"), ("tech", "💻 IT и связь", "MOEXIT"),
@@ -842,7 +842,7 @@ def morning():
             if not tr:
                 continue
         score += (sum(m["val"] for _, m in mv) / 1e11) if mv else 0
-        sect_out.append((score, name, blocks))
+        sect_out.append((score - (100 if key == "other" else 0), name, blocks))
     sect_out.sort(key=lambda x: -x[0])
     if sect_out:
         B.append(("hr",))
@@ -879,7 +879,7 @@ def morning():
     if near:
         tz += ["💰 <b>Скоро отсечки:</b> " + ", ".join(f"${r['t']} ({pc(r['yld'], 1, False)}, купить до {ddmm(r['last_buy'])})" for r in sorted(near, key=lambda r: r["last_buy"])[:4])]
     if sect_out:
-        tz += ["🧭 <b>В фокусе секторов:</b> " + ", ".join(n.split(" ", 1)[1] for _, n, _ in sect_out[:4])]
+        tz += ["🧭 <b>В фокусе секторов:</b> " + ", ".join(n.split(" ", 1)[1] for _, n, _ in [x for x in sect_out if not x[1].startswith("📦")][:4])]
     tz += ["", "{LINK}", "#план_дня"]
     # графики сделок — альбомом к анонсу
     for k, p in enumerate(plan[:7]):
