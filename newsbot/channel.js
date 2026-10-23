@@ -104,8 +104,7 @@ function newsWeight(c) {
   if (tk === 'РЫНОК') {
     const m = IMPACT.mkt[typeKey(ty, s)];
     if (!m) return null;
-    const sec = Math.max(0, ...Object.values(m.sec || {}).map(v => Math.abs(v.r5)));
-    const E = Math.max(Math.abs(m.r5), sec / 2);
+    const E = Math.abs(m.r5);
     const W0 = E * Math.min(1, zConf(m.up5, m.n) / 2);
     return { W: W0 * p, E, n: m.n, p, pct: pctOf(PCT.mkt, W0), dir: Math.sign(m.r5), lvl: 'рынок' };
   }
@@ -117,7 +116,7 @@ function newsWeight(c) {
 function weightLine(w) {
   if (!w) return '';
   const lab = w.pct >= 0.9 ? 'высокий' : w.pct >= 0.75 ? 'повышенный' : 'средний';
-  return `⚖️ <b>Вес новости: ${lab}</b> — сильнее ${Math.round(w.pct * 100)}% новостей 2017–2026. Ожидаемое отклонение ${w.lvl === 'рынок' ? 'индекса/секторов' : 'от индекса'} за 5 дней ≈ ${pc(w.E * (w.dir || 1), 2)} (выборка: ${cases(w.n)}${w.lvl !== 'бумага' && w.lvl !== 'рынок' ? ', оценка по ' + (w.lvl === 'сектор' ? 'сектору' : 'всем бумагам') : ''})` + (w.p < 1 ? `; с поправкой на вероятность подтверждения ~${Math.round(w.p * 100)}%` : '') + '.';
+  return `⚖️ <b>Вес новости: ${lab}</b> — сильнее ${Math.round(w.pct * 100)}% ${w.lvl === 'рынок' ? 'типов рыночных' : ''} новостей 2017–2026. Ожидаемое движение ${w.lvl === 'рынок' ? 'индекса МосБиржи' : 'бумаги относительно индекса'} за 5 дней ≈ ${pc(w.E * (w.dir || 1), 2)} (выборка: ${cases(w.n)}${w.lvl !== 'бумага' && w.lvl !== 'рынок' ? ', оценка по ' + (w.lvl === 'сектор' ? 'сектору' : 'всем бумагам') : ''})` + (w.p < 1 ? `; с поправкой на вероятность подтверждения ~${Math.round(w.p * 100)}%` : '') + '.';
 }
 function rumorProb(c) {
   let q = 1;
