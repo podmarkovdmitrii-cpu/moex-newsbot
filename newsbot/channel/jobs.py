@@ -406,12 +406,12 @@ def pulse_stance(tx):
 def pulse_posts(nick, cache, limit=12):
     pid = cache["ids"].get(nick)
     if not pid:
-        js = json.loads(http_get(f"https://www.tbank.ru/api/invest-gw/social/v1/profile/nickname/{nick}", timeout=15, tries=2))
+        js = json.loads(http_get(f"https://www.tbank.ru/api/invest-gw/social/v1/profile/nickname/{nick}", timeout=15, tries=1))
         pid = (js.get("payload") or {}).get("id")
         if not pid:
             return []
         cache["ids"][nick] = pid
-    js = json.loads(http_get(f"https://www.tbank.ru/api/invest-gw/social/v1/profile/{pid}/post?limit={limit}", timeout=15, tries=2))
+    js = json.loads(http_get(f"https://www.tbank.ru/api/invest-gw/social/v1/profile/{pid}/post?limit={limit}", timeout=15, tries=1))
     out = []
     for p in (js.get("payload") or {}).get("items", []):
         try:
@@ -472,15 +472,24 @@ def pulse_deals():
     feed = [x for x in load_json("pulse_feed.json", []) if time.time() - x["ts"] < 48 * 3600]
     seen = set(st_["seen"])
     new_deals, fails = [], 0
-    for nick in list(top) + [n for n in crowd if n not in top]:
-        if fails >= 4:
-            log("Пульс: API недоступен, прекращаю опрос")
+    # API Пульса ограничивает частоту: за запуск — не больше ~14 авторов и 100 секунд, по кругу; при 429 — сразу стоп до следующего запуска
+    allp = list(top) + [n for n in list(crowd)[:16] if n not in top]
+    cur = st_.get("cursor", 0) % len(allp)
+    order = allp[cur:] + allp[:cur]
+    t_start, done = time.time(), 0
+    for nick in order[:int(os.environ.get("PULSE_PER_RUN", "14"))]:
+        if fails >= 2 or time.time() - t_start > 100:
             break
         try:
             posts = pulse_posts(nick, st_)
             fails = 0
+            done += 1
         except Exception as e:  # noqa: BLE001
             log("Пульс", nick, e)
+            done += 1
+            if getattr(e, "code", 0) == 429:
+                log("Пульс: лимит запросов API — продолжу в следующий запуск")
+                break
             fails += 1
             continue
         for p in posts:
@@ -494,7 +503,8 @@ def pulse_deals():
                     if any(d["nick"] == nick and d["t"] == t and d["side"] == stance and p["ts"] - d["ts"] < 86400 for d in st_["deals"]):
                         continue
                     new_deals.append(dict(nick=nick, t=t, side=stance, ts=p["ts"], id=p["id"], tx=p["tx"]))
-        time.sleep(0.6)
+        time.sleep(2.5)
+    st_["cursor"] = cur + done
     st_["seen"] = list(seen)[-3000:]
     save_json("pulse_feed.json", feed)
     try:
