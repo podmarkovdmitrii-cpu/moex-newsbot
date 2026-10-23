@@ -460,7 +460,7 @@ def pulse():
 # =============================================================================================
 # Утренний торговый план (совмещённая стратегия v2)
 # =============================================================================================
-NOISE = re.compile(r"Идея:|Тикер:|Стоп-приказ|Потенциал идеи|Друзья,|Топ[- ]\d*\s*(дивидендн|акци)|подписывайтесь|#реклама|розыгрыш|Краткий обзор", re.I)
+NOISE = re.compile(r"\(про [^)]{2,25}\):|Идея:|Тикер:|Стоп-приказ|Потенциал идеи|Друзья,|Топ[- ]\d*\s*(дивидендн|акци)|подписывайтесь|#реклама|розыгрыш|Краткий обзор", re.I)
 TRUST_CH = {"interfaxonline", "ifax_go", "if_market_news", "tass_agency", "rbc_news", "ria_novosti", "prime1", "vedomosti", "kommersant", "bloomberg_ru", "forbesrussia",
             "thebell_io", "cbrstocks", "centralbank_russia", "minfin", "MID_Russia", "kremlinnews"}
 DIGEST = re.compile(r"Что произошло за|Главное за|Главное к|Главные новости|к этому часу|новости к утру|новости к вечеру|Итоги дня|Итоги недели|дайджест|#крипто|биткоин|#BTC|Утренний обзор|Вечерний обзор", re.I)
@@ -828,7 +828,7 @@ def morning():
         for p in pl:
             focus.setdefault(p["t"], []).append("сигнал стратегии" if p["kind"] == "signal" else "сетап стратегии")
         for c in nn:
-            focus.setdefault(c["key"].split("|")[0], []).append("весомая новость, реакция обычно " + ("вверх" if (c.get("score") or 0) > 0 else "вниз"))
+            focus.setdefault(c["key"].split("|")[0], []).append("весомая новость, по истории реакция обычно " + ("вверх" if ((c.get("wt") or {}).get("dir") or (c.get("score") or 0)) > 0 else "вниз"))
         for r in dv:
             if r.get("last_buy") and 0 <= (dt.date.fromisoformat(r["last_buy"]) - today).days <= 10:
                 focus.setdefault(r["t"], []).append("скоро отсечка")
@@ -1568,8 +1568,9 @@ def watch_tomorrow(md, now):
     t0 = dt.datetime(now.year, now.month, now.day, tzinfo=MSKTZ).timestamp()
     for c in news_pick(all_clusters(), t0, min_pct=0.75, k=12):
         tk = c["key"].split("|")[0]
-        if tk != "РЫНОК":
-            add(tk, f"весомая {'позитивная' if (c.get('score') or 0) > 0 else 'негативная'} новость: «{esc(cut(clean_tx(c['first'].get('tx')), 90))}»")
+        if tk != "РЫНОК" and not any(w.startswith("новость") for w in focus.get(tk, [])):
+            d = (c.get("wt") or {}).get("dir") or (1 if (c.get("score") or 0) > 0 else -1)
+            add(tk, f"новость с высоким весом: «{esc(cut(clean_tx(c['first'].get('tx')), 90))}» — по истории после таких новостей бумага чаще шла {'вверх' if d > 0 else 'вниз'}")
     # пробои 20-дневных уровней среди самых торгуемых
     for r in sorted(md, key=lambda r: -(r.get("VALTODAY") or 0))[:40]:
         t = r["SECID"]
