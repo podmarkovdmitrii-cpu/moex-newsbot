@@ -246,7 +246,7 @@ def flows():
     rows = [(x["lab"], key(x), None) for x in sorted(buyers + sellers[::-1], key=lambda x: -key(x))]
     img = hbars(rows, os.path.join(OUT, "flows.png"), f"Перевес покупок (+) и продаж (−) за 30 мин, {now.strftime('%d.%m')} {hm} МСК", fmt_v=lambda v: pc(v, 0))
     PUB.post("\n".join(txt), [(img, f"Перевес покупателей и продавцов на {hm} МСК")])
-    save_json("flows_last.json", dict(time=now.isoformat(), buyers=[(x["lab"], x["imb"]) for x in buyers], sellers=[(x["lab"], x["imb"]) for x in sellers], share=allb / allt))
+    save_json("flows_last.json", dict(time=now.isoformat(), buyers=[(x["lab"], key(x)) for x in buyers], sellers=[(x["lab"], key(x)) for x in sellers], share=allb / allt))
 
 
 # =============================================================================================
@@ -460,7 +460,10 @@ def pulse():
 # =============================================================================================
 # Утренний торговый план (совмещённая стратегия v2)
 # =============================================================================================
-DIGEST = re.compile(r"Что произошло за|Главное за|Главное к|Итоги дня|Итоги недели|дайджест|#крипто|биткоин|#BTC|Утренний обзор|Вечерний обзор", re.I)
+NOISE = re.compile(r"Идея:|Тикер:|Стоп-приказ|Потенциал идеи|Друзья,|Топ[- ]\d*\s*(дивидендн|акци)|подписывайтесь|#реклама|розыгрыш|Краткий обзор", re.I)
+TRUST_CH = {"interfaxonline", "ifax_go", "if_market_news", "tass_agency", "rbc_news", "ria_novosti", "prime1", "vedomosti", "kommersant", "bloomberg_ru", "forbesrussia",
+            "thebell_io", "cbrstocks", "centralbank_russia", "minfin", "MID_Russia", "kremlinnews"}
+DIGEST = re.compile(r"Что произошло за|Главное за|Главное к|Главные новости|к этому часу|Итоги дня|Итоги недели|дайджест|#крипто|биткоин|#BTC|Утренний обзор|Вечерний обзор", re.I)
 
 
 SECTORS = [("oil", "🛢 Нефть и газ", "MOEXOG"), ("bank", "🏦 Банки и финансы", "MOEXFN"), ("metal", "⛏ Металлы и добыча", "MOEXMM"), ("tech", "💻 IT и связь", "MOEXIT"),
@@ -584,8 +587,10 @@ def news_pick(cls, since, tks=None, market=False, min_pct=0.5, k=5):
         if not w and abs(c.get("score") or 0) < 0.3:
             continue
         raw = clean_tx(c["first"].get("tx"))
-        if DIGEST.search(raw) or c["first"]["link"] in seen or len(raw) < 25:
+        if DIGEST.search(raw) or NOISE.search(c["first"].get("tx") or "") or c["first"]["link"] in seen or len(raw) < 25:
             continue
+        if tk == "РЫНОК" and not (c.get("official") or (not c.get("rumorOnly") and any(ch in TRUST_CH for ch in (c.get("srcs") or {}))) or (w and w["pct"] >= 0.9)):
+            continue  # «рынок» — только из надёжных источников
         seen.add(c["first"]["link"])
         out.append(c)
         if len(out) >= k:
@@ -716,7 +721,7 @@ def morning():
     # дивиденды
     try:
         import divs
-        upc = divs.upcoming(45)
+        upc = divs.upcoming(60)
         dst = divs.history_stats()
     except Exception as e:  # noqa: BLE001
         log("дивиденды", e)
@@ -759,7 +764,7 @@ def morning():
         bs = ", ".join(f"${t} {pc(v, 0)}" for t, v in fl["buyers"][:3])
         ss = ", ".join(f"${t} {pc(v, 0)}" for t, v in fl["sellers"][:3])
         if bs or ss:
-            mk.append("<b>Перевес к закрытию прошлого дня:</b> " + "; ".join(x for x in (("покупатели — " + bs) if bs else "", ("продавцы — " + ss) if ss else "") if x))
+            mk.append("<b>Перевес в конце прошлой сессии</b> (доля покупок минус продаж по рынку): " + "; ".join(x for x in (("покупатели — " + bs) if bs else "", ("продавцы — " + ss) if ss else "") if x))
     cbr = next_cbr()
     if cbr:
         dd = (dt.date.fromisoformat(cbr) - today).days
@@ -777,7 +782,7 @@ def morning():
         B.append(("ul", [news_line(c) for c in mnews]))
     # дивидендный календарь
     if upc:
-        B.append(("h3", "💰 Дивидендный календарь (объявленные выплаты, 45 дней)"))
+        B.append(("h3", "💰 Дивидендный календарь (объявленные выплаты, 60 дней)"))
         B.append(("ul", [f"<b>${r['t']}</b> — {fmt(r['amount'], 2)} ₽ ({pc(r['yld'], 1, False)}), последний день покупки {ddmm(r.get('last_buy'))}, реестр {ddmm(r['reg'])}"
                          for r in sorted(upc, key=lambda r: r.get("last_buy") or r["reg"])[:20]]))
         B.append(("p", "<i>Разбор каждой выплаты — с исторической реакцией бумаги на отсечки и новостями по ней — в разделе её сектора ниже.</i>"))
@@ -823,7 +828,7 @@ def morning():
         for p in pl:
             focus.setdefault(p["t"], []).append("сигнал стратегии" if p["kind"] == "signal" else "сетап стратегии")
         for c in nn:
-            focus.setdefault(c["key"].split("|")[0], []).append("весомая новость" + (" (+)" if (c.get("score") or 0) > 0 else " (−)"))
+            focus.setdefault(c["key"].split("|")[0], []).append("весомая новость, реакция обычно " + ("вверх" if (c.get("score") or 0) > 0 else "вниз"))
         for r in dv:
             if r.get("last_buy") and 0 <= (dt.date.fromisoformat(r["last_buy"]) - today).days <= 10:
                 focus.setdefault(r["t"], []).append("скоро отсечка")
@@ -1537,7 +1542,7 @@ def watch_tomorrow(md, now):
     # дивиденды
     try:
         import divs
-        upc = divs.upcoming(45)
+        upc = divs.upcoming(60)
         dst = divs.history_stats()
     except Exception as e:  # noqa: BLE001
         log("дивиденды", e)
@@ -1545,7 +1550,7 @@ def watch_tomorrow(md, now):
     for r in upc:
         if r.get("last_buy") == tmr.isoformat():
             add(r["t"], f"последний день покупки под дивиденд {fmt(r['amount'], 2)} ₽ ({pc(r['yld'], 1, False)})")
-        if r["reg"] == tmr.isoformat() or (r.get("last_buy") == now.date().isoformat()):
+        if r.get("last_buy") == now.date().isoformat():
             s = dst.get(r["t"]) or {}
             g = (s.get("share") if s.get("share") is not None else 0.8) * r["yld"]
             add(r["t"], f"дивидендный гэп (отсечка): ожидаемо около {pc(-abs(g), 1)}" + (f", гэп исторически закрывался в среднем за {fmt(s['close_med'], 0)} торг. дн." if s.get("close_med") is not None else ""))

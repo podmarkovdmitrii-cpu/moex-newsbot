@@ -18,7 +18,6 @@ from common import DEMO, http_get, index_candles, load_json, log, save_json, sha
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIVS = json.load(open(os.path.join(HERE, "..", "divhist.json"), encoding="utf-8"))
-T1_FROM = "2023-07-31"  # переход на расчёты T+1: отсечка = дата закрытия реестра; раньше (T+2) — на день раньше
 
 
 def upcoming(days=45):
@@ -64,17 +63,23 @@ def upcoming(days=45):
     return rows
 
 
-def _ex_index(days, reg):
-    """Индекс дня отсечки (первый день без права на дивиденд) в списке торговых дней."""
-    if reg >= T1_FROM:
-        return next((i for i, d in enumerate(days) if d >= reg), None)
-    j = next((i for i, d in enumerate(days) if d >= reg), None)
-    return j - 1 if j else None
+def _ex_index(B, d):
+    """Индекс бара отсечки (первая сессия без права на дивиденд). В divhist.json дата — первый будний день без дивиденда;
+    с появлением торгов выходного дня гэп может прийти раньше, в субботу. Берём из двух кандидатов бар с самым глубоким гэпом."""
+    days = [b["t"] for b in B]
+    pw = dt.date.fromisoformat(d) - dt.timedelta(days=1)
+    while pw.weekday() >= 5:
+        pw -= dt.timedelta(days=1)
+    c = {next((i for i, x in enumerate(days) if x > pw.isoformat()), None), next((i for i, x in enumerate(days) if x >= d), None)}
+    c = [i for i in c if i]
+    return min(c, key=lambda i: B[i]["o"] / B[i - 1]["c"] if B[i - 1]["c"] else 9) if c else None
 
 
 def history_stats(tickers=None, max_age_days=7):
     """Статистика реакции на отсечки по каждой бумаге; пересчёт раз в неделю (кэш div_stats.json)."""
     cache = load_json("div_stats.json", {})
+    if cache.get("v") != 2:
+        cache = {}  # прежняя версия расчёта отсечки — пересчитать
     if cache.get("date") and (dt.date.today() - dt.date.fromisoformat(cache["date"])).days < max_age_days and not tickers:
         return cache.get("st", {})
     out = dict(cache.get("st", {}))
@@ -95,7 +100,7 @@ def history_stats(tickers=None, max_age_days=7):
         for reg, amt in DIVS.get(t, []):
             if reg < "2012-01-01" or reg > dt.date.today().isoformat():
                 continue
-            i = _ex_index(days, reg)
+            i = _ex_index(B, reg)
             if not i or i < 25 or i + 2 >= len(B):
                 continue
             prev = B[i - 1]["c"]
@@ -114,7 +119,7 @@ def history_stats(tickers=None, max_age_days=7):
                           close60=sum(1 for c in closed if c <= 60) / len(ev), last=ev[-1])
         time.sleep(0.05)
     if not tickers:
-        save_json("div_stats.json", dict(date=dt.date.today().isoformat(), st=out))
+        save_json("div_stats.json", dict(date=dt.date.today().isoformat(), st=out, v=2))
     return out
 
 
