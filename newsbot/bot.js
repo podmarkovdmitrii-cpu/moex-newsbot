@@ -107,7 +107,7 @@ function parseChannel(ch, html) {
     const pm = b.match(/data-post="([^"/]+)\/(\d+)"/); const tm = b.match(/<time[^>]*datetime="([^"]+)"/);
     const xm = b.match(/<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/);
     if (!pm || !tm || !xm) continue;
-    const text = xm[1].replace(/<br\s*\/?>/g, '\n').replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ').trim();
+    const text = xm[1].replace(/<br\s*\/?>/g, '\n').replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ').replace(/&#(\d+);/g, (m, n) => String.fromCodePoint(+n)).replace(/&#x([0-9a-f]+);/gi, (m, n) => String.fromCodePoint(parseInt(n, 16))).trim();
     out.push({ ch, id: +pm[2], ts: Math.floor(Date.parse(tm[1]) / 1000), tx: text.slice(0, 1500), link: `https://t.me/${pm[1]}/${pm[2]}` });
   }
   return out;
@@ -415,7 +415,7 @@ function writeSignals(S, res, data, today) {
   //    чтобы весомые новости уходили в паблик сразу, а не раз в 5–30 минут (расписание GitHub часто запаздывает)
   const LOOP_MIN = +(process.env.NEWS_LOOP_MIN || 0), LOOP_SEC = +(process.env.NEWS_LOOP_SEC || 75);
   const t0 = Date.now();
-  let lastAn = 0;
+  let lastAn = 0, lastPulse = 0;
   while (LOOP_MIN && Date.now() - t0 < LOOP_MIN * 60e3) {
     // аномалии цен/объёмов — каждые ~5 минут
     if (process.env.ANOMALY_EVERY_MIN && Date.now() - lastAn >= +process.env.ANOMALY_EVERY_MIN * 60e3) {
@@ -424,6 +424,14 @@ function writeSignals(S, res, data, today) {
         require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py'), 'anomaly'],
           { timeout: 240e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: 'anomaly', CHANNEL_STATE: path.join(STATE_DIR, 'channel'), NEWS_STATE: STATE_DIR }) });
       } catch (e) { log('аномалии: ошибка', e.message); }
+    }
+    // Пульс: сделки сильных трейдеров + лента постов для подтверждения новостей
+    if (process.env.PULSE_EVERY_MIN && Date.now() - lastPulse >= +process.env.PULSE_EVERY_MIN * 60e3) {
+      lastPulse = Date.now();
+      try {
+        require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py'), 'pulse_deals'],
+          { timeout: 240e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: 'pulse_deals', CHANNEL_STATE: path.join(STATE_DIR, 'channel'), NEWS_STATE: STATE_DIR }) });
+      } catch (e) { log('Пульс: ошибка', e.message); }
     }
     await sleep(LOOP_SEC * 1000);
     try {

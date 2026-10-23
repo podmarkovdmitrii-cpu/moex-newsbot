@@ -229,13 +229,34 @@ async function publish(S, html, reply, useAi, photo) {
   return id;
 }
 
+
+// Пульс только как подтверждение новости: посты авторов о той же бумаге за 12 часов (лента пишется jobs.py pulse_deals)
+function pulseLine(tks, dir) {
+  let feed = [];
+  try { feed = JSON.parse(fs.readFileSync(path.join(process.env.STATE_DIR || path.join(__dirname, 'state'), 'channel', 'pulse_feed.json'), 'utf8')); } catch (e) { return ''; }
+  const now = Date.now() / 1000;
+  const xs = feed.filter(x => now - x.ts < 12 * 3600 && x.st && (x.tks || []).some(t => tks.includes(t)));
+  if (!xs.length) return '';
+  const b = xs.filter(x => x.st > 0).length, s = xs.length - b;
+  const strong = [...new Set(xs.filter(x => x.top).map(x => `${x.nick} — ${x.st > 0 ? 'покупка' : 'продажа'}`))].slice(0, 3);
+  const agree = dir ? (dir > 0 ? b > s : s > b) : null;
+  return `👥 <b>Пульс за 12 ч</b> по ${tks.map(t => '$' + t).join(' ')}: ${b} о покупке, ${s} о продаже` + (strong.length ? `; сильные трейдеры: ${esc(strong.join(', '))}` : '') +
+    (agree === null ? '.' : agree ? ' — настроение совпадает с новостью.' : ' — настроение против новости.');
+}
 // ---------- оформление ----------
 function srcPick(c) {
   return Object.entries(c.srcs).filter(([, x]) => x.tx).sort((a, b) => (TRUSTED.has(b[0]) - TRUSTED.has(a[0])) || (a[1].rumor - b[1].rumor) || (b[1].tx.length - a[1].tx.length))[0];
 }
 // Чистка текста источника: хештеги рубрик, упоминания каналов, реклама «подписывайтесь/канал в Максе»
+// HTML-сущности из источника (&#036; → $, &amp;quot; → ") — иногда приходят дважды закодированными
+function unent(t) {
+  for (let i = 0; i < 3 && /&(#\d+|#x[0-9a-f]+|amp|quot|lt|gt|nbsp|apos|#39);/i.test(t); i++)
+    t = t.replace(/&amp;/g, '&').replace(/&#(\d+);/g, (m, n) => String.fromCodePoint(+n)).replace(/&#x([0-9a-f]+);/gi, (m, n) => String.fromCodePoint(parseInt(n, 16)))
+      .replace(/&quot;/g, '"').replace(/&apos;|&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ');
+  return t;
+}
 function cleanSrc(tx) {
-  return String(tx || '')
+  return unent(String(tx || ''))
     .replace(/[▪️•]*\s*(Канал|Читайте|Подписывайтесь|Подписаться|Наш канал|Мы в)[^.!?\n]{0,80}[«"]?(Максе|MAX|Telegram|ВК|VK|канал[а-я]*)[»"]?[.!]?/gi, ' ')
     .replace(/(^|\s)#[\wА-Яа-яЁё_]+/g, ' ')
     .replace(/(^|\s)@[\w_]{4,}/g, ' ')
@@ -247,7 +268,7 @@ function srcFull(c) {
   return cleanSrc((p && p[1].tx) || c.first.tx || '');
 }
 // Дайджесты и сводки (много тем в одном посте) в паблик не идут — тип события в них определяется плохо
-const DIGEST = /(сводк[аи]|главн(ые|ое) (новост|к этому|за|на)|что произошло|дайджест|утренн(ий|яя) (обзор|сводка)|вечерн(ий|яя) (обзор|сводка)|итоги (дня|недели)|коротко о главном|новости к этому часу)/i;
+const DIGEST = /(сводк[аи]|главн(ые|ое) (новост|к этому|за|на)|что произошло|дайджест|утренн(ий|яя) (обзор|сводка)|вечерн(ий|яя) (обзор|сводка)|итоги (дня|недели)|коротко о главном|новости к этому часу|как закрыл(ась|ся|ись)|лидеры (роста|падения)|итоги торгов|на закрытие|рынок на \d\d:\d\d|на \d\d:\d\d мск)/i;
 const isDigest = c => DIGEST.test(srcFull(c).slice(0, 200)) || (c.tks || []).length > 3;
 // Цитата без обрыва на полуслове: целиком до 700 знаков, иначе до конца предложения + «читать полностью»
 function quoteFull(tx, link) {
@@ -414,11 +435,12 @@ async function run(S, clusters, items) {
       const nb = await newsBody(S, c, (TYPE_RU[ty] || ty) + ' (слух)', tk, s, ty, true);
       if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
       c.pub.msg = await publish(S, `🕵️ <b>Ранний сигнал (не подтверждён)</b> — ${nb.tks.map(t => '$' + t).join(' ')}: ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}\n` +
-        `Вероятность подтверждения: ~${Math.round(w.p * 100)}% — по тому, как часто подтверждались прошлые сообщения этих источников.\n\n${weightLine(w)}\n\n${nb.sig}\n\n${nb.react}` + tags(nb.tks), null, false, nb.photo);
+        `Вероятность подтверждения: ~${Math.round(w.p * 100)}% — по тому, как часто подтверждались прошлые сообщения этих источников.\n\n${weightLine(w)}\n\n${nb.sig}\n\n${nb.react}` + ((pl => pl ? `\n\n${pl}` : '')(pulseLine(nb.tks || [], w.dir))) + tags(nb.tks), null, false, nb.photo);
       continue;
     }
     // 5) факт — публикуем сразу по первому источнику, если вес высокий; иначе ждём второго источника или надёжного СМИ
     if (c.first.rumor && !trustedFact) continue;
+    if (ty === 'tone') continue; // «тон новости» — нет конкретного события: в паблик не идёт
     if (w.pct < th) continue;
     const single = !(trustedFact || indepFacts >= 2);
     if (single && !chs.some(ch => (SRC[ch] || [])[1] && (SRC[ch] || [])[1] !== 'автор' && !c.srcs[ch].rumor)) continue; // авторские каналы в одиночку — не источник
@@ -428,7 +450,7 @@ async function run(S, clusters, items) {
     if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
     const head = tk === 'РЫНОК' ? 'Рынок' : '$' + nb.main + (nb.tks.length > 1 ? ' (также ' + nb.tks.slice(1).map(t => '$' + t).join(' ') + ')' : '');
     c.pub.msg = await publish(S, `${w.pct >= 0.9 ? '⚡️' : c.official ? '🏛' : '📰'} <b>${head}</b> — ${esc(TYPE_RU[ty] || ty)}\n${nb.html}\n\n${sourcesLine(c)}` + (single ? ' · <i>пока один источник</i>' : '') +
-      `\n\n${weightLine(w)}` + (nb.sig ? `\n\n${nb.sig}` : '') + (nb.react ? `\n\n${nb.react}` : '') + tags(nb.tks), null, false, nb.photo);
+      `\n\n${weightLine(w)}` + (nb.sig ? `\n\n${nb.sig}` : '') + (nb.react ? `\n\n${nb.react}` : '') + ((pl => pl ? `\n\n${pl}` : '')(pulseLine(nb.tks || [], w.dir))) + tags(nb.tks), null, false, nb.photo);
   }
   if (n) log('опубликовано', n, 'за день', S.pub.count);
 }
