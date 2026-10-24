@@ -186,7 +186,7 @@ def main():
     W = [CD.news_weight(e, impact) for e in ev]
     covered = sorted({e["tk"] for e in ev})
     hd = CD.hourly_daily(Hh)
-    X = CD.build({"sh": Dd, "ix": {"IMOEX": IX}}, divh, ev, news_tickers=set(covered), weights=W, hourly=hd)
+    X = CD.build({"sh": Dd, "ix": {"IMOEX": IX}}, divh, ev, news_tickers=set(covered), weights=W, hourly=hd, ix_hourly=IXH, sec_of=impact.get("secOf"))
     X = X[X.d >= "2013-01-01"].reset_index(drop=True)
     FD = CD.feature_cols(X)
     log("признаки дня:", X.shape, "база аномалий", round(X.y.mean(), 4), round(time.time() - t0), "с")
@@ -200,8 +200,7 @@ def main():
             years = []
         P, rep = walk(X, FD, target, years, sample_neg=0.5) if years else (None, [])
         meta["report"]["daily_" + target] = rep
-        if P is not None:
-            meta["calib"]["daily_" + target] = calib(P.p.values, P.y.values)
+        # калибровка «до открытия» не нужна: на проверке по годам сырые вероятности точнее (logloss 0,1151 против 0,1158)
         clf = fit_final(X, FD, target, sample_neg=0.5)
         if target == "y":
             # прогноз «до открытия» для внутридневной модели: вне выборки там, где он есть, иначе финальной моделью

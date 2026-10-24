@@ -78,7 +78,7 @@ def news_daily(events, days_by_tk, weights=None):
     return agg
 
 
-def build(H, divhist, events, tier_of=None, news_tickers=None, weights=None, hourly=None):
+def build(H, divhist, events, tier_of=None, news_tickers=None, weights=None, hourly=None, ix_hourly=None, sec_of=None):
     ix = series(H["ix"]["IMOEX"])
     ix["r"] = ix["c"].pct_change()
     ixr = dict(zip(ix["d"].values, ix["r"].values))
@@ -146,6 +146,10 @@ def build(H, divhist, events, tier_of=None, news_tickers=None, weights=None, hou
         f["upsh"] = ((df["h"] - df[["o", "c"]].max(axis=1)) / (df["h"] - df["l"]).replace(0, np.nan)).shift(1)
         f["gap1"] = (df["o"] / c.shift(1) - 1).shift(1)
         f["vr1"] = df["vr"].shift(1)
+        f["vr2"] = df["vr"].shift(2)
+        f["vr3"] = df["vr"].shift(3)
+        f["lvr1"] = np.log(df["vr"].shift(1).clip(lower=0.01))
+        f["absx2"] = x.abs().shift(2)
         f["vr5"] = (df["val"].rolling(5).mean() / med20.shift(5)).shift(1)
         f["vtrend"] = (df["val"].rolling(5).mean() / df["val"].rolling(60).mean()).shift(1)
         f["lval"] = np.log10(df["val"].rolling(20, min_periods=10).median().shift(1) + 1)
@@ -217,6 +221,27 @@ def build(H, divhist, events, tier_of=None, news_tickers=None, weights=None, hou
     if not frames:
         return pd.DataFrame(columns=["d", "t"])
     out = pd.concat(frames, ignore_index=True)
+    # ---- рынок и сектор вчера: доля бумаг с аномалией, медианный всплеск оборота (аномалии идут волнами)
+    out = out.sort_values(["t", "d"]).reset_index(drop=True)
+    yprev = out.groupby("t")["y"].shift(1).fillna(0)
+    out["_yp"] = yprev
+    out["mkt_an1"] = out.groupby("d")["_yp"].transform("mean")
+    out["mkt_vr1"] = out.groupby("d")["vr1"].transform("median")
+    out["mkt_absx1"] = out.groupby("d")["absx1"].transform("median")
+    if sec_of:
+        out["_sec"] = out["t"].map(sec_of).fillna("other")
+        g = out.groupby(["d", "_sec"])["_yp"]
+        out["sec_an1"] = (g.transform("sum") - out["_yp"]) / (g.transform("count") - 1).clip(lower=1)
+        out = out.drop(columns="_sec")
+    out = out.drop(columns="_yp")
+    # ---- вечерняя сессия индекса накануне
+    if ix_hourly:
+        hx = hourly_daily({"IMOEX": ix_hourly})
+        if len(hx):
+            hx = hx.set_index("d")["ev_ret"]
+            days = np.sort(out["d"].unique())
+            prev = pd.Series(days[:-1], index=days[1:])
+            out["ix_ev_ret"] = out["d"].map(prev).map(hx).values
     return out
 
 

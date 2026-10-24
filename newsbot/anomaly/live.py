@@ -88,7 +88,7 @@ def daily_probs(tickers, today, divh, upcoming, news_state, impact):
         for t, rows in ex.map(lambda t: one(t, "d"), list(tickers) + ["IMOEX"]):
             if rows:
                 D[t] = rows + [[today, np.nan, np.nan, np.nan, np.nan, np.nan]]
-        for t, rows in ex.map(lambda t: one(t, "h"), list(tickers)):
+        for t, rows in ex.map(lambda t: one(t, "h"), list(tickers) + ["IMOEX"]):
             if rows:
                 Hh[t] = rows
     IX = D.pop("IMOEX", None)
@@ -104,8 +104,10 @@ def daily_probs(tickers, today, divh, upcoming, news_state, impact):
             dv.setdefault(r["t"], []).append([ex.isoformat(), r.get("amount", 0)])
     ev = events(news_state)
     W = [CD.news_weight(e, impact) for e in ev]
-    hd = CD.hourly_daily(Hh)
-    X = CD.build({"sh": {t: v for t, v in D.items() if len(v) > 300}, "ix": {"IMOEX": IX}}, dv, ev, news_tickers=set(meta().get("covered", [])), weights=W, hourly=hd)
+    hd = CD.hourly_daily({t: v for t, v in Hh.items() if t != "IMOEX"})
+    IXH = Hh.pop("IMOEX", None)
+    X = CD.build({"sh": {t: v for t, v in D.items() if len(v) > 300}, "ix": {"IMOEX": IX}}, dv, ev, news_tickers=set(meta().get("covered", [])), weights=W, hourly=hd,
+                 ix_hourly=IXH, sec_of=impact.get("secOf"))
     if X.empty:
         raise RuntimeError("нет свечей по бумагам (Мосбиржа недоступна?)")
     X = X[X.d == pd.Timestamp(today)].copy()

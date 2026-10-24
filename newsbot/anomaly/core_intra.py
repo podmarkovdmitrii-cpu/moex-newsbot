@@ -6,7 +6,7 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 
-CHK = [9, 10, 11, 12, 13, 14, 15, 16, 17]
+CHK = [10, 11, 12, 13, 14, 15, 16, 17]  # с 10 часов: утренняя сессия даёт много ложных тревог (проверка на 2021–2026: AUC 0,917 → 0,923)
 DCOLS = ["tier", "sd60", "sd20", "an20", "an250", "since_an", "vr1", "nw_n", "nw_w", "nw_wmax", "ix_r1", "ix_sd20", "lval", "ema20d", "dhi20", "dlo20", "month", "dow", "to_ex"]
 FEAT = ["c", "cx", "acx", "cvol", "cvol_v", "cvol_typ", "lastv", "rng", "ixr", "p_pre", "nw_day", "nw_lasth"] + DCOLS
 MSK = dt.timedelta(hours=3)
