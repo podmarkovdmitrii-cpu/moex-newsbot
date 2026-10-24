@@ -23,13 +23,19 @@ jobs:
         with:
           python-version: '3.12'
       - name: Библиотека для картинок к новостям
-        run: pip install --quiet matplotlib
+        run: pip install --quiet matplotlib "scikit-learn==1.5.2" pandas numpy
       - name: Сертификаты НУЦ Минцифры (нужны для API Т-Пульса)
         continue-on-error: true
         run: |
           for f in russian_trusted_root_ca_pem.crt russian_trusted_sub_ca_pem.crt; do
             curl -sSfL --max-time 30 "https://gu-st.ru/content/lending/$f" >> "$RUNNER_TEMP/ru_ca.pem" && echo >> "$RUNNER_TEMP/ru_ca.pem"
           done
+      - name: Модели прогноза аномалий
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-models
+          key: anomaly-models-${{ github.run_id }}
+          restore-keys: anomaly-models-
       - name: Восстановить состояние бота
         uses: actions/cache/restore@v4
         with:
@@ -51,6 +57,7 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL || 'claude-opus-5-5' }}
           LLM_AUTH: ${{ vars.LLM_AUTH }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-models
           PYTHON: python
           NEWS_LOOP_MIN: ${{ github.event.schedule == '17 */2 * * 0,6' && '0' || '26' }}
           NEWS_LOOP_SEC: '75'

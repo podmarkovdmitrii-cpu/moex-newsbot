@@ -16,7 +16,7 @@ on:
         required: true
         default: 'morning'
         type: choice
-        options: [tg_check, test_post, aitest, morning_dry, evening_dry, anomaly, commod, morning, flows, ofz, pulse_deals, evening, weekly]
+        options: [tg_check, test_post, aitest, anom_pre, morning_dry, evening_dry, anomaly, commod, morning, flows, ofz, pulse_deals, evening, weekly]
 
 concurrency:
   group: channel
@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Библиотеки
-        run: pip install --quiet matplotlib reportlab
+        run: pip install --quiet matplotlib reportlab "scikit-learn==1.5.2" pandas numpy
       - name: Сертификаты НУЦ Минцифры (нужны для API Т-Пульса)
         continue-on-error: true
         run: |
@@ -40,6 +40,12 @@ jobs:
             curl -sSfL --max-time 30 "https://gu-st.ru/content/lending/$f" >> "$RUNNER_TEMP/ru_ca.pem" && echo >> "$RUNNER_TEMP/ru_ca.pem"
           done
           grep -c "BEGIN CERTIFICATE" "$RUNNER_TEMP/ru_ca.pem" || true
+      - name: Модели прогноза аномалий
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-models
+          key: anomaly-models-${{ github.run_id }}
+          restore-keys: anomaly-models-
       - name: Состояние новостного бота (сигналы стратегии, новости)
         uses: actions/cache/restore@v4
         with:
@@ -66,6 +72,7 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL || 'claude-opus-5-5' }}
           LLM_AUTH: ${{ vars.LLM_AUTH }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-models
           TELEGRAPH_TOKEN: ${{ secrets.TELEGRAPH_TOKEN }}
         run: python newsbot/channel/jobs.py
       - name: Сохранить состояние паблика

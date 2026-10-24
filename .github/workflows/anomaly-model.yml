@@ -1,0 +1,52 @@
+name: Модель аномалий (обучение раз в неделю)
+
+on:
+  schedule:
+    - cron: '17 2 * * 0'   # воскресенье 05:17 МСК
+  workflow_dispatch:
+
+concurrency:
+  group: anomaly-model
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Библиотеки
+        run: pip install --quiet "scikit-learn==1.5.2" pandas numpy matplotlib
+      - name: Кэш исторических свечей (докачка)
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
+          restore-keys: anomaly-data-
+      - name: Журнал новостей бота
+        uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - name: Обучение и проверка на будущих годах
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-models
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+        run: python newsbot/anomaly/train.py
+      - name: Сохранить свечи
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
+      - name: Сохранить модели
+        uses: actions/cache/save@v4
+        with:
+          path: anomaly-models
+          key: anomaly-models-${{ github.run_id }}
