@@ -214,6 +214,8 @@ def build(H, divhist, events, tier_of=None, news_tickers=None, weights=None, hou
         for k in ("y", "y_px", "y_up", "y_dn", "y_vol", "x", "vr", "ex"):
             f[k] = df[k].values
         frames.append(f)
+    if not frames:
+        return pd.DataFrame(columns=["d", "t"])
     out = pd.concat(frames, ignore_index=True)
     return out
 

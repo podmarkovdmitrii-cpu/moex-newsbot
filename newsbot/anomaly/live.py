@@ -76,7 +76,7 @@ def daily_probs(tickers, today, divh, upcoming, news_state, impact):
         idx = t == "IMOEX"
         path = f"engines/stock/markets/{'index' if idx else 'shares'}/{'' if idx else 'boards/TQBR/'}securities/{t}/candles.json"
         try:
-            B = candles(path, 420 if kind == "d" else 5, 24 if kind == "d" else 60)
+            B = candles(path, 620 if kind == "d" else 6, 24 if kind == "d" else 60)
         except Exception as e:  # noqa: BLE001
             log("свечи", t, e)
             return t, []
@@ -84,7 +84,7 @@ def daily_probs(tickers, today, divh, upcoming, news_state, impact):
             return t, [[b["t"], b["o"], b["h"], b["l"], b["c"], b["v"]] for b in B if b["t"] < today]
         return t, [[b["t"][:13], b["o"], b["h"], b["l"], b["c"], b["v"]] for b in B if b["t"][:10] < today]
     D, Hh = {}, {}
-    with cf.ThreadPoolExecutor(4) as ex:
+    with cf.ThreadPoolExecutor(3) as ex:
         for t, rows in ex.map(lambda t: one(t, "d"), list(tickers) + ["IMOEX"]):
             if rows:
                 D[t] = rows + [[today, np.nan, np.nan, np.nan, np.nan, np.nan]]
@@ -106,6 +106,8 @@ def daily_probs(tickers, today, divh, upcoming, news_state, impact):
     W = [CD.news_weight(e, impact) for e in ev]
     hd = CD.hourly_daily(Hh)
     X = CD.build({"sh": {t: v for t, v in D.items() if len(v) > 300}, "ix": {"IMOEX": IX}}, dv, ev, news_tickers=set(meta().get("covered", [])), weights=W, hourly=hd)
+    if X.empty:
+        raise RuntimeError("нет свечей по бумагам (Мосбиржа недоступна?)")
     X = X[X.d == pd.Timestamp(today)].copy()
     FD = meta()["feat_daily"]
     for c in FD:
