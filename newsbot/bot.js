@@ -165,6 +165,10 @@ function cluster(S, items) {
         c = S.cl[key] = { key, ts: p.ts, first: { ch: p.ch, link: p.link, tx: p.tx.slice(0, 1200), rumor: p.rumor }, srcs: {}, rumorOnly: true, sent: {}, score: p.score, best: p.best, tks: p.tks, official: p.official };
         // для новостного фильтра стратегии: одна новость = одно событие (как в исследовании)
         const tk = key.split('|')[0];
+        // журнал событий для модели аномалий (продолжение исторического ряда новостей)
+        try {
+          fs.appendFileSync(path.join(STATE_DIR, 'news_log.jsonl'), JSON.stringify({ tk: tk === 'РЫНОК' ? 'IMOEX' : tk, ts: p.ts, ty: key.split('|')[1], s: Math.sign(p.score || 0), rum: p.rumor ? 1 : 0, off: p.official ? 1 : 0 }) + '\n');
+        } catch (e) { /* журнал не критичен */ }
         if (tk !== 'РЫНОК' && p.best && !(S.newsEv || []).some(e => e.t === tk && e.ts === p.ts)) { S.newsEv = (S.newsEv || []).filter(e => p.ts - e.ts < 20 * 86400); S.newsEv.push({ t: tk, ts: p.ts, v: +(p.best.v).toFixed(3), ty: p.best.ty }); }
       }
       if (!c.srcs[p.ch]) c.srcs[p.ch] = { ts: p.ts, link: p.link, rumor: p.rumor, tx: p.tx.slice(0, 1200) };
@@ -424,6 +428,16 @@ function writeSignals(S, res, data, today) {
         require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py'), 'anomaly'],
           { timeout: 240e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: 'anomaly', CHANNEL_STATE: path.join(STATE_DIR, 'channel'), NEWS_STATE: STATE_DIR }) });
       } catch (e) { log('аномалии: ошибка', e.message); }
+    }
+    // прогноз аномалий на день — один раз утром до открытия (06:00–09:50 МСК, будни)
+    const msk = new Date(Date.now() + 3 * 3600e3);
+    const mday = msk.toISOString().slice(0, 10), mh = msk.getUTCHours(), mwd = msk.getUTCDay();
+    if (mwd >= 1 && mwd <= 5 && mh >= 6 && mh <= 9 && S.anomPreDay !== mday) {
+      S.anomPreDay = mday;
+      try {
+        require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py'), 'anom_pre'],
+          { timeout: 600e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: 'anom_pre', CHANNEL_STATE: path.join(STATE_DIR, 'channel'), NEWS_STATE: STATE_DIR }) });
+      } catch (e) { log('прогноз аномалий: ошибка', e.message); }
     }
     // Пульс: сделки сильных трейдеров + лента постов для подтверждения новостей
     if (process.env.PULSE_EVERY_MIN && Date.now() - lastPulse >= +process.env.PULSE_EVERY_MIN * 60e3) {
