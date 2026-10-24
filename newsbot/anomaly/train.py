@@ -105,7 +105,7 @@ def events_all():
 
 
 # ------------------------------------------------------------------ модели
-def hgb(n=300):
+def hgb(n=200):
     from sklearn.ensemble import HistGradientBoostingClassifier
     return HistGradientBoostingClassifier(max_iter=n, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf=300, l2_regularization=1.0)
 
@@ -128,6 +128,10 @@ def calib(p, y):
             xs.append(float(p[m].mean())); ys.append(float(y[m].mean()))
     ys = list(np.maximum.accumulate(ys))
     return [xs, ys]
+
+
+def over_budget(t0):
+    return time.time() - t0 > float(os.environ.get("ANOM_BUDGET_MIN", "200")) * 60
 
 
 def walk(X, feats, target, years, sample_neg=1.0, weight_col=None):
@@ -174,7 +178,7 @@ def main():
         IX = Dd.pop("IMOEX")
         # часовые — для 220 самых торгуемых за последние 60 дней
         turn = {t: np.mean([r[5] for r in v[-60:]]) for t, v in Dd.items() if len(v) > 60}
-        top = sorted(turn, key=lambda t: -turn[t])[: int(os.environ.get("ANOM_HOURLY_N", "220"))]
+        top = sorted(turn, key=lambda t: -turn[t])[: int(os.environ.get("ANOM_HOURLY_N", "160"))]
         Hh = load_series("h", top + ["IMOEX"], "2020-01-01", index=("IMOEX",))
         IXH = Hh.pop("IMOEX")
     log("дневных рядов", len(Dd), "часовых", len(Hh), round(time.time() - t0), "с")
@@ -191,14 +195,25 @@ def main():
     # ---------- до открытия
     pre_oof = None
     for target in ("y", "y_px", "y_up", "y_dn"):
-        years = list(range(2016, yr + 1)) if target == "y" else list(range(yr - 3, yr + 1))
-        P, rep = walk(X, FD, target, years)
+        years = list(range(yr - 5, yr + 1)) if target == "y" else list(range(yr - 2, yr + 1))
+        if over_budget(t0):
+            years = []
+        P, rep = walk(X, FD, target, years, sample_neg=0.5) if years else (None, [])
         meta["report"]["daily_" + target] = rep
-        meta["calib"]["daily_" + target] = calib(P.p.values, P.y.values)
+        if P is not None:
+            meta["calib"]["daily_" + target] = calib(P.p.values, P.y.values)
+        clf = fit_final(X, FD, target, sample_neg=0.5)
         if target == "y":
-            pre_oof = P[["d", "t", "p"]].rename(columns={"p": "p_pre"})
-        clf = fit_final(X, FD, target)
+            # прогноз «до открытия» для внутридневной модели: вне выборки там, где он есть, иначе финальной моделью
+            pre_all = X[["d", "t"]].assign(p_pre=clf.predict_proba(X[FD])[:, 1])
+            if P is not None:
+                oof = P[["d", "t", "p"]].rename(columns={"p": "p_oof"})
+                pre_all = pre_all.merge(oof, on=["d", "t"], how="left")
+                pre_all["p_pre"] = pre_all["p_oof"].fillna(pre_all["p_pre"])
+                pre_all = pre_all.drop(columns="p_oof")
+            pre_oof = pre_all
         pickle.dump(clf, open(os.path.join(MODELS, f"daily_{target}.pkl"), "wb"))
+        json.dump(meta, open(os.path.join(MODELS, "meta.json"), "w"), ensure_ascii=False)
         log("готово: daily", target, round(time.time() - t0), "с")
     # ---------- внутри дня
     XI, typ = CI.build_train(Hh, IXH, X, ev, pre_oof)
@@ -206,16 +221,21 @@ def main():
     meta["typ"] = typ
     log("внутридневных строк:", XI.shape, "база", round(XI.y.mean(), 4), round(time.time() - t0), "с")
     for target in ("y", "y_px"):
-        P, rep = walk(XI, CI.FEAT, target, list(range(yr - 3, yr + 1)), sample_neg=0.3)
+        yrs = [] if over_budget(t0) else list(range(yr - 2, yr + 1))
+        P, rep = walk(XI, CI.FEAT, target, yrs, sample_neg=0.2) if yrs else (None, [])
         meta["report"]["intra_" + target] = rep
-        meta["calib"]["intra_" + target] = calib(P.p.values, P.y.values)
-        clf = fit_final(XI, CI.FEAT, target, sample_neg=0.3)
+        if P is not None:
+            meta["calib"]["intra_" + target] = calib(P.p.values, P.y.values)
+        clf = fit_final(XI, CI.FEAT, target, sample_neg=0.2)
         pickle.dump(clf, open(os.path.join(MODELS, f"intra_{target}.pkl"), "wb"))
+        json.dump(meta, open(os.path.join(MODELS, "meta.json"), "w"), ensure_ascii=False)
         log("готово: intra", target, round(time.time() - t0), "с")
     json.dump(meta, open(os.path.join(MODELS, "meta.json"), "w"), ensure_ascii=False)
     # ---------- отчёт
     log("===== ИТОГ (проверка на будущих годах, модель не видела эти данные) =====")
     for k, rep in meta["report"].items():
+        if not rep:
+            continue
         r = pd.DataFrame(rep)
         log(f"{k}: AUC {r.auc.mean():.3f}, точность в топ-5% {r.top5.mean():.3f} при базе {r.base.mean():.4f} (в {r.top5.mean() / max(r.base.mean(), 1e-9):.1f} раза выше)")
     log("время", round(time.time() - t0), "с")
