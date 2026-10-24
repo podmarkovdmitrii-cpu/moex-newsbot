@@ -901,7 +901,8 @@ def morning():
         base = sum(arows[t].get("p_y") or 0 for t in arows) / max(1, len(arows))
         B.append(("h3", "🔮 Вероятность аномалий сегодня"))
         B.append(("p", f"<i>Модель оценивает шанс, что бумага сегодня резко отклонится от индекса (порог эшелона, 4–8%) или наберёт оборот в 4–6 раз выше обычного. "
-                       f"В среднем по {len(arows)} бумагам — {base:.1%}. Обучена на 2013–2026 и проверена на годах, которых не видела: у 5% бумаг с самым высоким прогнозом аномалия случалась в 8 раз чаще среднего.</i>"))
+                       f"В среднем по {len(arows)} бумагам — {base:.1%}. Обучена на 2013–2026 и проверена на годах, которых не видела: у 5% бумаг с самым высоким прогнозом аномалия случалась в 8 раз чаще среднего. "
+                       + anom_dir_note("daily_dir", "утром") + "</i>"))
         B.append(("ul", [f"<b>${t}</b> — <b>{arows[t]['p_y']:.0%}</b> (ценовая {arows[t].get('p_y_px') or 0:.0%}, {anom_dir_word(arows[t])})"
                          + (": " + "; ".join(arows[t].get("why") or []) if arows[t].get("why") else "") for t in atop]))
     # дивидендный календарь
@@ -1010,7 +1011,7 @@ def morning():
     if near:
         tz += ["💰 <b>Скоро отсечки:</b> " + ", ".join(f"${r['t']} ({pc(r['yld'], 1, False)}, купить до {ddmm(r['last_buy'])})" for r in sorted(near, key=lambda r: r["last_buy"])[:4])]
     if atop:
-        tz += ["🔮 <b>Вероятные аномалии:</b> " + ", ".join(f"${t} {arows[t]['p_y']:.0%}" for t in atop[:5])]
+        tz += ["🔮 <b>Вероятные аномалии:</b> " + ", ".join(f"${t} {arows[t]['p_y']:.0%} " + anom_dir_word(arows[t]).split(' (')[0] for t in atop[:5])]
     if sect_out:
         tz += ["🧭 <b>В фокусе секторов:</b> " + ", ".join(n.split(" ", 1)[1] for _, n, _ in [x for x in sect_out if not x[1].startswith("📦")][:4])]
     tz += ["", "{LINK}", "#план_дня"]
@@ -1163,7 +1164,8 @@ def evening():
             tt = sum(len(d["top"]) for d in last)
             txt.append(f"🔮 <b>Прогноз аномалий</b>: из 10 бумаг утреннего топа аномалией стали {len(rec['hit'])}" + (f" ({' '.join('$' + t for t in rec['hit'])})" if rec["hit"] else "")
                        + f", модель ожидала ≈{exp:.1f}" + (f"; ранних предупреждений {len(rec['warn'])}, сбылось {len(rec['whit'])}" if rec["warn"] else "")
-                       + (f". За {len(last)} дн.: {th} из {tt} ({th / tt:.0%})." if len(last) >= 3 and tt else "."))
+                       + (f". За {len(last)} дн.: {th} из {tt} ({th / tt:.0%})." if len(last) >= 3 and tt else ".")
+                       + (f" Направление угадано: {rec['dir_ok']} из {rec['dir_n']}." if rec.get("dir_n") else ""))
     except Exception as e:  # noqa: BLE001
         log("итоги прогноза аномалий", e)
     try:
@@ -1528,7 +1530,7 @@ def aitest():
 # Прогноз аномалий (модели anomaly/train.py): на день — до открытия, внутри дня — ранние признаки
 # =============================================================================================
 ANOM_DIR = os.path.join(HERE, "..", "anomaly")
-AN_KEEP = ["p_y", "p_y_px", "p_y_up", "p_y_dn", "tier", "sd60", "sd20", "an20", "an250", "since_an", "vr1", "nw_n", "nw_w", "nw_wmax", "ix_r1", "ix_sd20", "lval",
+AN_KEEP = ["p_y", "p_y_px", "p_y_up", "p_y_dn", "p_dir_up", "tier", "sd60", "sd20", "an20", "an250", "since_an", "vr1", "nw_n", "nw_w", "nw_wmax", "ix_r1", "ix_sd20", "lval",
            "ema20d", "dhi20", "dlo20", "month", "dow", "to_ex", "absx1", "h_ev_ret", "brk20", "sq"]
 
 
@@ -1587,7 +1589,7 @@ def anom_test():
     log("модель обучена:", out.get("trained"), "| бумаг:", len(rows), "| средняя вероятность:", round(sum(r["p_y"] for r in rows.values()) / len(rows), 4))
     for t in sorted(rows, key=lambda t: -rows[t]["p_y"])[:20]:
         r = rows[t]
-        log(f"{t}: {r['p_y']:.1%} ценовая {r['p_y_px'] or 0:.1%} вверх {r['p_y_up'] or 0:.1%} вниз {r['p_y_dn'] or 0:.1%} — {'; '.join(r['why'])}")
+        log(f"{t}: {r['p_y']:.1%} ценовая {r['p_y_px'] or 0:.1%} — {anom_dir_word(r)} — {'; '.join(r['why'])}")
 
 
 def pd_isna(v):
@@ -1608,10 +1610,27 @@ def anom_today_any():
 
 
 def anom_dir_word(r):
-    up, dn = r.get("p_y_up") or 0, r.get("p_y_dn") or 0
-    if up + dn < 0.01:
-        return "направление неясно"
-    return "скорее вверх" if up >= 1.5 * dn else "скорее вниз" if dn >= 1.5 * up else "в любую сторону"
+    """Куда вероятнее пойдёт бумага, если аномалия случится: P(вверх | аномалия) из модели направления."""
+    pu = r.get("p_dir_up")
+    if pu is None:
+        up, dn = r.get("p_y_up") or 0, r.get("p_y_dn") or 0
+        if up + dn < 0.01:
+            return "направление неясно"
+        pu = up / (up + dn)
+    if abs(pu - 0.5) < 0.1:
+        return f"направление неясно (вверх {pu:.0%})"
+    return f"⬆️ вверх {pu:.0%}" if pu > 0.5 else f"⬇️ вниз {1 - pu:.0%}"
+
+
+def anom_dir_note(name, when):
+    try:
+        a = anom_live().dir_acc(name)
+    except Exception:  # noqa: BLE001
+        a = {}
+    if not a:
+        return ""
+    return (f"Направление ({when}) на проверке угадывалось в {a['acc']:.0%} случаев (если всегда говорить «вверх» — {a['base_up']:.0%})"
+            + (f", при уверенном прогнозе — в {a['acc_conf']:.0%}" if a.get("acc_conf") else "") + ".")
 
 
 def anom_intraday(stt, md, ixc, now):
@@ -1657,10 +1676,13 @@ def anom_intraday(stt, md, ixc, now):
     for r in cand:
         dd = today["rows"].get(r.t, {})
         vol_typ = f", оборот уже ×{fmt(r.cvol_typ, 1)} к обычному на это время" if r.cvol_typ == r.cvol_typ and r.cvol_typ >= 1.5 else ""
-        txt.append(f"• <b>${r.t}</b> — вероятность аномалии <b>{r.p:.0%}</b> (ценовой {r.p_px:.0%}); сейчас {pc(r.cx, 1)} к индексу{vol_typ}"
+        pu = float(r.p_dir_up)
+        dirw = f"⬆️ скорее вверх ({pu:.0%})" if pu >= 0.6 else f"⬇️ скорее вниз ({1 - pu:.0%})" if pu <= 0.4 else f"направление неясно (вверх {pu:.0%})"
+        txt.append(f"• <b>${r.t}</b> — вероятность аномалии <b>{r.p:.0%}</b> (ценовой {r.p_px:.0%}), {dirw}; сейчас {pc(r.cx, 1)} к индексу{vol_typ}"
                    + (f"; новостей за день: {int(r.nw_day)}" if r.nw_day else "") + (f"; утренний прогноз был {dd.get('p_y', 0):.0%}" if dd.get("p_y") else ""))
-        warn[r.t] = dict(p=round(float(r.p), 3), px=round(float(r.p_px), 3), ts=time.time(), cx=round(float(r.cx), 4))
-    txt += ["", "<i>Аномалия — движение цены к индексу сильнее порога эшелона или оборот в 4–6 раз выше обычного. Вероятность — по модели, обученной на истории 2013–2026 и проверенной на годах, которых она не видела. Это не сигнал на сделку.</i>",
+        warn[r.t] = dict(p=round(float(r.p), 3), px=round(float(r.p_px), 3), ts=time.time(), cx=round(float(r.cx), 4), up=round(pu, 3))
+    txt += ["", "<i>Аномалия — движение цены к индексу сильнее порога эшелона или оборот в 4–6 раз выше обычного. Вероятность — по модели, обученной на истории 2013–2026 и проверенной на годах, которых она не видела. "
+            + anom_dir_note("intra_dir", "внутри дня") + " Это не сигнал на сделку.</i>",
             "#прогноз_аномалий " + " ".join("#" + r.t for r in cand)]
     stt["wn"] = stt.get("wn", 0) + 1
     PUB.post("\n".join(txt))
@@ -1672,7 +1694,7 @@ def anom_score_day(md, ixc):
     if not today:
         return None
     rows = today["rows"]
-    real = set()
+    real, xs = set(), {}
     for r in md:
         t = r["SECID"]
         d = rows.get(t)
@@ -1681,6 +1703,7 @@ def anom_score_day(md, ixc):
         tier = d.get("tier") or 3
         thr = max({1: 0.04, 2: 0.06}.get(int(tier), 0.08), 3 * d["sd60"])
         x = (r.get("LASTTOPREVPRICE") or 0) / 100 - ixc
+        xs[t] = x
         val = r.get("VALTODAY") or 0
         med = 10 ** (d.get("lval") or 12)
         if abs(x) >= thr or (val / med >= (6 if tier == 3 else 4) and val >= 30e6):
@@ -1690,7 +1713,14 @@ def anom_score_day(md, ixc):
     warn = an.get("warn", {}) if an.get("date") == today["date"] else {}
     exp = sum(rows[t]["p_y"] for t in topm)
     hist = load_json("anom_track.json", {"days": []})
-    rec = dict(date=today["date"], top=topm, hit=[t for t in topm if t in real], warn=list(warn), whit=[t for t in warn if t in real], n_real=len(real))
+    def dir_ok(t, pu):
+        return pu is not None and abs(pu - 0.5) >= 0.1 and t in xs and xs[t] != 0 and (xs[t] > 0) == (pu > 0.5)
+    hit = [t for t in topm if t in real]
+    whit = [t for t in warn if t in real]
+    dm = [t for t in hit if rows[t].get("p_dir_up") is not None and abs(rows[t]["p_dir_up"] - 0.5) >= 0.1]
+    dw = [t for t in whit if abs((warn[t].get("up") or 0.5) - 0.5) >= 0.1]
+    rec = dict(date=today["date"], top=topm, hit=hit, warn=list(warn), whit=whit, n_real=len(real),
+               dir_n=len(dm) + len(dw), dir_ok=sum(dir_ok(t, rows[t]["p_dir_up"]) for t in dm) + sum(dir_ok(t, warn[t]["up"]) for t in dw))
     hist["days"] = [d for d in hist["days"] if d["date"] != rec["date"]][-120:] + [rec]
     save_json("anom_track.json", hist)
     return rec, exp, hist
