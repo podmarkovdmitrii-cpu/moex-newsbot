@@ -1538,11 +1538,11 @@ def anom_live():
     return live
 
 
-def anom_pre(force=False):
+def anom_pre(force=False, day=None):
     """Вероятности аномалий на сегодня по 250 самым торгуемым акциям; результат — anom_today.json (состояние)."""
     now = now_msk()
-    today = now.date().isoformat()
-    if now.weekday() >= 5:
+    today = day or now.date().isoformat()
+    if dt.date.fromisoformat(today).weekday() >= 5:
         return None
     cur = load_json("anom_today.json", {})
     if cur.get("date") == today and not force:
@@ -1569,9 +1569,25 @@ def anom_pre(force=False):
         d["why"] = live.reasons({k: (v if v is not None else 0) for k, v in d.items()})
         rows[t] = d
     out = dict(date=today, rows=rows, trained=live.meta().get("trained"))
-    save_json("anom_today.json", out)
+    if not day:
+        save_json("anom_today.json", out)
     log("прогноз аномалий на день:", len(rows), "бумаг; топ:", ", ".join(f"{t} {rows[t]['p_y']:.0%}" for t in sorted(rows, key=lambda t: -rows[t]["p_y"])[:5]))
     return out
+
+
+def anom_test():
+    """Проверка без публикации: прогноз на ближайший торговый день, топ-20 в журнал."""
+    d = now_msk().date()
+    day = d if d.weekday() < 5 else next_wd(d)
+    out = anom_pre(force=True, day=day.isoformat())
+    if not out:
+        log("прогноза нет")
+        return
+    rows = out["rows"]
+    log("модель обучена:", out.get("trained"), "| бумаг:", len(rows), "| средняя вероятность:", round(sum(r["p_y"] for r in rows.values()) / len(rows), 4))
+    for t in sorted(rows, key=lambda t: -rows[t]["p_y"])[:20]:
+        r = rows[t]
+        log(f"{t}: {r['p_y']:.1%} ценовая {r['p_y_px'] or 0:.1%} вверх {r['p_y_up'] or 0:.1%} вниз {r['p_y_dn'] or 0:.1%} — {'; '.join(r['why'])}")
 
 
 def pd_isna(v):
@@ -2098,7 +2114,7 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre}[mode]()
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test}[mode]()
 
 
 if __name__ == "__main__":
