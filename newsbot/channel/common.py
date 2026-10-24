@@ -118,11 +118,14 @@ def table(js, name):
 
 def candles(path, days=420, interval=24):
     frm = (dt.date.today() - dt.timedelta(days=days)).isoformat()
-    rows, start = [], 0
+    rows, start, pages = [], 0, 0
     while True:
         part = table(iss(path, interval=interval, **{"from": frm, "start": start}), "candles")
+        if part and rows and part[0].get("begin") <= rows[-1].get("begin"):
+            break  # ISS вернул ту же страницу — защита от бесконечной подкачки
         rows += part
-        if len(part) < 500:
+        pages += 1
+        if len(part) < 500 or pages >= 400:
             break
         start += len(part)
     tl = 10 if interval in (24, 7, 31) else 16
