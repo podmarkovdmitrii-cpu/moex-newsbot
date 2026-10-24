@@ -901,7 +901,7 @@ def morning():
         base = sum(arows[t].get("p_y") or 0 for t in arows) / max(1, len(arows))
         B.append(("h3", "🔮 Вероятность аномалий сегодня"))
         B.append(("p", f"<i>Модель оценивает шанс, что бумага сегодня резко отклонится от индекса (порог эшелона, 4–8%) или наберёт оборот в 4–6 раз выше обычного. "
-                       f"В среднем по {len(arows)} бумагам — {base:.1%}. Обучена на 2013–2026 и проверена на годах, которых не видела: у 5% бумаг с самым высоким прогнозом аномалия случалась в 8 раз чаще среднего. "
+                       f"В среднем по {len(arows)} бумагам — {pc(base, 1, False)}. Обучена на 2013–2026 и проверена на годах, которых не видела: у 5% бумаг с самым высоким прогнозом аномалия случалась в 8 раз чаще среднего. "
                        + anom_dir_note("daily_dir", "утром") + "</i>"))
         B.append(("ul", [f"<b>${t}</b> — <b>{arows[t]['p_y']:.0%}</b> (ценовая {arows[t].get('p_y_px') or 0:.0%}, {anom_dir_word(arows[t])})"
                          + (": " + "; ".join(arows[t].get("why") or []) if arows[t].get("why") else "") for t in atop]))
@@ -1173,6 +1173,25 @@ def evening():
     except Exception as e:  # noqa: BLE001
         log("на завтра", e)
         tmr, focus, notes = None, {}, []
+    # вероятные аномалии на следующий торговый день (по данным сегодняшнего дня; утром прогноз уточняется)
+    nxt = None
+    try:
+        nxt = anom_next(now)
+    except Exception as e:  # noqa: BLE001
+        log("прогноз аномалий на завтра", e)
+    if nxt and nxt.get("rows"):
+        nr = nxt["rows"]
+        ntop = sorted(nr, key=lambda t: -(nr[t].get("p_y") or 0))[:8]
+        tmr = tmr or dt.date.fromisoformat(nxt["date"])
+        for t in ntop:
+            if (nr[t].get("p_y") or 0) >= 0.15:
+                focus.setdefault(t, []).insert(0, f"вероятность аномалии {nr[t]['p_y']:.0%}, {anom_dir_word(nr[t])}")
+        txt += ["", f"🔮 <b>Вероятные аномалии на {dt.date.fromisoformat(nxt['date']).strftime('%d.%m')}</b> (модель; утром в плане дня — уточнение с ночными новостями):"]
+        for t in ntop:
+            r = nr[t]
+            txt.append(f"• <b>${t}</b> — {r['p_y']:.0%} (ценовая {r.get('p_y_px') or 0:.0%}), {anom_dir_word(r)}" + (": " + "; ".join((r.get("why") or [])[:3]).replace("вчера", "сегодня") if r.get("why") else ""))
+        base = sum((r.get("p_y") or 0) for r in nr.values()) / max(1, len(nr))
+        txt.append(f"<i>В среднем по {len(nr)} бумагам — {pc(base, 1, False)}. " + anom_dir_note("daily_dir", "утром") + "</i>")
     if focus or notes:
         txt += ["", f"👀 <b>На что обратить внимание завтра, {tmr.strftime('%d.%m')} ({wd_ru(tmr)}):</b>"]
         for t, why in sorted(focus.items(), key=lambda x: -len(x[1]))[:10]:
@@ -1622,6 +1641,20 @@ def anom_dir_word(r):
     return f"⬆️ вверх {pu:.0%}" if pu > 0.5 else f"⬇️ вниз {1 - pu:.0%}"
 
 
+def anom_next(now=None):
+    """Прогноз аномалий на следующий торговый день по данным сегодняшней сессии (для итогов дня)."""
+    now = now or now_msk()
+    day = next_wd(now.date()).isoformat()
+    cur = load_json("anom_next.json", {})
+    if cur.get("date") == day and cur.get("made", "")[:10] == now.date().isoformat():
+        return cur
+    out = anom_pre(force=True, day=day)
+    if out:
+        out["made"] = now.isoformat()
+        save_json("anom_next.json", out)
+    return out
+
+
 def anom_dir_note(name, when):
     try:
         a = anom_live().dir_acc(name)
@@ -1635,9 +1668,9 @@ def anom_dir_note(name, when):
 
 def anom_intraday(stt, md, ixc, now):
     import pandas as pd
-    """Ранние признаки: бумаги, которые с высокой вероятностью станут аномалией до конца дня. Раз в 20 минут, 10:30–18:15."""
+    """Ранние признаки: бумаги, которые с высокой вероятностью станут аномалией до конца дня. Раз в 15 минут, 11:00–18:45."""
     hm = now.strftime("%H:%M")
-    if not ("11:00" <= hm <= "18:15") or time.time() - stt.get("ai_ts", 0) < 20 * 60:
+    if not ("11:00" <= hm <= "18:45") or time.time() - stt.get("ai_ts", 0) < int(os.environ.get("ANOM_CHECK_MIN", "15")) * 60 - 30:
         return
     stt["ai_ts"] = time.time()
     today = anom_today_any()
