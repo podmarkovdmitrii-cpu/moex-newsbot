@@ -1609,6 +1609,8 @@ def anom_intraday(stt, md, ixc, now):
     if not today or not today.get("rows"):
         return
     live = anom_live()
+    if not os.path.exists(os.path.join(live.MODELS, "intra_y.pkl")):
+        return
     td = pd.DataFrame(today["rows"]).T
     for k in live.CI.DCOLS + ["p_y"]:
         if k not in td.columns:
