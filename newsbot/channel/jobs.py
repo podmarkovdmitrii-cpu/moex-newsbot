@@ -1618,7 +1618,7 @@ def anom_intraday(stt, md, ixc, now):
     import pandas as pd
     """Ранние признаки: бумаги, которые с высокой вероятностью станут аномалией до конца дня. Раз в 20 минут, 10:30–18:15."""
     hm = now.strftime("%H:%M")
-    if not ("10:30" <= hm <= "18:15") or time.time() - stt.get("ai_ts", 0) < 20 * 60:
+    if not ("11:00" <= hm <= "18:15") or time.time() - stt.get("ai_ts", 0) < 20 * 60:
         return
     stt["ai_ts"] = time.time()
     today = anom_today_any()
