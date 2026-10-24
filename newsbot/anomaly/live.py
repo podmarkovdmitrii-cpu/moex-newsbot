@@ -117,7 +117,13 @@ def daily_probs(tickers, today, divh, upcoming, news_state, impact):
             X[c] = np.nan
     for name in ("y", "y_px", "y_up", "y_dn"):
         X["p_" + name] = cal("daily_" + name, model("daily_" + name).predict_proba(X[FD])[:, 1])
+    if os.path.exists(os.path.join(MODELS, "daily_dir.pkl")):
+        X["p_dir_up"] = model("daily_dir").predict_proba(X[FD])[:, 1]  # P(вверх | аномалия)
     return X.set_index("t")
+
+
+def dir_acc(name):
+    return (meta().get("dir_acc") or {}).get(name) or {}
 
 
 def reasons(r):
@@ -151,4 +157,8 @@ def intraday(md, ix_chg, hour, today_df, prev_val, news_hours):
         return F
     F["p"] = cal("intra_y", model("intra_y").predict_proba(F[CI.FEAT])[:, 1])
     F["p_px"] = cal("intra_y_px", model("intra_y_px").predict_proba(F[CI.FEAT])[:, 1])
+    if os.path.exists(os.path.join(MODELS, "intra_dir.pkl")):
+        F["p_dir_up"] = model("intra_dir").predict_proba(F[CI.FEAT])[:, 1]
+    else:
+        F["p_dir_up"] = np.where(F["cx"] > 0, 0.8, 0.2)
     return F.sort_values("p", ascending=False)

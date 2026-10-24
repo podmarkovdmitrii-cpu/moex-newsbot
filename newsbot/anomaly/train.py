@@ -153,6 +153,37 @@ def walk(X, feats, target, years, sample_neg=1.0, weight_col=None):
     return pd.concat(preds, ignore_index=True), rep
 
 
+def hgb_dir():
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    return HistGradientBoostingClassifier(max_iter=200, learning_rate=0.05, max_leaf_nodes=15, min_samples_leaf=100, l2_regularization=1.0)
+
+
+def direction(D, feats, years, name, meta):
+    """Направление аномалии (вверх/вниз к индексу) при условии, что она случится: проверка по годам + финальная модель."""
+    from sklearn.metrics import roc_auc_score
+    D = D[(D.y == 1) & D.x.notna()].copy()
+    D["up"] = (D.x > 0).astype(int)
+    rep = []
+    for Y in years:
+        tr, te = D[D.d.dt.year < Y], D[D.d.dt.year == Y]
+        if len(te) < 50 or len(tr) < 300:
+            continue
+        p = hgb_dir().fit(tr[feats], tr.up).predict_proba(te[feats])[:, 1]
+        y = te.up.values
+        m = np.abs(p - 0.5) >= 0.15
+        rep.append(dict(year=Y, auc=round(float(roc_auc_score(y, p)), 3), acc=round(float(((p > 0.5) == y).mean()), 3), base_up=round(float(y.mean()), 3),
+                        acc_conf=round(float(((p[m] > 0.5) == y[m]).mean()), 3) if m.sum() else None, n=int(len(y))))
+        log(name, rep[-1])
+    meta["report"][name] = rep
+    clf = hgb_dir().fit(D[feats], D.up)
+    pickle.dump(clf, open(os.path.join(MODELS, name + ".pkl"), "wb"))
+    if rep:
+        r = pd.DataFrame(rep)
+        meta.setdefault("dir_acc", {})[name] = dict(acc=float(r.acc.mean()), acc_conf=float(r.acc_conf.dropna().mean()) if r.acc_conf.notna().any() else None,
+                                                     base_up=float(r.base_up.mean()))
+    json.dump(meta, open(os.path.join(MODELS, "meta.json"), "w"), ensure_ascii=False)
+
+
 def fit_final(X, feats, target, sample_neg=1.0):
     tr = X.dropna(subset=[target])
     if sample_neg < 1:
@@ -214,6 +245,7 @@ def main():
         pickle.dump(clf, open(os.path.join(MODELS, f"daily_{target}.pkl"), "wb"))
         json.dump(meta, open(os.path.join(MODELS, "meta.json"), "w"), ensure_ascii=False)
         log("готово: daily", target, round(time.time() - t0), "с")
+    direction(X, FD, list(range(yr - 5, yr + 1)), "daily_dir", meta)
     # ---------- внутри дня
     XI, typ = CI.build_train(Hh, IXH, X, ev, pre_oof)
     XI = XI[XI.d.dt.year >= 2017].reset_index(drop=True)
@@ -229,6 +261,7 @@ def main():
         pickle.dump(clf, open(os.path.join(MODELS, f"intra_{target}.pkl"), "wb"))
         json.dump(meta, open(os.path.join(MODELS, "meta.json"), "w"), ensure_ascii=False)
         log("готово: intra", target, round(time.time() - t0), "с")
+    direction(XI.merge(X[["d", "t", "x"]], on=["d", "t"], how="left"), CI.FEAT, list(range(yr - 3, yr + 1)), "intra_dir", meta)
     json.dump(meta, open(os.path.join(MODELS, "meta.json"), "w"), ensure_ascii=False)
     # ---------- отчёт
     log("===== ИТОГ (проверка на будущих годах, модель не видела эти данные) =====")
@@ -236,6 +269,9 @@ def main():
         if not rep:
             continue
         r = pd.DataFrame(rep)
+        if k.endswith("_dir"):
+            log(f"{k}: направление угадано в {r.acc.mean():.1%} случаев (всегда «вверх» — {r.base_up.mean():.1%}), при уверенном прогнозе — {r.acc_conf.dropna().mean():.1%}")
+            continue
         log(f"{k}: AUC {r.auc.mean():.3f}, точность в топ-5% {r.top5.mean():.3f} при базе {r.base.mean():.4f} (в {r.top5.mean() / max(r.base.mean(), 1e-9):.1f} раза выше)")
     log("время", round(time.time() - t0), "с")
 
