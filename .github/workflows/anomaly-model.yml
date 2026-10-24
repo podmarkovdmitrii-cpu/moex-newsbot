@@ -12,7 +12,7 @@ concurrency:
 jobs:
   train:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 340
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,6 +38,7 @@ jobs:
           ANOM_MODELS: ${{ github.workspace }}/anomaly-models
           NEWS_STATE: ${{ github.workspace }}/newsbot-state
           CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          ANOM_BUDGET_MIN: '180'
         run: python newsbot/anomaly/train.py
       - name: Сохранить свечи
         if: always()
@@ -46,6 +47,7 @@ jobs:
           path: anomaly-data
           key: anomaly-data-${{ github.run_id }}
       - name: Сохранить модели
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: anomaly-models
