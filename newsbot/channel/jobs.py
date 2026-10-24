@@ -14,6 +14,7 @@
 import html
 import datetime as dt
 import json
+import math
 import os
 import re
 import statistics as st
@@ -888,6 +889,21 @@ def morning():
     if mnews:
         B.append(("h4", "Новости для всего рынка"))
         B.append(("ul", [news_line(c) for c in mnews]))
+    # прогноз аномалий на день
+    ap = None
+    try:
+        ap = anom_today_any()
+    except Exception as e:  # noqa: BLE001
+        log("прогноз аномалий", e)
+    arows = (ap or {}).get("rows") or {}
+    atop = sorted(arows, key=lambda t: -(arows[t].get("p_y") or 0))[:12]
+    if atop:
+        base = sum(arows[t].get("p_y") or 0 for t in arows) / max(1, len(arows))
+        B.append(("h3", "🔮 Вероятность аномалий сегодня"))
+        B.append(("p", f"<i>Модель оценивает шанс, что бумага сегодня резко отклонится от индекса (порог эшелона, 4–8%) или наберёт оборот в 4–6 раз выше обычного. "
+                       f"В среднем по {len(arows)} бумагам — {base:.1%}. Обучена на 2013–2026 и проверена на годах, которых не видела: у 5% бумаг с самым высоким прогнозом аномалия случалась в 8 раз чаще среднего.</i>"))
+        B.append(("ul", [f"<b>${t}</b> — <b>{arows[t]['p_y']:.0%}</b> (ценовая {arows[t].get('p_y_px') or 0:.0%}, {anom_dir_word(arows[t])})"
+                         + (": " + "; ".join(arows[t].get("why") or []) if arows[t].get("why") else "") for t in atop]))
     # дивидендный календарь
     if upc:
         B.append(("h3", "💰 Дивидендный календарь (объявленные выплаты, 60 дней)"))
@@ -935,6 +951,10 @@ def morning():
         focus = {}
         for p in pl:
             focus.setdefault(p["t"], []).append("сигнал стратегии" if p["kind"] == "signal" else "сетап стратегии")
+        for t_ in tks:
+            pa = (arows.get(t_) or {}).get("p_y") or 0
+            if pa >= 0.15:
+                focus.setdefault(t_, []).append(f"вероятность аномалии {pa:.0%}")
         for d in pdl:
             if d["t"] in tks:
                 focus.setdefault(d["t"], []).append(f"сделка сильного трейдера Пульса ({'покупка' if d['side'] > 0 else 'продажа'})")
@@ -989,6 +1009,8 @@ def morning():
     near = [r for r in upc if r.get("last_buy") and 0 <= (dt.date.fromisoformat(r["last_buy"]) - today).days <= 14]
     if near:
         tz += ["💰 <b>Скоро отсечки:</b> " + ", ".join(f"${r['t']} ({pc(r['yld'], 1, False)}, купить до {ddmm(r['last_buy'])})" for r in sorted(near, key=lambda r: r["last_buy"])[:4])]
+    if atop:
+        tz += ["🔮 <b>Вероятные аномалии:</b> " + ", ".join(f"${t} {arows[t]['p_y']:.0%}" for t in atop[:5])]
     if sect_out:
         tz += ["🧭 <b>В фокусе секторов:</b> " + ", ".join(n.split(" ", 1)[1] for _, n, _ in [x for x in sect_out if not x[1].startswith("📦")][:4])]
     tz += ["", "{LINK}", "#план_дня"]
@@ -1131,6 +1153,19 @@ def evening():
     pubc = (S.get("pub") or {}).get("count")
     if pubc:
         txt.append(f"📰 Опубликовано новостей и заявлений за день: {pubc}.")
+    try:
+        im_ = (ixm.get("IMOEX") or {}).get("LASTCHANGEPRC")
+        sc = anom_score_day(liquid_shares(400), (im_ or 0) / 100)
+        if sc:
+            rec, exp, hist = sc
+            last = hist["days"][-20:]
+            th = sum(len(d["hit"]) for d in last)
+            tt = sum(len(d["top"]) for d in last)
+            txt.append(f"🔮 <b>Прогноз аномалий</b>: из 10 бумаг утреннего топа аномалией стали {len(rec['hit'])}" + (f" ({' '.join('$' + t for t in rec['hit'])})" if rec["hit"] else "")
+                       + f", модель ожидала ≈{exp:.1f}" + (f"; ранних предупреждений {len(rec['warn'])}, сбылось {len(rec['whit'])}" if rec["warn"] else "")
+                       + (f". За {len(last)} дн.: {th} из {tt} ({th / tt:.0%})." if len(last) >= 3 and tt else "."))
+    except Exception as e:  # noqa: BLE001
+        log("итоги прогноза аномалий", e)
     try:
         tmr, focus, notes = watch_tomorrow(md, now)
     except Exception as e:  # noqa: BLE001
@@ -1490,6 +1525,160 @@ def aitest():
 
 
 # =============================================================================================
+# Прогноз аномалий (модели anomaly/train.py): на день — до открытия, внутри дня — ранние признаки
+# =============================================================================================
+ANOM_DIR = os.path.join(HERE, "..", "anomaly")
+AN_KEEP = ["p_y", "p_y_px", "p_y_up", "p_y_dn", "tier", "sd60", "sd20", "an20", "an250", "since_an", "vr1", "nw_n", "nw_w", "nw_wmax", "ix_r1", "ix_sd20", "lval",
+           "ema20d", "dhi20", "dlo20", "month", "dow", "to_ex", "absx1", "h_ev_ret", "brk20", "sq"]
+
+
+def anom_live():
+    sys.path.insert(0, ANOM_DIR)
+    import live
+    return live
+
+
+def anom_pre(force=False):
+    """Вероятности аномалий на сегодня по 250 самым торгуемым акциям; результат — anom_today.json (состояние)."""
+    now = now_msk()
+    today = now.date().isoformat()
+    if now.weekday() >= 5:
+        return None
+    cur = load_json("anom_today.json", {})
+    if cur.get("date") == today and not force:
+        return cur
+    try:
+        live = anom_live()
+    except Exception as e:  # noqa: BLE001
+        log("прогноз аномалий: модуль недоступен", e)
+        return None
+    if not live.ready():
+        log("прогноз аномалий: модели ещё не обучены (workflow «Модель аномалий»)")
+        return None
+    try:
+        import divs
+        upc = divs.upcoming(60)
+    except Exception:  # noqa: BLE001
+        upc = []
+    tick = top_stocks(int(os.environ.get("ANOM_N", "250")))
+    impact = json.load(open(os.path.join(HERE, "..", "impact.json"), encoding="utf-8"))
+    X = live.daily_probs(tick, today, DIVS, upc, NEWS_STATE, impact)
+    rows = {}
+    for t, r in X.iterrows():
+        d = {k: (None if pd_isna(r.get(k)) else float(r.get(k))) for k in AN_KEEP}
+        d["why"] = live.reasons({k: (v if v is not None else 0) for k, v in d.items()})
+        rows[t] = d
+    out = dict(date=today, rows=rows, trained=live.meta().get("trained"))
+    save_json("anom_today.json", out)
+    log("прогноз аномалий на день:", len(rows), "бумаг; топ:", ", ".join(f"{t} {rows[t]['p_y']:.0%}" for t in sorted(rows, key=lambda t: -rows[t]["p_y"])[:5]))
+    return out
+
+
+def pd_isna(v):
+    try:
+        return v is None or (isinstance(v, float) and math.isnan(v))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def anom_today_any():
+    """Прогноз на сегодня: свой (состояние) или новостного бота (его кэш), иначе посчитать."""
+    today = now_msk().date().isoformat()
+    for base in (None, os.path.join(NEWS_STATE, "channel")):
+        cur = load_json("anom_today.json", {}, base)
+        if cur.get("date") == today:
+            return cur
+    return anom_pre()
+
+
+def anom_dir_word(r):
+    up, dn = r.get("p_y_up") or 0, r.get("p_y_dn") or 0
+    if up + dn < 0.01:
+        return "направление неясно"
+    return "скорее вверх" if up >= 1.5 * dn else "скорее вниз" if dn >= 1.5 * up else "в любую сторону"
+
+
+def anom_intraday(stt, md, ixc, now):
+    import pandas as pd
+    """Ранние признаки: бумаги, которые с высокой вероятностью станут аномалией до конца дня. Раз в 20 минут, 10:30–18:15."""
+    hm = now.strftime("%H:%M")
+    if not ("10:30" <= hm <= "18:15") or time.time() - stt.get("ai_ts", 0) < 20 * 60:
+        return
+    stt["ai_ts"] = time.time()
+    today = anom_today_any()
+    if not today or not today.get("rows"):
+        return
+    live = anom_live()
+    td = pd.DataFrame(today["rows"]).T
+    for k in live.CI.DCOLS + ["p_y"]:
+        if k not in td.columns:
+            td[k] = float("nan")
+    td = td.astype({k: float for k in live.CI.DCOLS + ["p_y"]})
+    # оборот час назад — из почасовых снимков
+    hs = stt.setdefault("hsnap", {})
+    key_now = str(now.hour)
+    if key_now not in hs:
+        hs[key_now] = {r["SECID"]: r.get("VALTODAY") or 0 for r in md}
+    prev_val = hs.get(str(now.hour - 1), {})
+    nh = {}
+    S = load_json("newsbot.json", {}, NEWS_STATE)
+    for c in (S.get("cl") or {}).values():
+        w = dt.datetime.fromtimestamp(c.get("ts", 0), MSKTZ)
+        if w.date() == now.date():
+            nh.setdefault(c["key"].split("|")[0], []).append(w.hour + w.minute / 60)
+    F = live.intraday(md, ixc, now.hour - 1 if now.minute < 50 else now.hour, td, prev_val, nh)
+    if F.empty:
+        return
+    warn = stt.setdefault("warn", {})
+    th = float(os.environ.get("ANOM_WARN_P", "0.5")), float(os.environ.get("ANOM_WARN_PX", "0.3"))
+    cand = [r for _, r in F.iterrows() if (r.p >= th[0] or r.p_px >= th[1]) and r.t not in warn and r.t not in stt.get("sent", {})]
+    if not cand or stt.get("wn", 0) >= int(os.environ.get("ANOM_WARN_PER_DAY", "6")):
+        return
+    cand = cand[:3]
+    txt = ["🔮 <b>Ранние признаки аномалии</b> — модель оценивает, что эти бумаги могут резко двинуться или взорваться по обороту до конца дня", ""]
+    for r in cand:
+        dd = today["rows"].get(r.t, {})
+        vol_typ = f", оборот уже ×{fmt(r.cvol_typ, 1)} к обычному на это время" if r.cvol_typ == r.cvol_typ and r.cvol_typ >= 1.5 else ""
+        txt.append(f"• <b>${r.t}</b> — вероятность аномалии <b>{r.p:.0%}</b> (ценовой {r.p_px:.0%}); сейчас {pc(r.cx, 1)} к индексу{vol_typ}"
+                   + (f"; новостей за день: {int(r.nw_day)}" if r.nw_day else "") + (f"; утренний прогноз был {dd.get('p_y', 0):.0%}" if dd.get("p_y") else ""))
+        warn[r.t] = dict(p=round(float(r.p), 3), px=round(float(r.p_px), 3), ts=time.time(), cx=round(float(r.cx), 4))
+    txt += ["", "<i>Аномалия — движение цены к индексу сильнее порога эшелона или оборот в 4–6 раз выше обычного. Вероятность — по модели, обученной на истории 2013–2026 и проверенной на годах, которых она не видела. Это не сигнал на сделку.</i>",
+            "#прогноз_аномалий " + " ".join("#" + r.t for r in cand)]
+    stt["wn"] = stt.get("wn", 0) + 1
+    PUB.post("\n".join(txt))
+
+
+def anom_score_day(md, ixc):
+    """Итоги прогнозов дня: какие из утреннего топа и ранних предупреждений стали аномалией."""
+    today = anom_today_any()
+    if not today:
+        return None
+    rows = today["rows"]
+    real = set()
+    for r in md:
+        t = r["SECID"]
+        d = rows.get(t)
+        if not d or d.get("sd60") is None:
+            continue
+        tier = d.get("tier") or 3
+        thr = max({1: 0.04, 2: 0.06}.get(int(tier), 0.08), 3 * d["sd60"])
+        x = (r.get("LASTTOPREVPRICE") or 0) / 100 - ixc
+        val = r.get("VALTODAY") or 0
+        med = 10 ** (d.get("lval") or 12)
+        if abs(x) >= thr or (val / med >= (6 if tier == 3 else 4) and val >= 30e6):
+            real.add(t)
+    topm = sorted(rows, key=lambda t: -(rows[t].get("p_y") or 0))[:10]
+    an = load_json("anomaly.json", {}, os.path.join(NEWS_STATE, "channel"))
+    warn = an.get("warn", {}) if an.get("date") == today["date"] else {}
+    exp = sum(rows[t]["p_y"] for t in topm)
+    hist = load_json("anom_track.json", {"days": []})
+    rec = dict(date=today["date"], top=topm, hit=[t for t in topm if t in real], warn=list(warn), whit=[t for t in warn if t in real], n_real=len(real))
+    hist["days"] = [d for d in hist["days"] if d["date"] != rec["date"]][-120:] + [rec]
+    save_json("anom_track.json", hist)
+    return rec, exp, hist
+
+
+# =============================================================================================
 # Аномалии цен и объёмов (запускается из новостного бота каждые ~5 минут)
 # =============================================================================================
 def sec_of():
@@ -1739,6 +1928,13 @@ def anomaly():
         index_move(stt, md)
     except Exception as e:  # noqa: BLE001
         log("движение индекса", e)
+    exset = set()
+    try:
+        import divs
+        pw = prev_wd(now.date()).isoformat()
+        exset = {r["t"] for r in divs.upcoming(60) if r.get("last_buy") == pw}
+    except Exception:  # noqa: BLE001
+        pass
     found = []
     by_sec = {}
     for r in md:
@@ -1755,6 +1951,8 @@ def anomaly():
         vx = val / (a20 * frac) if a20 else None
         exc = chg - ixc
         why = []
+        if t in exset:
+            exc, jump = 0.0, 0.0  # день отсечки: падение на размер дивиденда — не аномалия
         if abs(exc) >= (4 if tier == 1 else 6 if tier == 2 else 8) / 100 and val >= (100e6 if tier == 1 else 10e6):
             why.append(f"цена {pc(chg, 1)} за день при индексе {pc(ixc, 1)}")
         if abs(jump) >= (2 if tier == 1 else 3.5 if tier == 2 else 5) / 100 and val >= 5e6:
@@ -1787,6 +1985,10 @@ def anomaly():
             if old and lvl < old[0] * 1.5 and (old[1] > 0) == (f["chg"] > 0):
                 continue
             found.append(dict(t=t, kind="fut", asset=a, name=f["name"], last=last, chg=f["chg"], exc=f["chg"], jump=jump, vx=None, val=f.get("val"), tier=1, why=why, lvl=lvl))
+    try:
+        anom_intraday(stt, md, ixc, now)
+    except Exception as e:  # noqa: BLE001
+        log("ранние признаки аномалий", e)
     found.sort(key=lambda x: -x["lvl"])
     posted = 0
     for x in found:
@@ -1894,7 +2096,7 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals}[mode]()
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre}[mode]()
 
 
 if __name__ == "__main__":
