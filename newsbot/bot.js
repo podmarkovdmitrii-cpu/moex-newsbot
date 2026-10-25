@@ -150,6 +150,40 @@ async function collectNews(S) {
   });
 }
 
+
+// ---------- региональные события: инцидент + регион активов компаний (anomaly/regions.json) → журнал для моделей и постов ----------
+let REGX = null;
+function regInit() {
+  if (REGX) return REGX;
+  try {
+    const R = JSON.parse(fs.readFileSync(path.join(HERE, 'anomaly', 'regions.json'), 'utf8'));
+    REGX = { inc: new RegExp(R.incident, 'i'), ind: new RegExp(R.industrial, 'i'), dig: new RegExp(R.digest, 'i'),
+      reg: Object.entries(R.regions).map(([k, v]) => [k, new RegExp('(?<![а-яёa-z])(' + v + ')', 'i')]) };
+  } catch (e) { REGX = { reg: [] }; }
+  return REGX;
+}
+function logRegional(S, items) {
+  const X = regInit();
+  if (!X.inc) return;
+  S.regLast = S.regLast || {};
+  for (const p of items || []) {
+    const t = String(p.tx || '').slice(0, 600);
+    if (X.dig.test(t.slice(0, 120)) || !X.inc.test(t)) continue;
+    const regs = X.reg.filter(([k, rx]) => rx.test(t)).map(([k]) => k).filter(g => p.ts - (S.regLast[g] || 0) >= 3 * 3600);
+    if (!regs.length) continue;
+    for (const g of regs) S.regLast[g] = p.ts;
+    try { fs.appendFileSync(path.join(STATE_DIR, 'news_log.jsonl'), JSON.stringify({ tk: '@REG', ts: p.ts, regs, ind: X.ind.test(t) ? 1 : 0, ch: p.ch, tx: t.slice(0, 300) }) + '\n'); } catch (e) { /* не критично */ }
+  }
+}
+// ---------- сценарии сделки (модель anomaly/scenario.py через jobs.py trade_prob) ----------
+function tradeScen(t, side, entry, stop, take, hz) {
+  try {
+    const out = require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py'), 'trade_prob', t, String(side), String(entry), String(stop), take ? String(take) : '0', String(hz || 10)],
+      { timeout: 90e3, encoding: 'utf8', env: Object.assign({}, process.env, { MODE: 'trade_prob', CHANNEL_STATE: path.join(STATE_DIR, 'channel'), NEWS_STATE: STATE_DIR }) });
+    const line = out.split('\n').find(l => l.startsWith('SCEN_JSON '));
+    return line ? JSON.parse(line.slice(10)) : null;
+  } catch (e) { log('сценарии сделки: ошибка', e.message.slice(0, 200)); return null; }
+}
 // кластеры: одна новость в разных каналах (бумага + тип в окне 12 часов) — так считаем подтверждение
 function cluster(S, items) {
   S.cl = S.cl || {};
@@ -323,10 +357,11 @@ async function tradeMessages(S, res, data) {
       `Стоп-лосс: <b>${fmt(stop, 2)}</b> (−${fmt(STRAT.stopPct * 100, 0)}%)${p.take ? ` · цель ${fmt(raw(p.t, p.d0, p.take), 2)}` : ''}\n` +
       `⚠️ Риск сделки: ${fmt(risk, 0)} ₽ = ${fmt(risk / eq * 100, 2)}% счёта (${fmt(eq, 0)} ₽)\n` +
       `Почему: ${esc((p.why || []).join('; '))}\nРежим рынка: ${REG_RU[res.regime]}\n${filterLine(p)}\n${newsContext(S, p.t)}\n\n<i>Виртуальный счёт «${esc(STRAT.name)}». Не инвестиционная рекомендация.</i>`);
-    S.open[k] = { t: p.t, d0: p.d0, entry, qty: p.qty, side: p.side };
+    const sc = tradeScen(p.t, p.side, entry, stop, p.take ? raw(p.t, p.d0, p.take) : null, p.fam === 'mom' ? 20 : 10);
+    S.open[k] = { t: p.t, d0: p.d0, entry, qty: p.qty, side: p.side, sc: sc ? { p_take: sc.p_take, p_stop: sc.p_stop, p_time: sc.p_time, hz: sc.hz } : null };
     await CH.trade(S, `${p.side > 0 ? '🟢 <b>Модельный портфель: ПОКУПКА</b>' : '🔴 <b>Модельный портфель: ШОРТ</b>'} $${p.t} (${esc(name(p.t))})\n` +
       `Вход ≈ <b>${fmt(entry, 2)}</b> · стоп ${fmt(stop, 2)} (−${fmt(STRAT.stopPct * 100, 0)}%)${p.take ? ` · цель ${fmt(raw(p.t, p.d0, p.take), 2)}` : ''}\n` +
-      `Риск сделки — ${fmt(risk / eq * 100, 1)}% модельного счёта.\nПочему: ${esc((p.why || [])[0] || '')}\nРежим рынка: ${REG_RU[res.regime]}\n${filterLine(p)}\nСтратегия «${esc(STRAT.name)}» — виртуальный счёт, сделки публикуются для прозрачной статистики.\n#${p.t} #модельный_портфель`);
+      `Риск сделки — ${fmt(risk / eq * 100, 1)}% модельного счёта.\nПочему: ${esc((p.why || [])[0] || '')}\nРежим рынка: ${REG_RU[res.regime]}\n${filterLine(p)}\n${sc && sc.text ? sc.text + '\n' : ''}Стратегия «${esc(STRAT.name)}» — виртуальный счёт, сделки публикуются для прозрачной статистики.\n#${p.t} #модельный_портфель`);
   }
   // закрытые позиции
   for (const k of Object.keys(S.open)) {
@@ -336,7 +371,8 @@ async function tradeMessages(S, res, data) {
     if (tr) {
       const exit = raw(tr.t, tr.d1, tr.exit);
       await tg(`${tr.pnl >= 0 ? '✅' : '⛔️'} <b>Закрыта сделка</b> $${tr.t} (${esc(name(tr.t))})\nВыход: ${fmt(exit, 2)} (вход ${fmt(o.entry, 2)}) · причина: ${esc(tr.reason)}\nРезультат: <b>${rub(tr.pnl)}</b> (${fmt(tr.r, 2)}R, ${fmt(tr.ret * 100, 2)}%), держали ${tr.days} дн.`);
-      await CH.trade(S, `${tr.pnl >= 0 ? '✅' : '⛔️'} <b>Модельный портфель: закрыта сделка</b> $${tr.t}\nВыход ${fmt(exit, 2)} (вход ${fmt(o.entry, 2)}) · ${esc(tr.reason)}\nРезультат: <b>${fmt(tr.ret * 100, 2)}%</b> по цене, ${fmt(tr.r, 2)}R (с комиссиями), ${tr.days} дн.\n#${tr.t} #модельный_портфель`);
+      const scl = o.sc ? `\n🎲 При входе модель давала: цель раньше стопа ${Math.round(o.sc.p_take * 100)}%, стоп раньше цели ${Math.round(o.sc.p_stop * 100)}%, выход по времени ${Math.round(o.sc.p_time * 100)}%.` : '';
+      await CH.trade(S, `${tr.pnl >= 0 ? '✅' : '⛔️'} <b>Модельный портфель: закрыта сделка</b> $${tr.t}\nВыход ${fmt(exit, 2)} (вход ${fmt(o.entry, 2)}) · ${esc(tr.reason)}\nРезультат: <b>${fmt(tr.ret * 100, 2)}%</b> по цене, ${fmt(tr.r, 2)}R (с комиссиями), ${tr.days} дн.${scl}\n#${tr.t} #модельный_портфель`);
     }
     delete S.open[k];
   }
@@ -397,6 +433,7 @@ function writeSignals(S, res, data, today) {
   // 1) новости
   try {
     const items = await collectNews(S);
+    logRegional(S, items);
     const cl = cluster(S, items);
     log('новых постов', items.length, 'кластеров', cl.length);
     await newsMessages(S, Object.values(S.cl || {}).filter(c => Date.now() / 1000 - c.ts < 2 * 86400));
@@ -439,6 +476,14 @@ function writeSignals(S, res, data, today) {
           { timeout: 600e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: 'anom_pre', CHANNEL_STATE: path.join(STATE_DIR, 'channel'), NEWS_STATE: STATE_DIR }) });
       } catch (e) { log('прогноз аномалий: ошибка', e.message); }
     }
+    // вечером — прогноз аномалий на следующий торговый день (нужен ночью для сценариев сделок по новостям)
+    if (mwd >= 1 && mwd <= 5 && mh >= 19 && mh <= 22 && S.anomNextDay !== mday) {
+      S.anomNextDay = mday;
+      try {
+        require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py'), 'anom_next'],
+          { timeout: 600e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: 'anom_next', CHANNEL_STATE: path.join(STATE_DIR, 'channel'), NEWS_STATE: STATE_DIR }) });
+      } catch (e) { log('прогноз на завтра: ошибка', e.message); }
+    }
     // Пульс: сделки сильных трейдеров + лента постов для подтверждения новостей
     if (process.env.PULSE_EVERY_MIN && Date.now() - lastPulse >= +process.env.PULSE_EVERY_MIN * 60e3) {
       lastPulse = Date.now();
@@ -451,6 +496,7 @@ function writeSignals(S, res, data, today) {
     try {
       AI.newCycle();
       const items = await collectNews(S);
+      logRegional(S, items);
       const cl = cluster(S, items);
       if (items.length) log('новых постов', items.length, 'кластеров', cl.length);
       const recent = Object.values(S.cl || {}).filter(c => Date.now() / 1000 - c.ts < 2 * 86400);

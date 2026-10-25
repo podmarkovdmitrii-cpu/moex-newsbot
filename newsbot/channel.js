@@ -301,7 +301,21 @@ function sigBlock(tk, ns, card, rumor) {
   t += `Основание: после таких новостей $${tk} ${v.a5 >= 0 ? 'обгоняла' : 'отставала от'} индекс${v.a5 >= 0 ? '' : 'а'} в среднем на ${pc(Math.abs(v.a5), 2).replace(/^[+−]/, '')} за 5 дней, в ${Math.round((v.a5 >= 0 ? v.up5 : 1 - v.up5) * 100)}% случаев (выборка ${v.n}${v.lvl !== 'бумага' ? ', оценка по ' + (v.lvl === 'сектор' ? 'сектору' : 'всем бумагам') : ''}).`;
   if (Math.sign(v.pre) === ns.side && Math.abs(v.pre) >= Math.abs(v.a5)) t += '\n⚠️ Обычно цена успевает сдвинуться ещё до публикации — часть реакции может быть уже отыграна.';
   if (ns.side < 0) t += '\n⚠️ Шорт требует маржинальной торговли; перенос позиции платный.';
+  if (card && card.entry) {
+    const sc = scenCall(tk, ns.side, card.entry, card.stop, card.take, 5);
+    if (sc && sc.text) t += '\n' + sc.text;
+  }
   return t;
+}
+// Сценарии сделки по модели (channel/jobs.py trade_prob): вероятности тейка, стопа и выхода по времени
+function scenCall(t, side, entry, stop, take, hz) {
+  try {
+    const sd = process.env.STATE_DIR || path.join(__dirname, 'state');
+    const out = require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(__dirname, 'channel', 'jobs.py'), 'trade_prob', t, String(side), String(entry), String(stop), String(take || 0), String(hz)],
+      { timeout: 90e3, encoding: 'utf8', env: Object.assign({}, process.env, { MODE: 'trade_prob', CHANNEL_STATE: path.join(sd, 'channel'), NEWS_STATE: sd }) });
+    const line = out.split('\n').find(l => l.startsWith('SCEN_JSON '));
+    return line ? JSON.parse(line.slice(10)) : null;
+  } catch (e) { log('сценарии сделки:', e.message.slice(0, 160)); return null; }
 }
 // Вероятная реакция рынка: сектор бумаги и индекс на такой тип новостей
 function reactBlock(tk, ty, s) {
