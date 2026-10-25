@@ -78,7 +78,7 @@ def news_daily(events, days_by_tk, weights=None):
     return agg
 
 
-def build(H, divhist, events, tier_of=None, news_tickers=None, weights=None, hourly=None, ix_hourly=None, sec_of=None):
+def build(H, divhist, events, tier_of=None, news_tickers=None, weights=None, hourly=None, ix_hourly=None, sec_of=None, reg_events=None):
     ix = series(H["ix"]["IMOEX"])
     ix["r"] = ix["c"].pct_change()
     ixr = dict(zip(ix["d"].values, ix["r"].values))
@@ -209,6 +209,23 @@ def build(H, divhist, events, tier_of=None, news_tickers=None, weights=None, hou
         f["nw_prev60m"] = n_all.rolling(60, min_periods=10).mean().shift(1).values
         f["nw_surprise"] = f["nw_n"] / (f["nw_prev60m"] + 0.05)
         f["news_cov"] = 1 if (news_tickers is None or t in news_tickers) else 0
+        # региональные события (инциденты в регионах активов компании): до открытия дня D и за 5/20 дней
+        if reg_events is not None:
+            rn, ri = np.zeros(len(df)), np.zeros(len(df))
+            for ts, ind in reg_events.get(t, []):
+                w = dt.datetime.utcfromtimestamp(ts) + MSK
+                key = np.datetime64(w.strftime("%Y-%m-%d"))
+                j = np.searchsorted(dk, key)
+                if j < len(dk) and dk[j] == key and (w.hour, w.minute) >= (9, 55):
+                    j += 1
+                if j < len(dk):
+                    rn[j] += 1
+                    ri[j] += ind
+            f["reg_n"] = rn
+            f["reg_ind"] = ri
+            f["reg_n5"] = pd.Series(rn).rolling(5, min_periods=1).sum().shift(1).values
+            f["reg_ind20"] = pd.Series(ri).rolling(20, min_periods=1).sum().shift(1).values
+            f["reg_cov"] = 1 if t in reg_events else 0
         f["t"] = t
         if hourly is not None:
             hq = hourly[hourly.t == t].set_index("d")

@@ -25,6 +25,8 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "..", "channel"))
 import core_daily as CD  # noqa: E402
 import core_intra as CI  # noqa: E402
+import regional as RG  # noqa: E402
+import scenario as SC  # noqa: E402
 
 DATA = os.environ.get("ANOM_DATA") or os.path.join(HERE, "data")
 MODELS = os.environ.get("ANOM_MODELS") or os.path.join(HERE, "models")
@@ -98,7 +100,7 @@ def events_all():
                 e = json.loads(line)
             except ValueError:
                 continue
-            if e["ts"] > last and e["tk"] != "MOEX":
+            if e["ts"] > last and e["tk"] not in ("MOEX", "@REG"):
                 ev.append(e)
     ev.sort(key=lambda e: e["ts"])
     return ev
@@ -184,6 +186,47 @@ def direction(D, feats, years, name, meta):
     json.dump(meta, open(os.path.join(MODELS, "meta.json"), "w"), ensure_ascii=False)
 
 
+def scen_key(d):
+    return d.rr.astype(str) + "|" + d.hz.astype(str) + "|" + pd.cut(d.stop_atr, [0, 1, 1.5, 2, 3, 99]).astype(str)
+
+
+def scenarios(Dd, divh, X, IX, yr, meta):
+    """Сценарии сделки: синтетические сделки по всей истории → модель исходов (стоп / тейк / по времени) + проверка по годам."""
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.metrics import log_loss, roc_auc_score
+    T = SC.build(Dd, divh, X, ix_rows=IX)
+    F = SC.TRADE + [f for f in SC.STABLE if f in T.columns]
+    log("сценарии: синтетических сделок", len(T))
+
+    def model():
+        return HistGradientBoostingClassifier(max_iter=150, learning_rate=0.05, max_leaf_nodes=15, min_samples_leaf=300, l2_regularization=2.0)
+    rep = []
+    for Y in range(yr - 4, yr + 1):
+        tr, te = T[T.d.dt.year < Y], T[T.d.dt.year == Y]
+        if len(te) < 1000:
+            continue
+        trs = tr.sample(n=min(len(tr), 200000), random_state=1)
+        fr = tr.groupby(scen_key(tr)).cls.value_counts(normalize=True).unstack().fillna(1e-3)
+        pb = fr.reindex(scen_key(te)).fillna(1 / 3).to_numpy()
+        p = SC.BLEND * model().fit(trs[F], trs.cls).predict_proba(te[F]) + (1 - SC.BLEND) * pb
+        y = te.cls.to_numpy()
+        m2 = y < 2
+        rep.append(dict(year=Y, logloss=round(float(log_loss(y, p, labels=[0, 1, 2])), 4), logloss_base=round(float(log_loss(y, pb, labels=[0, 1, 2])), 4),
+                        auc_take=round(float(roc_auc_score(y[m2] == 1, p[m2, 1] / (p[m2, 0] + p[m2, 1]))), 3),
+                        p_take=round(float(p[:, 1].mean()), 3), f_take=round(float((y == 1).mean()), 3), p_stop=round(float(p[:, 0].mean()), 3), f_stop=round(float((y == 0).mean()), 3)))
+        log("scen", rep[-1])
+    meta["report"]["scenario"] = rep
+    base = T.groupby(scen_key(T)).cls.value_counts(normalize=True).unstack().fillna(1e-3)
+    meta["scen_base"] = {k: [float(v) for v in row] for k, row in zip(base.index, base.to_numpy())}
+    meta["scen_feat"] = F
+    # средний R при выходе по времени — для ожидаемого результата
+    meta["scen_time_R"] = {k: float(v) for k, v in T[T.cls == 2].groupby(scen_key(T[T.cls == 2])).R.mean().items()}
+    S2 = T.sample(n=min(len(T), 300000), random_state=2)
+    clf = model().fit(S2[F], S2.cls)
+    pickle.dump(clf, open(os.path.join(MODELS, "scenario.pkl"), "wb"))
+    json.dump(meta, open(os.path.join(MODELS, "meta.json"), "w"), ensure_ascii=False)
+
+
 def fit_final(X, feats, target, sample_neg=1.0):
     tr = X.dropna(subset=[target])
     if sample_neg < 1:
@@ -217,7 +260,8 @@ def main():
     W = [CD.news_weight(e, impact) for e in ev]
     covered = sorted({e["tk"] for e in ev})
     hd = CD.hourly_daily(Hh)
-    X = CD.build({"sh": Dd, "ix": {"IMOEX": IX}}, divh, ev, news_tickers=set(covered), weights=W, hourly=hd, ix_hourly=IXH, sec_of=impact.get("secOf"))
+    RE = RG.company_events(RG.load_events(os.environ.get("NEWS_STATE")))
+    X = CD.build({"sh": Dd, "ix": {"IMOEX": IX}}, divh, ev, news_tickers=set(covered), weights=W, hourly=hd, ix_hourly=IXH, sec_of=impact.get("secOf"), reg_events=RE)
     X = X[X.d >= "2013-01-01"].reset_index(drop=True)
     FD = CD.feature_cols(X)
     log("признаки дня:", X.shape, "база аномалий", round(X.y.mean(), 4), round(time.time() - t0), "с")
@@ -246,6 +290,10 @@ def main():
         json.dump(meta, open(os.path.join(MODELS, "meta.json"), "w"), ensure_ascii=False)
         log("готово: daily", target, round(time.time() - t0), "с")
     direction(X, FD, list(range(yr - 5, yr + 1)), "daily_dir", meta)
+    try:
+        scenarios(Dd, divh, X, IX, yr, meta)
+    except Exception as e:  # noqa: BLE001
+        log("сценарии сделки: ошибка", e)
     # ---------- внутри дня
     XI, typ = CI.build_train(Hh, IXH, X, ev, pre_oof)
     XI = XI[XI.d.dt.year >= 2017].reset_index(drop=True)
@@ -269,6 +317,9 @@ def main():
         if not rep:
             continue
         r = pd.DataFrame(rep)
+        if k == "scenario":
+            log(f"сценарии сделки: logloss {r.logloss.mean():.4f} против {r.logloss_base.mean():.4f} у базовой частоты; прогноз/факт тейка {r.p_take.mean():.3f}/{r.f_take.mean():.3f}, стопа {r.p_stop.mean():.3f}/{r.f_stop.mean():.3f}")
+            continue
         if k.endswith("_dir"):
             log(f"{k}: направление угадано в {r.acc.mean():.1%} случаев (всегда «вверх» — {r.base_up.mean():.1%}), при уверенном прогнозе — {r.acc_conf.dropna().mean():.1%}")
             continue

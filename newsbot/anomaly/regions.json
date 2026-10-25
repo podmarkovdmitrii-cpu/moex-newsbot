@@ -1,0 +1,395 @@
+{
+ "note": "Региональные события: инцидент (атака БПЛА, пожар, авария, ЧС, отключения, стихия) в регионе, где у компании ключевые активы. Регион → шаблоны названий; компания → регионы.",
+ "incident": "(атак[аиуе]\\w* (бпла|беспилотник|дрон)|бпла|беспилотник\\w*|дрон\\w*|прил[её]т\\w*|обстрел\\w*|ракетн\\w* удар|удар\\w* по|взрыв\\w*|пожар\\w*|возгорани\\w*|горит|авари\\w*|обесточ\\w*|отключени\\w* (электр|света|газа)|блэкаут|\\bчс\\b|чрезвычайн\\w* ситуац|режим\\w* (чс|чрезвычайн)|наводнени\\w*|паводк\\w*|землетрясени\\w*|ураган\\w*|прорыв\\w* (дамбы|плотины|трубопровод)|разлив\\w* (нефт|топлив)|утечк\\w*|забастовк\\w*|остановил\\w* (работу|производство)|приостановил\\w* (работу|производство|отгрузк)|повреждени\\w* (объект|предприят|нпз|подстанц))",
+ "regions": {
+  "perm": "пермск|пермь|перми\\b",
+  "nizhny": "нижегородск|кстово|нижн(ий|его|ем) новгород",
+  "volgograd": "волгоград",
+  "ryazan": "рязан",
+  "tuapse": "туапсе",
+  "novoross": "новороссийск|шесхарис",
+  "krasnodar": "краснодар|кубан|афипск|ильский|славянск-на-кубани",
+  "yaroslavl": "ярослав",
+  "saratov": "саратов",
+  "samara": "самар|сызран|новокуйбышевск|тольятти",
+  "omsk": "омск",
+  "norilsk": "норильск|таймыр",
+  "murmansk": "мурманск|кировск|апатит|мончегорск",
+  "leningrad": "ленинградск|усть-луг|кириш|приморск|выборг",
+  "spb": "санкт-петербург|петербург",
+  "moscow": "москв|подмосков",
+  "tatarstan": "татарстан|нижнекамск|альметьевск|казан",
+  "bashkiria": "башкир|уф[аеы]\\b|салават|стерлитамак",
+  "belgorod": "белгород",
+  "kursk": "курск",
+  "bryansk": "брянск",
+  "orel": "орл(е|а|овск)|ор[её]л\\b",
+  "rostov": "ростов|новошахтинск|таганрог",
+  "lipetsk": "липецк",
+  "vologda": "череповец|вологод",
+  "chelyabinsk": "челябинск|магнитогорск",
+  "sverdlovsk": "свердловск|екатеринбург|нижн(ий|ем) тагил|каменск-уральск",
+  "yakutia": "якути|удачн(ый|ом)\\b|алрос",
+  "krasnoyarsk": "красноярск",
+  "irkutsk": "иркутск|братск|ангарск|саянск",
+  "yamal": "ямал|сабетт|новый уренгой|надым",
+  "khmao": "ханты|хмао|сургут|нефтеюганск|нижневартовск",
+  "tyumen": "тюмен|тобольск",
+  "kuzbass": "кузбасс|кемеров|новокузнецк",
+  "primorye": "примор(ье|ск\\w* кра)|владивосток|находк|восточн(ый|ого) порт",
+  "sakhalin": "сахалин",
+  "novgorod": "новгородск|великий новгород",
+  "kaluga": "калуг",
+  "tula": "тульск|тула\\b|новомосковск",
+  "voronezh": "воронеж",
+  "smolensk": "смоленск",
+  "tver": "твер",
+  "udmurtia": "удмурт|ижевск",
+  "orenburg": "оренбург|орск",
+  "astrakhan": "астрахан",
+  "dagestan": "дагестан|махачкал",
+  "crimea": "крым|севастопол",
+  "kaliningrad": "калининград",
+  "karelia": "карели",
+  "tambov": "тамбов"
+ },
+ "companies": {
+  "LKOH": [
+   "perm",
+   "nizhny",
+   "volgograd",
+   "khmao",
+   "leningrad"
+  ],
+  "ROSN": [
+   "ryazan",
+   "tuapse",
+   "samara",
+   "saratov",
+   "yaroslavl",
+   "krasnodar",
+   "irkutsk",
+   "bashkiria",
+   "khmao",
+   "yamal"
+  ],
+  "SIBN": [
+   "omsk",
+   "moscow",
+   "yaroslavl",
+   "yamal",
+   "khmao",
+   "tyumen"
+  ],
+  "GAZP": [
+   "yamal",
+   "orenburg",
+   "astrakhan",
+   "leningrad",
+   "spb",
+   "bashkiria"
+  ],
+  "NVTK": [
+   "yamal",
+   "leningrad",
+   "murmansk"
+  ],
+  "TATN": [
+   "tatarstan"
+  ],
+  "TATNP": [
+   "tatarstan"
+  ],
+  "SNGS": [
+   "khmao"
+  ],
+  "SNGSP": [
+   "khmao",
+   "leningrad"
+  ],
+  "BANEP": [
+   "bashkiria"
+  ],
+  "BANE": [
+   "bashkiria"
+  ],
+  "TRNFP": [
+   "novoross",
+   "leningrad",
+   "tuapse",
+   "primorye",
+   "bryansk",
+   "tatarstan"
+  ],
+  "RNFT": [
+   "khmao",
+   "orenburg",
+   "saratov"
+  ],
+  "NKNC": [
+   "tatarstan"
+  ],
+  "NKNCP": [
+   "tatarstan"
+  ],
+  "KZOS": [
+   "tatarstan"
+  ],
+  "KZOSP": [
+   "tatarstan"
+  ],
+  "KAZT": [
+   "samara"
+  ],
+  "KAZTP": [
+   "samara"
+  ],
+  "GMKN": [
+   "norilsk",
+   "murmansk",
+   "krasnoyarsk"
+  ],
+  "PLZL": [
+   "krasnoyarsk",
+   "irkutsk",
+   "yakutia"
+  ],
+  "ALRS": [
+   "yakutia",
+   "murmansk"
+  ],
+  "RUAL": [
+   "krasnoyarsk",
+   "irkutsk",
+   "sverdlovsk",
+   "karelia"
+  ],
+  "CHMF": [
+   "vologda",
+   "murmansk",
+   "karelia"
+  ],
+  "NLMK": [
+   "lipetsk",
+   "sverdlovsk",
+   "kaluga"
+  ],
+  "MAGN": [
+   "chelyabinsk"
+  ],
+  "MTLR": [
+   "kuzbass",
+   "chelyabinsk",
+   "yakutia"
+  ],
+  "MTLRP": [
+   "kuzbass",
+   "chelyabinsk",
+   "yakutia"
+  ],
+  "RASP": [
+   "kuzbass"
+  ],
+  "PHOR": [
+   "vologda",
+   "murmansk",
+   "saratov",
+   "leningrad"
+  ],
+  "AKRN": [
+   "novgorod",
+   "smolensk"
+  ],
+  "SELG": [
+   "yakutia"
+  ],
+  "UGLD": [
+   "chelyabinsk",
+   "orenburg"
+  ],
+  "VSMO": [
+   "sverdlovsk"
+  ],
+  "CHMK": [
+   "chelyabinsk"
+  ],
+  "ENPG": [
+   "krasnoyarsk",
+   "irkutsk"
+  ],
+  "HYDR": [
+   "krasnoyarsk",
+   "irkutsk",
+   "primorye",
+   "sakhalin",
+   "yakutia",
+   "dagestan"
+  ],
+  "IRAO": [
+   "moscow",
+   "kaliningrad",
+   "leningrad",
+   "bashkiria"
+  ],
+  "FEES": [
+   "moscow",
+   "leningrad",
+   "belgorod",
+   "kursk",
+   "bryansk"
+  ],
+  "MSNG": [
+   "moscow"
+  ],
+  "MSRS": [
+   "moscow"
+  ],
+  "LSNG": [
+   "spb",
+   "leningrad"
+  ],
+  "LSNGP": [
+   "spb",
+   "leningrad"
+  ],
+  "MRKC": [
+   "belgorod",
+   "kursk",
+   "bryansk",
+   "orel",
+   "lipetsk",
+   "smolensk",
+   "tver",
+   "voronezh",
+   "yaroslavl"
+  ],
+  "MRKP": [
+   "nizhny",
+   "kaluga",
+   "tula",
+   "ryazan",
+   "udmurtia"
+  ],
+  "MRKU": [
+   "perm",
+   "sverdlovsk",
+   "chelyabinsk"
+  ],
+  "MRKV": [
+   "samara",
+   "saratov",
+   "orenburg"
+  ],
+  "MRKZ": [
+   "vologda",
+   "karelia",
+   "murmansk",
+   "novgorod"
+  ],
+  "MRKS": [
+   "krasnoyarsk",
+   "kuzbass",
+   "omsk"
+  ],
+  "MRKY": [
+   "rostov",
+   "krasnodar",
+   "astrakhan",
+   "volgograd"
+  ],
+  "TGKA": [
+   "yaroslavl",
+   "murmansk",
+   "karelia"
+  ],
+  "OGKB": [
+   "krasnodar",
+   "tyumen",
+   "yamal"
+  ],
+  "UPRO": [
+   "perm",
+   "tyumen",
+   "khmao",
+   "smolensk"
+  ],
+  "ELFV": [
+   "sverdlovsk"
+  ],
+  "AFLT": [
+   "moscow",
+   "crimea",
+   "krasnodar",
+   "rostov"
+  ],
+  "FLOT": [
+   "novoross",
+   "primorye",
+   "spb"
+  ],
+  "NMTP": [
+   "novoross",
+   "primorye",
+   "leningrad"
+  ],
+  "FESH": [
+   "primorye",
+   "sakhalin"
+  ],
+  "AQUA": [
+   "murmansk",
+   "karelia",
+   "sakhalin"
+  ],
+  "AGRO": [
+   "belgorod",
+   "kursk",
+   "tambov",
+   "lipetsk"
+  ],
+  "GCHE": [
+   "krasnodar",
+   "moscow"
+  ],
+  "KMAZ": [
+   "tatarstan"
+  ],
+  "SVAV": [
+   "sverdlovsk"
+  ],
+  "UNAC": [
+   "moscow",
+   "nizhny",
+   "irkutsk",
+   "smolensk"
+  ],
+  "IRKT": [
+   "irkutsk"
+  ],
+  "RKKE": [
+   "moscow"
+  ],
+  "MGNT": [
+   "krasnodar"
+  ],
+  "BELU": [
+   "tula",
+   "kaliningrad"
+  ],
+  "PIKK": [
+   "moscow"
+  ],
+  "SMLT": [
+   "moscow"
+  ],
+  "LSRG": [
+   "spb"
+  ],
+  "ETLN": [
+   "spb",
+   "moscow"
+  ]
+ },
+ "industrial": "(нпз|нефтеперерабат|завод|комбинат|подстанц|тэц|гэс|аэс|электростанц|порт\\b|порту|терминал|нефтебаз|рудник|шахт|предприят|промышленн\\w* объект|склад|аэропорт|нефтепровод|газопровод|трубопровод)",
+ "digest": "(что произошло|главное за|главные новости|итоги дня|дайджест|коротко о главном)"
+}

@@ -17,6 +17,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import core_daily as CD  # noqa: E402
 import core_intra as CI  # noqa: E402
+import regional as RG  # noqa: E402
+import scenario as SC  # noqa: E402
 
 MODELS = os.environ.get("ANOM_MODELS") or os.path.join(HERE, "models")
 _M = {}
@@ -102,15 +104,27 @@ def daily_probs(tickers, today, divh, upcoming, news_state, impact):
             while ex.weekday() >= 5:
                 ex += dt.timedelta(days=1)
             dv.setdefault(r["t"], []).append([ex.isoformat(), r.get("amount", 0)])
-    ev = events(news_state)
+    ev = [e for e in events(news_state) if e.get("tk") != "@REG"]
+    RE = RG.company_events(RG.load_events(news_state))
     W = [CD.news_weight(e, impact) for e in ev]
     hd = CD.hourly_daily({t: v for t, v in Hh.items() if t != "IMOEX"})
     IXH = Hh.pop("IMOEX", None)
     X = CD.build({"sh": {t: v for t, v in D.items() if len(v) > 300}, "ix": {"IMOEX": IX}}, dv, ev, news_tickers=set(meta().get("covered", [])), weights=W, hourly=hd,
-                 ix_hourly=IXH, sec_of=impact.get("secOf"))
+                 ix_hourly=IXH, sec_of=impact.get("secOf"), reg_events=RE)
     if X.empty:
         raise RuntimeError("нет свечей по бумагам (Мосбиржа недоступна?)")
     X = X[X.d == pd.Timestamp(today)].copy()
+    # для сценариев сделки: бета к индексу и ATR (в долях цены) на утро дня
+    bet, atrs = {}, {}
+    for t in X["t"]:
+        df = SC.series([r for r in D[t] if r[1] == r[1]])
+        b = SC.beta_series(df, IX)
+        bet[t] = float(b[-1]) if len(b) and b[-1] == b[-1] else np.nan
+        h, l, c = df["h"].to_numpy(float), df["l"].to_numpy(float), df["c"].to_numpy(float)
+        tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
+        atrs[t] = float(np.mean(tr[-14:]) / c[-1]) if len(tr) >= 14 else np.nan
+    X["beta"] = X["t"].map(bet)
+    X["atr"] = X["t"].map(atrs)
     FD = meta()["feat_daily"]
     for c in FD:
         if c not in X.columns:
@@ -162,3 +176,33 @@ def intraday(md, ix_chg, hour, today_df, prev_val, news_hours):
     else:
         F["p_dir_up"] = np.where(F["cx"] > 0, 0.8, 0.2)
     return F.sort_values("p", ascending=False)
+
+
+def scenario(feat, side, entry, stop, take=None, hz=10):
+    """Сценарии сделки по признакам бумаги на утро (feat — словарь из прогноза дня).
+    → вероятности: стоп раньше тейка, тейк раньше стопа, выход по времени; ожидаемый результат в R."""
+    m = meta()
+    if not os.path.exists(os.path.join(MODELS, "scenario.pkl")) or not m.get("scen_feat"):
+        return None
+    s = abs(entry - stop) / entry
+    if not s:
+        return None
+    rr = abs(take - entry) / abs(entry - stop) if take else 2.0
+    rr_m = min([1.0, 1.5, 2.0, 3.0], key=lambda v: abs(v - rr))
+    hz_m = min([5, 10, 20], key=lambda v: abs(v - hz))
+    row = {k: (feat.get(k) if feat.get(k) is not None else np.nan) for k in feat}
+    atr = row.get("atr") or np.nan
+    row.update(side=side, stop=s, stop_atr=s / atr if atr == atr and atr else np.nan, rr=rr_m, hz=hz_m)
+    T = SC.add_signed(pd.DataFrame([row]))
+    F = m["scen_feat"]
+    for f in F:
+        if f not in T.columns:
+            T[f] = np.nan
+    p = model("scenario").predict_proba(T[F].astype(float))[0]
+    key = f"{rr_m}|{hz_m}|{pd.cut([row['stop_atr']], [0, 1, 1.5, 2, 3, 99]).astype(str)[0]}"
+    b = m.get("scen_base", {}).get(key)
+    if b:
+        p = SC.BLEND * p + (1 - SC.BLEND) * np.array(b)
+    tR = m.get("scen_time_R", {}).get(key, 0.0)
+    return dict(p_stop=float(p[0]), p_take=float(p[1]), p_time=float(p[2]), exp_R=float(p[1] * rr_m - p[0] + p[2] * tR), rr=rr_m, hz=hz_m,
+                stop_atr=row["stop_atr"], stop_pct=s)
