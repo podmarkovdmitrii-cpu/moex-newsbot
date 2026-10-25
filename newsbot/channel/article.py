@@ -76,10 +76,40 @@ def to_html(blocks):
     return "".join(out)
 
 
-def telegraph(title, blocks, author="", author_url=""):
-    content = nodes(to_html(blocks))
-    while len(json.dumps(content, ensure_ascii=False).encode()) > 60000 and len(content) > 5:
-        content = content[:-2]  # лимит Telegraph 64 КБ — обрезаем хвост
+LIMIT = 30000  # Telegraph принимает content до 64 КБ, но кириллица на сервере считается тяжелее — берём с запасом (\uXXXX)
+
+
+def _size(blocks):
+    return len(json.dumps(nodes(to_html(blocks)), ensure_ascii=True))
+
+
+def split_parts(blocks, limit=LIMIT):
+    """Статья → части, каждая укладывается в лимит Telegraph. Режем по разделам (h3), длинные списки — по пунктам."""
+    flat = []
+    for b in blocks:
+        if b[0] == "ul" and _size([b]) > limit * 0.5:
+            chunk = []
+            for x in b[1]:
+                if chunk and _size([("ul", chunk + [x])]) > limit * 0.5:
+                    flat.append(("ul", chunk))
+                    chunk = []
+                chunk.append(x)
+            if chunk:
+                flat.append(("ul", chunk))
+        else:
+            flat.append(b)
+    parts, cur = [], []
+    for b in flat:
+        if cur and (_size(cur + [b]) > limit or (b[0] == "h3" and _size(cur) > limit * 0.6)):
+            parts.append(cur)
+            cur = []
+        cur.append(b)
+    if cur:
+        parts.append(cur)
+    return parts
+
+
+def _create(title, content, author, author_url):
     body = dict(access_token=TOKEN, title=title[:256], author_name=author[:128], content=content, return_content=False)
     if author_url:
         body["author_url"] = author_url
@@ -89,6 +119,18 @@ def telegraph(title, blocks, author="", author_url=""):
     if not js.get("ok"):
         raise RuntimeError("Telegraph: " + str(js.get("error")))
     return js["result"]["url"]
+
+
+def telegraph(title, blocks, author="", author_url=""):
+    """Статья на Telegraph; длинная — несколькими связанными страницами (часть 1 → часть 2 → …). Возвращает ссылку на первую."""
+    parts = split_parts(blocks)
+    n = len(parts)
+    nxt = None
+    for k in range(n - 1, -1, -1):  # с конца, чтобы в каждой части была ссылка на следующую
+        tail = [("p", f'<b><a href="{nxt}">Продолжение — часть {k + 2} из {n} →</a></b>')] if nxt else []
+        t = title if n == 1 else f"{title} — часть {k + 1} из {n}"
+        nxt = _create(t, nodes(to_html(parts[k] + tail)), author, author_url)
+    return nxt
 
 
 EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿️‍]")
@@ -195,10 +237,14 @@ def publish(pub, title, blocks, teaser, photos=None, fname="article"):
         f.write(f"<meta charset='utf-8'><h1>{_html.escape(title)}</h1>" + to_html(blocks))
     if getattr(pub, "dry", False):
         print("----- СТАТЬЯ (без публикации) -----\n" + title + "\n" + _html.unescape(re.sub(r"<[^>]+>", "", to_html(blocks).replace("</p>", "\n").replace("</li>", "\n").replace("</h3>", "\n").replace("</h4>", "\n"))), flush=True)
-        log("статья пойдёт в Telegraph" if TOKEN else "TELEGRAPH_TOKEN не задан — статья пойдёт сообщениями Telegram")
+        if TOKEN:
+            ps = split_parts(blocks)
+            log(f"статья пойдёт в Telegraph: страниц {len(ps)}, размеры частей", [_size(x) for x in ps], "(лимит", LIMIT, ")")
+        else:
+            log("TELEGRAPH_TOKEN не задан — статья пойдёт сообщениями Telegram")
     chan = os.environ.get("TG_PUBLIC_CHAT", "")
     url = None
-    if TOKEN and not DRY and not DEMO:
+    if TOKEN and not DRY and not DEMO and not getattr(pub, "dry", False):
         for k in range(3):
             try:
                 url = telegraph(title, blocks, author=(chan if chan.startswith("@") else "MOEX паблик"), author_url=(f"https://t.me/{chan[1:]}" if chan.startswith("@") else ""))
