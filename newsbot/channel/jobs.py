@@ -843,6 +843,18 @@ def morning():
             plan.append(dict(w, fam=w["kind"], kind="watch"))
 
     def plan_line(p):
+        return plan_line0(p) + scen_short(p)
+
+    def scen_short(p):
+        if not p.get("entry") or not p.get("stop"):
+            return ""
+        sc = trade_scen(p["t"], p["side"], p["entry"], p["stop"], p.get("take"), 20 if p.get("fam") == "mom" else 10)
+        if not sc:
+            return ""
+        return (f". 🎲 Модель: цель раньше стопа {sc['p_take']:.0%}, стоп раньше цели {sc['p_stop']:.0%}, по времени {sc['p_time']:.0%}"
+                + (" (стоп меньше дневного хода — легко выбить)" if sc.get("stop_atr") and sc["stop_atr"] < 1 else ""))
+
+    def plan_line0(p):
         f = fam.get(p["fam"], {})
         if p["kind"] == "signal":
             return (f"🎯 <b>${p['t']}</b> — сигнал на открытие: {'покупка' if p['side'] > 0 else 'шорт'} ({FAM_RU.get(p['fam'], p['fam'])}) ≈ {fmt(p['entry'], 2)}, стоп {fmt(p['stop'], 2)}"
@@ -895,7 +907,7 @@ def morning():
         ap = anom_today_any()
     except Exception as e:  # noqa: BLE001
         log("прогноз аномалий", e)
-    arows = (ap or {}).get("rows") or {}
+    arows = {k: v for k, v in ((ap or {}).get("rows") or {}).items() if v.get("p_y") is not None}
     atop = sorted(arows, key=lambda t: -(arows[t].get("p_y") or 0))[:12]
     if atop:
         base = sum(arows[t].get("p_y") or 0 for t in arows) / max(1, len(arows))
@@ -956,6 +968,9 @@ def morning():
             pa = (arows.get(t_) or {}).get("p_y") or 0
             if pa >= 0.15:
                 focus.setdefault(t_, []).append(f"вероятность аномалии {pa:.0%}")
+        for t_ in tks:
+            if (arows.get(t_) or {}).get("reg_n"):
+                focus.setdefault(t_, []).append("региональный инцидент в регионе активов")
         for d in pdl:
             if d["t"] in tks:
                 focus.setdefault(d["t"], []).append(f"сделка сильного трейдера Пульса ({'покупка' if d['side'] > 0 else 'продажа'})")
@@ -1586,7 +1601,14 @@ def anom_pre(force=False, day=None):
     X = live.daily_probs(tick, today, DIVS, upc, NEWS_STATE, impact)
     rows = {}
     for t, r in X.iterrows():
-        d = {k: (None if pd_isna(r.get(k)) else float(r.get(k))) for k in AN_KEEP}
+        keys = [k for k in r.index if k not in ("d", "t", "y", "y_px", "y_up", "y_dn", "y_vol", "x", "vr", "ex")]
+        d = {}
+        for k in set(keys) | set(AN_KEEP):
+            v = r.get(k)
+            try:
+                d[k] = None if pd_isna(v) else round(float(v), 6)
+            except (TypeError, ValueError):
+                d[k] = None
         d["why"] = live.reasons({k: (v if v is not None else 0) for k, v in d.items()})
         rows[t] = d
     out = dict(date=today, rows=rows, trained=live.meta().get("trained"))
@@ -1653,6 +1675,88 @@ def anom_next(now=None):
         out["made"] = now.isoformat()
         save_json("anom_next.json", out)
     return out
+
+
+# =============================================================================================
+# Сценарии сделки: что вероятнее всего будет с позицией после входа (модель anomaly/scenario.py)
+# =============================================================================================
+def anom_features(t):
+    """Признаки бумаги на утро: прогноз дня (сегодня) или вечерний прогноз на следующий торговый день."""
+    today = now_msk().date().isoformat()
+    for base in (None, os.path.join(NEWS_STATE, "channel")):
+        for name in ("anom_today.json", "anom_next.json"):
+            cur = load_json(name, {}, base)
+            if cur.get("date", "") >= prev_wd(now_msk().date()).isoformat() and t in (cur.get("rows") or {}):
+                return cur["rows"][t]
+    return None
+
+
+def trade_scen(t, side, entry, stop, take=None, hz=10):
+    try:
+        feat = anom_features(t)
+        if not feat:
+            return None
+        return anom_live().scenario(feat, side, entry, stop, take, hz) | {"beta": feat.get("beta"), "reg_n": feat.get("reg_n"), "reg_n5": feat.get("reg_n5")}
+    except Exception as e:  # noqa: BLE001
+        log("сценарии сделки", t, e)
+        return None
+
+
+def scen_text(sc, t=None):
+    """Строки поста: вероятности сценариев + предупреждения из разбора ошибок модели."""
+    if not sc:
+        return ""
+    out = [f"🎲 <b>Сценарии после входа</b> (модель по истории 2013–2026, горизонт {sc['hz']} торг. дн.): "
+           f"цель раньше стопа — <b>{sc['p_take']:.0%}</b> · стоп раньше цели — <b>{sc['p_stop']:.0%}</b> · ни то ни другое, выход по времени — {sc['p_time']:.0%}. "
+           f"Ожидаемый результат ≈ {'+' if sc['exp_R'] >= 0 else '−'}{fmt(abs(sc['exp_R']), 2)}R."]
+    if sc.get("stop_atr") and sc["stop_atr"] == sc["stop_atr"] and sc["stop_atr"] < 1:
+        out.append(f"⚠️ Стоп ближе обычного дневного хода бумаги ({fmt(sc['stop_atr'], 1)} ATR): по истории такие стопы чаще выбивает шумом.")
+    if sc.get("beta") and sc["beta"] >= 1.3:
+        out.append(f"⚠️ Бумага ходит сильнее рынка (бета {fmt(sc['beta'], 1)}): в двух из трёх ошибочных сделок на истории позицию выбивало движение индекса.")
+    if t:
+        rl = reg_lines(t, 36)
+        if rl:
+            out.append("📍 Региональные события в регионах активов компании: " + "; ".join(rl[:2]))
+    return "\n".join(out)
+
+
+def reg_lines(t, hours=24):
+    """Свежие региональные инциденты (журнал бота) в регионах, где у компании ключевые активы."""
+    try:
+        sys.path.insert(0, ANOM_DIR)
+        import regional as RG
+    except Exception:  # noqa: BLE001
+        return []
+    regs = set(RG.COMP.get(t, []))
+    if not regs:
+        return []
+    lp = os.path.join(NEWS_STATE, "news_log.jsonl")
+    out, since = [], time.time() - hours * 3600
+    if os.path.exists(lp):
+        for line in open(lp, encoding="utf-8"):
+            if '"@REG"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            hit = [g for g in e.get("regs") or [] if g in regs]
+            ts = float(e.get("ts") or 0)
+            ts = ts / 1000 if ts > 1e11 else ts  # на случай миллисекунд
+            if ts >= since and hit:
+                w = dt.datetime.fromtimestamp(ts, MSKTZ).strftime("%d.%m %H:%M")
+                out.append(f"{', '.join(RG.RU.get(g, g) for g in hit)} — {esc(cut(clean_tx(e.get('tx', '')), 110))} ({w})")
+    return out[-3:]
+
+
+def trade_prob_cli():
+    """python jobs.py trade_prob ТИКЕР СТОРОНА ВХОД СТОП [ТЕЙК] [ГОРИЗОНТ] → JSON + готовый текст (для бота на Node)."""
+    a = [x for x in sys.argv[1:] if not x.startswith("--")][1:]
+    t, side, entry, stop = a[0], int(a[1]), float(a[2]), float(a[3])
+    take = float(a[4]) if len(a) > 4 and a[4] not in ("", "0", "null", "None") else None
+    hz = int(a[5]) if len(a) > 5 else 10
+    sc = trade_scen(t, side, entry, stop, take, hz)
+    print("SCEN_JSON " + json.dumps(dict(sc or {}, text=scen_text(sc, t)), ensure_ascii=False, default=float), flush=True)
 
 
 def anom_dir_note(name, when):
@@ -2122,6 +2226,10 @@ def anomaly_post(x, md, by_sec, ixc):
                    + (f" ({exp[8:10]}.{exp[5:7]})" if exp else "") + ". Проверьте зарубежные котировки.")
     else:
         txt.append("Возможная причина: в публичных новостях за 6 часов объяснения нет — так бывает при выходе крупного участника, перед корпоративными событиями (отчётность, дивиденды, допэмиссия) или из-за слухов. Осторожно: такие движения часто частично откатываются.")
+    if x["kind"] == "share":
+        rl = reg_lines(t, 24)
+        if rl:
+            txt.append("📍 Региональные события там, где у компании активы: " + "; ".join(rl[:2]))
     # контекст и влияние
     if x["kind"] == "share":
         sec = x.get("sec")
@@ -2177,7 +2285,7 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test}[mode]()
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "anom_next": anom_next}[mode]()
 
 
 if __name__ == "__main__":
