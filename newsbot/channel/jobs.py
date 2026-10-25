@@ -1392,9 +1392,37 @@ def weekly():
     if weak:
         txt.append("🔴 <b>Слабые позиции</b>:")
         txt += [f"• ${x['id']} — {'; '.join(x['why'][:3])}" for x in weak]
-    txt += ["", "Полная статья со всеми активами, таблицами и методикой — в PDF ниже.", "#неделя #долгосрок"]
-    pdf = weekly_pdf(now, rows, stocks, imgs)
-    PUB.post("\n".join(txt), imgs, (pdf, f"Базовые активы — неделя {now.strftime('%d.%m.%Y')} (PDF)") if pdf else None)
+    txt += ["", "{LINK}", "#неделя #долгосрок"]
+    import article
+    article.publish(PUB, f"Базовые активы: долгосрочный взгляд — неделя {now.strftime('%d.%m.%Y')}", weekly_blocks(now, rows, stocks), "\n".join(txt), imgs,
+                    fname=f"weekly_{now.strftime('%Y-%m-%d')}")
+
+
+def weekly_blocks(now, rows, stocks):
+    """Статья недели для Telegraph (без таблиц: Telegraph их не поддерживает — каждая строка таблицы становится пунктом списка)."""
+    tr = {1: "вверх", -1: "вниз", 0: "боковик"}
+    B = [("p", "Индексы, сектора, облигации, юань, золото и 24 крупнейшие акции Мосбиржи. Оценка строится по прозрачным правилам из цифр; "
+               "это не прогноз и не индивидуальная инвестиционная рекомендация."),
+         ("h3", "1. Индексы, сектора, валюта и золото")]
+    B.append(("ul", [f"<b>{esc(x['name'])}</b> — {fmt(x['m']['last'], 2)}; 1 мес. {pc(x['m']['r1m'], 1)}, 3 мес. {pc(x['m']['r3m'], 1)}, 12 мес. {pc(x['m']['r12m'], 1)}; "
+                     f"от максимума {pc(x['m']['dd'], 0)}; волатильность {pc(x['m']['vol'], 0, False)}; тренд {tr[x['m']['trend']]} → <b>{esc(x['lab'])}</b>" for x in rows]))
+    B.append(("h3", "2. Акции: долгосрочная позиция"))
+    for x in sorted(stocks, key=lambda x: -x["sc"]):
+        m = x["m"]
+        B.append(("h4", f"${x['id']} — {fmt(x['sc'], 1)} ({esc(x['lab'])})"))
+        B.append(("p", f"{SEC_RU.get(SEC_OF.get(x['id'], ''), '—')}; 1 мес. {pc(m['r1m'], 1)}, 12 мес. {pc(m['r12m'], 1)}, от максимума {pc(m['dd'], 0)}; "
+                       f"дивиденды за 12 мес. {pc(x['dy'], 1, False) if x['dy'] is not None else '—'}; тренд {tr[m['trend']]}. "
+                       + ("Почему: " + esc("; ".join(x["why"][:3])) if x.get("why") else "")))
+    B.append(("h3", "3. Методика и что нужно знать трейдеру"))
+    B.append(("ul", ["Тренд: цена и EMA 50 выше EMA 200 — восходящий (+1), ниже — нисходящий (−1).",
+                     "Импульс: место бумаги по доходности за 12 месяцев среди 24 крупнейших акций; верхняя треть +1, нижняя −1.",
+                     "Дивиденды: сумма выплат за 12 месяцев к текущей цене; от 10% — +1, до 3% — −0,5.",
+                     "Потенциал восстановления: бумага более чем на 35% ниже годового максимума при неотрицательном тренде (+0,5). Волатильность от 45% годовых — −0,5.",
+                     "Новостной фон: сумма весов новостей по бумаге за 3 недели (веса — средняя историческая реакция цены на такой тип новости).",
+                     "Оценка 2 и выше — «сильные позиции», 0,5…2 — «умеренно позитивно», −0,5…0,5 — «нейтрально», ниже — «слабые позиции».",
+                     "Ограничения: оценка не учитывает отчётность, долговую нагрузку и не раскрытые ещё корпоративные события. Цены — Мосбиржа, дивиденды — dohod.ru."]))
+    B.append(("p", "<i>" + esc(DISCLAIMER) + "</i>"))
+    return B
 
 
 def weekly_pdf(now, rows, stocks, imgs):
@@ -1485,8 +1513,22 @@ def vk_keys():
             log(name, "—", kind, "|", e)
 
 
+def telegraph_check():
+    """Проверка TELEGRAPH_TOKEN: аккаунт, автор, число страниц. Ничего не публикует."""
+    import article
+    if not article.TOKEN:
+        log("TELEGRAPH_TOKEN не задан — статьи пойдут сообщениями Telegram")
+        return
+    try:
+        a = article.account_info()
+        log("Telegraph: токен рабочий — аккаунт", a.get("short_name"), "| автор", a.get("author_name") or "—", "| страниц", a.get("page_count"))
+    except Exception as e:  # noqa: BLE001
+        log("Telegraph: токен НЕ работает —", e)
+
+
 def tg_check():
     """Проверка бота паблика: кто он, в каких каналах админ и может ли публиковать. Ничего не публикует."""
+    telegraph_check()
     if not os.environ.get("TG_PUBLIC_TOKEN"):
         log("секрет TG_PUBLIC_TOKEN не задан — паблик будет писать от основного бота (TG_TOKEN)")
     try:
@@ -1696,7 +1738,7 @@ def trade_scen(t, side, entry, stop, take=None, hz=10):
         feat = anom_features(t)
         if not feat:
             return None
-        return anom_live().scenario(feat, side, entry, stop, take, hz) | {"beta": feat.get("beta"), "reg_n": feat.get("reg_n"), "reg_n5": feat.get("reg_n5")}
+        return anom_live().scenario(feat, side, entry, stop, take, hz) | {"beta": feat.get("beta"), "reg_n": feat.get("reg_n"), "reg_n5": feat.get("reg_n5"), "side": side}
     except Exception as e:  # noqa: BLE001
         log("сценарии сделки", t, e)
         return None
@@ -1717,7 +1759,67 @@ def scen_text(sc, t=None):
         rl = reg_lines(t, 36)
         if rl:
             out.append("📍 Региональные события в регионах активов компании: " + "; ".join(rl[:2]))
+        cl = ctx_lines(t, sc.get("side") or 1)
+        if cl:
+            out.append("<b>Фон для сделки</b> (публичные данные):\n" + "\n".join(cl))
     return "\n".join(out)
+
+
+def _state_json(name):
+    for base in (None, os.path.join(NEWS_STATE, "channel")):
+        v = load_json(name, None, base)
+        if v:
+            return v
+    return {}
+
+
+def ctx_lines(t, side):
+    """Фон для сделки: решение ЦБ, ОФЗ, потоки денег в бумагу, сделки сильных трейдеров Пульса, раскрытые сделки инсайдеров."""
+    out, now = [], now_msk()
+    try:
+        cb = json.load(open(os.path.join(HERE, "..", "cbr_dates.json")))
+        nxt = next((d for d in cb if d >= now.date().isoformat()), None)
+        if nxt:
+            dd = (dt.date.fromisoformat(nxt) - now.date()).days
+            out.append(f"🏦 Решение ЦБ по ставке — {nxt[8:10]}.{nxt[5:7]} ({'сегодня' if dd == 0 else f'через {dd} дн.'})"
+                       + ("; на истории сделки стратегии, открытые за 3–7 дней до заседания, чаще закрывались убытком (выборка ~30 сделок — оценка грубая)" if 3 <= dd <= 7 else ""))
+    except Exception as e:  # noqa: BLE001
+        log("фон: ЦБ", e)
+    try:
+        rg = index_candles("RGBI", 20)
+        if len(rg) >= 6:
+            r5 = rg[-1]["c"] / rg[-6]["c"] - 1
+            out.append(f"📉 ОФЗ (RGBI) за 5 дней: {pc(r5, 1)} — " + ("деньги уходят из ОФЗ, для лонгов фон хуже (на истории такие лонги почти ничего не приносили, риск уменьшен)" if r5 < -0.01
+                       else "деньги идут в ОФЗ, ставки на рынке снижаются" if r5 > 0.01 else "спокойно"))
+    except Exception as e:  # noqa: BLE001
+        log("фон: ОФЗ", e)
+    fl = _state_json("flows_last.json")
+    if fl.get("time", "") >= (now - dt.timedelta(hours=8)).isoformat()[:13]:
+        for lab, v in (fl.get("buyers") or []) + (fl.get("sellers") or []):
+            if lab == t:
+                out.append(f"💸 Потоки по ${t} (ISS, последние 30 мин): перевес {'покупок' if v > 0 else 'продаж'} {pc(v, 0)}"
+                           + (" — совпадает со сделкой" if v * side > 0 else " — против сделки"))
+    pdl = [d for d in (_state_json("pulse_deals.json").get("deals") or []) if d.get("t") == t and d.get("ts", 0) >= time.time() - 5 * 86400]
+    if pdl:
+        b = sum(1 for d in pdl if d["side"] > 0); sl = len(pdl) - b
+        out.append(f"👥 Сильные трейдеры Пульса за 5 дней по ${t}: покупок {b}, продаж {sl}"
+                   + (" — в ту же сторону" if (b - sl) * side > 0 else " — в другую сторону" if (b - sl) * side < 0 else ""))
+    lp = os.path.join(NEWS_STATE, "news_log.jsonl")
+    if os.path.exists(lp):
+        ins = []
+        for line in open(lp, encoding="utf-8"):
+            if '"@INS"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if t in (e.get("tks") or []) and e.get("ts", 0) >= time.time() - 30 * 86400:
+                ins.append(e)
+        if ins:
+            b = sum(1 for e in ins if e.get("buy"))
+            out.append(f"💼 Раскрытые сделки инсайдеров и крупных акционеров за 30 дней: покупок {b}, продаж {len(ins) - b}")
+    return out
 
 
 def reg_lines(t, hours=24):
@@ -2285,7 +2387,7 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "anom_next": anom_next}[mode]()
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "anom_next": anom_next, "telegraph_check": telegraph_check}[mode]()
 
 
 if __name__ == "__main__":

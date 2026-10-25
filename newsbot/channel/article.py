@@ -150,25 +150,67 @@ def pdf(path, title, blocks):
     return path
 
 
+def account_info():
+    """Проверка токена Telegraph: имя автора и число страниц (ничего не публикует)."""
+    req = urllib.request.Request("https://api.telegra.ph/getAccountInfo", data=json.dumps(dict(access_token=TOKEN, fields=["short_name", "author_name", "page_count"])).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=40) as r:
+        js = json.loads(r.read().decode())
+    if not js.get("ok"):
+        raise RuntimeError("Telegraph: " + str(js.get("error")))
+    return js["result"]
+
+
+def tg_chunks(title, blocks, limit=3800):
+    """Статья → сообщения Telegram (HTML: b, i, a), если Telegraph недоступен. Без PDF."""
+    parts = [f"<b>{_html.escape(title, quote=False)}</b>"]
+    for b in blocks:
+        k = b[0]
+        if k == "h3":
+            parts.append(f"\n<b>{b[1]}</b>")
+        elif k == "h4":
+            parts.append(f"<b>{b[1]}</b>")
+        elif k in ("p", "aside"):
+            parts.append(b[1])
+        elif k == "ul":
+            parts.extend("• " + x for x in b[1])
+    clean = [re.sub(r"<(?!/?(b|i|a)\b)[^>]+>", "", x) for x in parts]
+    out, cur = [], ""
+    for x in clean:
+        if len(cur) + len(x) + 1 > limit and cur:
+            out.append(cur)
+            cur = ""
+        cur += ("\n" if cur else "") + x[:limit]
+    if cur:
+        out.append(cur)
+    return out
+
+
 def publish(pub, title, blocks, teaser, photos=None, fname="article"):
-    """Статья + анонс в паблике. Telegraph — ссылкой в анонсе; без токена — PDF-файлом под анонсом.
-    teaser — HTML анонса; строка «{LINK}» в нём заменяется ссылкой на статью или указанием на файл."""
+    """Статья + анонс в паблике. Основной путь — страница Telegraph (секрет TELEGRAPH_TOKEN), ссылка в анонсе.
+    Если Telegraph недоступен — статья уходит обычными сообщениями Telegram под анонсом (PDF больше не используется).
+    teaser — HTML анонса; строка «{LINK}» в нём заменяется ссылкой на статью."""
     os.makedirs(OUT, exist_ok=True)
     with open(os.path.join(OUT, fname + ".html"), "w", encoding="utf-8") as f:  # копия статьи для проверки
         f.write(f"<meta charset='utf-8'><h1>{_html.escape(title)}</h1>" + to_html(blocks))
     if getattr(pub, "dry", False):
         print("----- СТАТЬЯ (без публикации) -----\n" + title + "\n" + _html.unescape(re.sub(r"<[^>]+>", "", to_html(blocks).replace("</p>", "\n").replace("</li>", "\n").replace("</h3>", "\n").replace("</h4>", "\n"))), flush=True)
+        log("статья пойдёт в Telegraph" if TOKEN else "TELEGRAPH_TOKEN не задан — статья пойдёт сообщениями Telegram")
     chan = os.environ.get("TG_PUBLIC_CHAT", "")
     url = None
     if TOKEN and not DRY and not DEMO:
-        try:
-            url = telegraph(title, blocks, author=(chan if chan.startswith("@") else "MOEX паблик"), author_url=(f"https://t.me/{chan[1:]}" if chan.startswith("@") else ""))
-            log("статья Telegraph:", url)
-        except Exception as e:  # noqa: BLE001
-            log("Telegraph недоступен:", e)
+        for k in range(3):
+            try:
+                url = telegraph(title, blocks, author=(chan if chan.startswith("@") else "MOEX паблик"), author_url=(f"https://t.me/{chan[1:]}" if chan.startswith("@") else ""))
+                log("статья Telegraph:", url)
+                break
+            except Exception as e:  # noqa: BLE001
+                log("Telegraph недоступен (попытка", k + 1, "):", e)
+                import time
+                time.sleep(5 * (k + 1))
     if url:
         return pub.post(teaser.replace("{LINK}", f"📖 <b><a href=\"{url}\">Читать статью целиком</a></b>"), photos)
-    path = pdf(os.path.join(OUT, fname + ".pdf"), title, blocks + [("img", p, c) for p, c in (photos or [])])
-    if path:
-        return pub.post(teaser.replace("{LINK}", "📖 <b>Статья целиком — в PDF-файле ниже</b>"), photos, document=(path, "📖 " + _html.escape(title)))
-    return pub.post(teaser.replace("{LINK}", ""), photos)
+    res = pub.post(teaser.replace("{LINK}", "📖 <b>Статья целиком — в сообщениях ниже</b>"), photos)
+    for m in tg_chunks(title, blocks):
+        pub.post(m, ai_lead=False)
+    return res

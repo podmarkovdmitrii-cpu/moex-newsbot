@@ -21,7 +21,7 @@ def levels(last, a, side):
     if not side or not last or not a:
         return None
     dist = min(max(1.5 * a, 0.015 * last), 0.08 * last)
-    return dict(entry=last, stop=last - side * dist, take=last + side * 2 * dist, risk=dist / last)
+    return dict(entry=last, stop=last - side * dist, take=last + side * 3 * dist, risk=dist / last)
 
 
 def main(src, out):
