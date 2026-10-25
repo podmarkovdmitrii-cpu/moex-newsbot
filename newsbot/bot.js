@@ -163,6 +163,7 @@ function regInit() {
   return REGX;
 }
 function logRegional(S, items) {
+  try { logGeo(S, items); } catch (e) { /* не критично */ }
   const X = regInit();
   if (!X.inc) return;
   S.regLast = S.regLast || {};
@@ -175,6 +176,52 @@ function logRegional(S, items) {
     try { fs.appendFileSync(path.join(STATE_DIR, 'news_log.jsonl'), JSON.stringify({ tk: '@REG', ts: p.ts, regs, ind: X.ind.test(t) ? 1 : 0, ch: p.ch, tx: t.slice(0, 300) }) + '\n'); } catch (e) { /* не критично */ }
   }
 }
+// ---------- фон рынка для сделок: геополитика (новости), ОФЗ (RGBI) ----------
+// Проверка на истории сделок стратегии 2016–2026: лонги, открытые на всплеске новостей об эскалации (z > 1)
+// или когда ОФЗ за 5 дней подешевели больше чем на 1% (RGBI), в среднем почти ничего не приносили. Для таких лонгов риск
+// сделки уменьшается (STRAT.ctxRisk): годовых 7,0% → 9,3%, PF 1,52 → 1,70, просадка не выше (обе половины периода лучше).
+const GEO_BASE = { mean: -0.0097, sd: 0.0547 }; // распределение по архиву новостей 2025–2026, пока своей истории < 60 дней
+function logGeo(S, items) {
+  S.geoDay = S.geoDay || {};
+  for (const p of items || []) {
+    const c = N.classify(String(p.tx || '').slice(0, 600)); if (!c.types.length || !p.ts) continue;
+    const d = new Date((p.ts + 3 * 3600) * 1000).toISOString().slice(0, 10);
+    const g = S.geoDay[d] = S.geoDay[d] || { e: 0, p: 0, n: 0 };
+    g.n++; if (c.types.some(([n]) => n === 'geo_escal')) g.e++; if (c.types.some(([n]) => n === 'geo_peace')) g.p++;
+  }
+  const old = new Date(Date.now() - 400 * 86400e3).toISOString().slice(0, 10);
+  for (const d of Object.keys(S.geoDay)) if (d < old) delete S.geoDay[d];
+}
+function geoRatio(S, d) { // три календарных дня до d (без самого d)
+  let e = 0, p = 0, n = 0;
+  for (let k = 1; k <= 3; k++) { const g = (S.geoDay || {})[new Date(Date.parse(d) - k * 86400e3).toISOString().slice(0, 10)]; if (g) { e += g.e; p += g.p; n += g.n; } }
+  return n >= 15 ? (e - p) / Math.max(n, 20) : null;
+}
+function geoZ(S, d) {
+  const r = geoRatio(S, d); if (r === null) return null;
+  const hist = Object.keys(S.geoDay || {}).sort().slice(-250).map(x => geoRatio(S, x)).filter(x => x !== null);
+  let { mean, sd } = GEO_BASE;
+  if (hist.length >= 60) { mean = hist.reduce((a, x) => a + x, 0) / hist.length; sd = Math.sqrt(hist.reduce((a, x) => a + (x - mean) ** 2, 0) / hist.length) || sd; }
+  return (r - mean) / sd;
+}
+// флаги фона на каждый день (до открытия): фиксируются один раз и дальше не меняются, чтобы пересчёт счёта был стабильным
+function marketCtx(S, days, rgbi) {
+  S.ctxHist = S.ctxHist || {};
+  if (!rgbi || rgbi.length < 10) return S.ctxHist; // без котировок ОФЗ флаги не фиксируем
+  const rg = new Map(rgbi.map(r => [r[0], r[4]])), rd = rgbi.map(r => r[0]);
+  for (const d of days.slice(-5)) {
+    if (S.ctxHist[d] !== undefined) continue;
+    const w = [], z = geoZ(S, d);
+    if (z !== null && z > 1) w.push(`всплеск новостей об эскалации (z ${fmt(z, 1)})`);
+    const j = rd.findIndex(x => x >= d); const k = (j < 0 ? rd.length : j) - 1; // последнее закрытие до d
+    if (k >= 5) { const r5 = rg.get(rd[k]) / rg.get(rd[k - 5]) - 1; if (r5 < -0.01) w.push(`ОФЗ дешевеют (RGBI ${fmt(r5 * 100, 1)}% за 5 дн.)`); }
+    S.ctxHist[d] = w.join('; ');
+  }
+  const old = new Date(Date.now() - 800 * 86400e3).toISOString().slice(0, 10);
+  for (const d of Object.keys(S.ctxHist)) if (d < old) delete S.ctxHist[d];
+  return S.ctxHist;
+}
+
 // ---------- сценарии сделки (модель anomaly/scenario.py через jobs.py trade_prob) ----------
 function tradeScen(t, side, entry, stop, take, hz) {
   try {
@@ -277,6 +324,7 @@ async function dailyCandles(S, today) {
     await sleep(120);
   }
   data.imoex = (await get('engines/stock/markets/index/securities/IMOEX/candles.json')).filter(r => r.begin.slice(0, 10) < today).map(r => [r.begin.slice(0, 10), r.open, r.high, r.low, r.close, 0]);
+  try { data.rgbi = (await get('engines/stock/markets/index/securities/RGBI/candles.json')).filter(r => r.begin.slice(0, 10) < today).map(r => [r.begin.slice(0, 10), r.open, r.high, r.low, r.close, 0]); } catch (e) { log('RGBI:', e.message); data.rgbi = []; }
   const js = await http(`${ISS}engines/stock/markets/shares/boards/TQBR/securities.json?iss.meta=off&iss.only=securities&securities.columns=SECID,LOTSIZE,SHORTNAME,DECIMALS`);
   for (const r of table(js, 'securities')) data.lot[r.SECID] = { lot: r.LOTSIZE || 1, name: r.SHORTNAME, dec: r.DECIMALS ?? 2 };
   S.candles = { date: today, data };
@@ -319,7 +367,8 @@ function runStrategy(S, data, live, today) {
     const sd = days[j - 1] || (j - 1 >= days.length ? days[days.length - 1] : null); if (!sd) continue;
     (sig[e.t] = sig[e.t] || []).push([sd, e.v]);
   }
-  const D = RG.prepare({ days, sec, imoex: X, div, divTaxOnly: 1, sig });
+  const ctx = marketCtx(S, days, data.rgbi);
+  const D = RG.prepare({ days, sec, imoex: X, div, divTaxOnly: 1, sig, ctx });
   let from = days.findIndex(d => d >= S.start); if (from < 0) from = days.length - 1;
   const to = days.length - 1, sigTo = days[to] >= today ? to - 1 : to;
   const P = Object.assign({}, STRAT, { capital: CAPITAL, lots });

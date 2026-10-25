@@ -91,7 +91,10 @@
     // дивиденды (цены без поправки на дивиденды): сумма на акцию в день отсечки (первый день без дивиденда)
     if (H.div) for (const [t, arr] of Object.entries(H.div)) { const s = S[t]; if (!s) continue; s.div = new Float64Array(N); for (const [d, v] of arr) { const i = pos.get(d); if (i !== undefined) s.div[i] += v; } }
     const X = mk(H.imoex);
-    return { days, N, S, X, tickers: Object.keys(S), cache: {}, divTaxOnly: !!H.divTaxOnly };
+    // контекст рынка на день входа (геополитика, ОФЗ, решение ЦБ): { 'YYYY-MM-DD': 'причина' } — до открытия этого дня
+    const ctx = new Array(N).fill(null);
+    if (H.ctx) for (const [d, why] of Object.entries(H.ctx)) { const i = pos.get(d); if (i !== undefined && why) ctx[i] = why; }
+    return { days, N, S, X, ctx, tickers: Object.keys(S), cache: {}, divTaxOnly: !!H.divTaxOnly };
   }
   function ind(s, key, fn) { return s.cache[key] || (s.cache[key] = fn()); }
   const I = {
@@ -288,7 +291,7 @@
     else if (m.fam === 'pump') out.push(`Отбой от EMA 200 (${f1(I.ema(s, 200)[i])}) зелёной свечой`);
     else out.push('Сигнал модуля ' + m.fam);
     out.push('Режим: ' + REG_TXT[g]);
-    out.push('Стоп-лосс 3% от входа, риск 1% капитала' + (m.take ? `, цель ${m.take * 3}%` : '') + (m.trail ? `, трейлинг ${m.trail} ATR` : '') + (m.hold ? `, не дольше ${m.hold} дн.` : ''));
+    out.push('Стоп-лосс 3% от входа, риск 1% капитала' + (m.take ? `, цель ${m.take * 3}% (риск к прибыли 1:${m.take})` : ', цель не ограничена (не меньше 1:3 — держим, пока жив импульс)') + (m.be ? `, после +${m.be}R стоп в безубыток` : '') + (m.trail ? `, трейлинг ${m.trail} ATR` : '') + (m.hold ? `, не дольше ${m.hold} дн.` : ''));
     return out;
   }
 
@@ -355,7 +358,8 @@
         if (!(o === o) || open.length >= maxPos || open.some(x => x.t === ord.t)) continue;
         if (ord.m.gapMax && ord.side * (o / I.pc(s)[i] - 1) < -ord.m.gapMax) continue;
         const sl = ord.slip, px = o * (1 + ord.side * sl);
-        const riskRub = equity * riskPct, stopDist = px * stopPct;
+        const cx = ord.side > 0 && P.ctxRisk && D.ctx ? D.ctx[i] : null; // рискованный фон для лонга → риск сделки уменьшается
+        const riskRub = equity * riskPct * (cx ? P.ctxRisk : 1), stopDist = px * stopPct;
         let notional = riskRub / stopDist * px;
         notional = Math.min(notional, equity * maxPosPct);
         const gross = open.reduce((a, x) => a + x.qty * x.last, 0);
@@ -370,7 +374,7 @@
         commPaid += fee;
         const m = ord.m;
         const ps = { t: ord.t, side: ord.side, qty, entry: px, i0: i, d0: d, stop: px * (1 - ord.side * stopPct), take: m.take ? px * (1 + ord.side * m.take * stopPct) : null,
-          best: px, last: px, slip: sl, m, fam: m.fam, reg: ord.reg, score: ord.score, risk: qty * px * stopPct, fees: fee, carry: 0, why: ord.why || [], stop0: px * (1 - ord.side * stopPct) };
+          best: px, last: px, slip: sl, m, fam: m.fam, reg: ord.reg, score: ord.score, risk: qty * px * stopPct, fees: fee, carry: 0, why: cx ? (ord.why || []).concat(['Фон рынка: ' + cx + ' — риск сделки уменьшен до ' + Math.round(riskPct * P.ctxRisk * 1000) / 10 + '% счёта']) : (ord.why || []), stop0: px * (1 - ord.side * stopPct) };
         open.push(ps);
       }
       // 2) внутридневные стоп и тейк

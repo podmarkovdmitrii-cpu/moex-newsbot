@@ -297,12 +297,12 @@ function sigBlock(tk, ns, card, rumor) {
   if (!ns.side) return `🎯 <b>Сигнал по $${tk}:</b> нет — ${ns.why}.`;
   const dir = ns.side > 0 ? 'ЛОНГ' : 'ШОРТ';
   let t = `🎯 <b>Сигнал: ${dir} $${tk}</b>${rumor ? ' — только если новость подтвердится' : ''}\n`;
-  if (card && card.entry) t += `Вход ≈ ${fmt(card.entry, 2)} · стоп ${fmt(card.stop, 2)} (${pc(-card.risk, 1)}) · тейк ${fmt(card.take, 2)} (${pc(2 * card.risk, 1)}) · горизонт до 5 дней\n`;
+  if (card && card.entry) t += `Вход ≈ ${fmt(card.entry, 2)} · стоп ${fmt(card.stop, 2)} (${pc(-card.risk, 1)}) · тейк ${fmt(card.take, 2)} (${pc(3 * card.risk, 1)}) · риск к прибыли 1:3 · горизонт до 10 дней\n`;
   t += `Основание: после таких новостей $${tk} ${v.a5 >= 0 ? 'обгоняла' : 'отставала от'} индекс${v.a5 >= 0 ? '' : 'а'} в среднем на ${pc(Math.abs(v.a5), 2).replace(/^[+−]/, '')} за 5 дней, в ${Math.round((v.a5 >= 0 ? v.up5 : 1 - v.up5) * 100)}% случаев (выборка ${v.n}${v.lvl !== 'бумага' ? ', оценка по ' + (v.lvl === 'сектор' ? 'сектору' : 'всем бумагам') : ''}).`;
   if (Math.sign(v.pre) === ns.side && Math.abs(v.pre) >= Math.abs(v.a5)) t += '\n⚠️ Обычно цена успевает сдвинуться ещё до публикации — часть реакции может быть уже отыграна.';
   if (ns.side < 0) t += '\n⚠️ Шорт требует маржинальной торговли; перенос позиции платный.';
   if (card && card.entry) {
-    const sc = scenCall(tk, ns.side, card.entry, card.stop, card.take, 5);
+    const sc = scenCall(tk, ns.side, card.entry, card.stop, card.take, 10);
     if (sc && sc.text) t += '\n' + sc.text;
   }
   return t;
@@ -400,6 +400,7 @@ async function run(S, clusters, items) {
     if (!it.tks.length || done.has(it.link) || now - it.ts > 3 * 3600 || (SRC[it.ch] || [])[1] === 'автор' || !INSIDER.test(it.tx)) continue;
     const buy = /купил|приобр|увеличил|нарастил/i.test(it.tx);
     mark(it.link); n++;
+    try { fs.appendFileSync(path.join(process.env.STATE_DIR || path.join(__dirname, 'state'), 'news_log.jsonl'), JSON.stringify({ tk: '@INS', ts: it.ts, tks: it.tks, buy: buy ? 1 : 0, tx: it.tx.slice(0, 200) }) + '\n'); } catch (e) { /* не критично */ }
     const pseudo = { srcs: { [it.ch]: { tx: it.tx, link: it.link, ts: it.ts } }, first: { tx: it.tx, link: it.link }, tks: it.tks };
     const nb = await newsBody(S, pseudo, buy ? 'Покупка инсайдера' : 'Продажа инсайдера', it.tks[0], buy ? 1 : -1);
     await publish(S, `💼 <b>Сделка инсайдера / крупного акционера</b> — ${it.tks.map(t => '$' + t).join(' ')}\n${nb.html}\n\n` +
