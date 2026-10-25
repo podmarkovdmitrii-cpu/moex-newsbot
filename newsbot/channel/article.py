@@ -76,7 +76,7 @@ def to_html(blocks):
     return "".join(out)
 
 
-LIMIT = 30000  # Telegraph принимает content до 64 КБ, но кириллица на сервере считается тяжелее — берём с запасом (\uXXXX)
+LIMIT = 60000  # Telegraph: content до 64 КБ; считаем по самой «тяжёлой» кодировке (\\uXXXX), так что запас есть при любом подсчёте на сервере
 
 
 def _size(blocks):
