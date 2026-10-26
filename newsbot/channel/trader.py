@@ -429,6 +429,8 @@ def build_features(days_back=760):
     ixc = {b["t"]: b["c"] for b in ix}
     rows, names = {}, {}
     eq = eq_list()
+    short = []
+    log("трейдер: акций в списке TQBR", len(eq), "; IMOEX баров", len(ix), "; отраслевых индексов", len(sect))
     for r in eq:
         t = r["SECID"]
         names[t] = r.get("SHORTNAME") or t
@@ -438,11 +440,13 @@ def build_features(days_back=760):
             log("свечи", t, e)
             continue
         if len(B) < 260:
+            short.append(f"{t}:{len(B)}")
             continue
         B = unsplit(B)
         B = adjust_divs(B, divs.get(t, []))
         res = inst_feats(B, ixc, 0)
         if not res:
+            short.append(f"{t}:feats")
             continue
         f, meta = res
         f0 = first.get(t) or B[0]["t"]
@@ -450,6 +454,7 @@ def build_features(days_back=760):
         meta["lot"] = r.get("LOTSIZE") or 1
         rows[t] = dict(f=f, m=meta)
         time.sleep(0.03)
+    log("трейдер: акций с признаками", len(rows), "; пропущено", len(short), ":", ", ".join(short[:12]))
     for a in METALS:
         try:
             B, roll_t = fut_series(a, days_back)
