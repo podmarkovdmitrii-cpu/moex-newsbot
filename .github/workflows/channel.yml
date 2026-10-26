@@ -9,6 +9,10 @@ on:
     - cron: '45 10 * * 1-5'      # 13:45 МСК — ОФЗ, середина дня
     - cron: '10 16 * * 1-5'      # 19:10 МСК — ОФЗ, итоги дня
     - cron: '25 16 * * 1-5'      # 19:25 МСК — итоги дня
+    - cron: '20 3 * * 1-5'       # 06:20 МСК — рубрика «Трейдер»: сопровождение сделок и признаки до открытия
+    - cron: '20 4 * * 1-5'       # 07:20 МСК — «Трейдер»: сигнал после открытия утренней сессии
+    - cron: '20 7 * * 1-5'       # 10:20 МСК — «Трейдер»: сигнал после открытия основной сессии
+    - cron: '45 16 * * 5'        # 19:45 МСК, пятница — «Трейдер»: итоги недели по закрытым сделкам
   workflow_dispatch:
     inputs:
       mode:
@@ -16,7 +20,7 @@ on:
         required: true
         default: 'morning'
         type: choice
-        options: [tg_check, test_post, aitest, anom_test, anom_pre, morning_dry, evening_dry, anomaly, commod, morning, flows, ofz, pulse_deals, evening, weekly]
+        options: [tg_check, test_post, aitest, anom_test, anom_pre, morning_dry, evening_dry, trader_prep_dry, trader_open_dry, trader_week_dry, anomaly, commod, morning, flows, ofz, pulse_deals, evening, weekly, trader_prep, trader_open, trader_week]
 
 concurrency:
   group: channel
