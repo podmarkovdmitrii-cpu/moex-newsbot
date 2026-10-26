@@ -52,6 +52,16 @@ const TYPE_RU = {
 };
 // Заявления официальных лиц публикуем только на макро-темы (санкции, геополитика, ставка, нефть, рубль, налоги)
 const MACRO = /^(sanctions|geo_|cbr_|oil_|ruble_|tax)/;
+// Типы событий компании: для «рынка в целом» не применяются (IPO чужой компании, обыски в НБУ, прогноз инфляции ЦБ ≠ «прогноз повышен»)
+const COMPANY_TY = /^(div_|buyback|spo|ipo|results_|guidance_|analyst_|legal|production_|mna|delist_|management)/;
+// Главный тип новости — тот, чьё описание встречается в тексте раньше всех; второстепенные упоминания («несмотря на санкции») — не повод для поста
+function primaryType(text) {
+  const low = ' ' + String(text).toLowerCase().replace(/ё/g, 'е') + ' ';
+  const got = new Set(N.classify(text).types.map(t => t[0]));
+  let best = null, pos = 1e9;
+  for (const [n, rx] of N.TYPES) { if (!got.has(n)) continue; const m = low.match(rx); if (m && m.index < pos) { pos = m.index; best = n; } }
+  return best;
+}
 const STRONG_RUMOR = /источник|по данным|по информации|сообща[ею]т|инсайд|слух|утечк|неофициальн|рассматрива|может (быть|стать|выплатить|провести|рекомендовать|получить|продать|купить|объявить)/i;
 // раскрытые сделки инсайдеров и крупных акционеров (по сообщениям компаний и СМИ)
 const INSIDER = /(член[а-я]* совета директоров|председател[а-я]* совета директоров|гендиректор|генеральн[а-я]* директор|глав[а-я]* компании|президент компании|председател[а-я]* правления|топ-менеджер|менеджмент|инсайдер|мажоритар|крупн[а-я]* акционер|основател[а-я]*|владел[а-я]*|акционер[а-я]*)[^.]{0,80}(купил|приобр[её]л|продал|увеличил[а-я]* (свою )?долю|снизил[а-я]* (свою )?долю|сократил[а-я]* (свою )?долю|нарастил|реализовал)/i;
@@ -192,10 +202,11 @@ async function tgPhoto(photo, caption, reply) {
   fd.append('photo', new Blob([fs.readFileSync(photo)], { type: 'image/png' }), path.basename(photo));
   const r = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendPhoto`, { method: 'POST', body: fd });
   const js = await r.json().catch(() => ({}));
-  if (!js.ok) { log('telegram фото:', r.status, JSON.stringify(js).slice(0, 200)); return null; }
+  if (!js.ok) { log('telegram фото:', r.status, JSON.stringify(js).slice(0, 200)); TG_PHOTO_ERR = r.status; return null; }
   await sleep(1100);
   return js.result.message_id;
 }
+let TG_PHOTO_ERR = 0; // код ошибки последней отправки фото: повторяем текстом только при 400 (иначе фото могло уже уйти — будет дубль)
 let VK_GROUP_PHOTO_OFF = false; // ВК не даёт ключу сообщества загружать фото на стену (ошибка 27) — нужен VK_USER_TOKEN
 async function vkPhoto(photo) {
   // загрузка картинки на стену: сначала ключом сообщества, при отказе — ключом администратора
@@ -224,8 +235,9 @@ async function publish(S, html, reply, useAi, photo, more) {
   if (photo && fs.existsSync(photo) && !DRY && TG_CHAT) {
     let cap = html + disc, rest = '';
     if (vis(cap).length > 1024) { [cap, rest] = splitCaption(html, 1000 - DISCLAIMER.length - 2); cap += disc; }
-    id = await tgPhoto(photo, cap, reply);
-    if (!id) id = await tgSend(full, reply);
+    TG_PHOTO_ERR = 0;
+    try { id = await tgPhoto(photo, cap, reply); } catch (e) { log('telegram фото:', e.message); TG_PHOTO_ERR = -1; }
+    if (!id && (TG_PHOTO_ERR === 400 || TG_PHOTO_ERR === 429)) id = await tgSend(full, reply);
     else {
       // продолжение — ответом на пост с картинкой, чтобы было понятно, к чему оно
       const tail = [rest ? '↑ <b>Продолжение</b>\n' + rest : '', more].filter(Boolean).join('\n\n');
@@ -295,12 +307,12 @@ function srcFull(c) {
 }
 // Дайджесты и сводки (много тем в одном посте) в паблик не идут — тип события в них определяется плохо
 const DIGEST = /(сводк[аи]|главн(ые|ое) (новост|к этому|за|на)|что произошло|дайджест|утренн(ий|яя) (обзор|сводка)|вечерн(ий|яя) (обзор|сводка)|итоги (дня|недели)|коротко о главном|новости к этому часу|как закрыл(ась|ся|ись)|лидеры (роста|падения)|итоги торгов|на закрытие|рынок на \d\d:\d\d|на \d\d:\d\d мск)/i;
-const DIGEST2 = /(краткий обзор|обзор (экономической |новостной |рыночной )?повестк|к вечеру|главное за|что важно|самое важное|новости (дня|утра|вечера)|итоги)/i;
+const DIGEST2 = /(краткий обзор|обзор (экономической |новостной |рыночной )?повестк|обзор новостей|к вечеру|главное (за|из|к)|важное за|что важно|самое важное|новост\S* (дня|утра|вечера|к этому часу)|итоги|доброе утро|планы на сегодня|что (должно )?произо|открыл\S* (основную )?(сессию|торги)|лидер\S* (роста|падения)|как закрыл)/i;
 function isDigest(c) {
   const full = srcFull(c);
-  if (DIGEST.test(full.slice(0, 200)) || DIGEST2.test(full.slice(0, 160)) || (c.tks || []).length > 3) return true;
+  if (DIGEST.test(full.slice(0, 200)) || DIGEST2.test(full.slice(0, 160)) || (c.tks || []).length >= 3) return true;
   const bullets = (String((srcPick(c) || [, {}])[1].tx || c.first.tx || '').match(/(^|\n)\s*(🔹|🔸|▪️?|•|✔️|📌|\d+[.)])\s/g) || []).length;
-  if (bullets >= 3) return true;
+  if (bullets >= 3 || (full.match(/🔹|🔸|▪️|•|⚫|🟢|🔺|⬆️|⬇️/g) || []).length >= 3) return true;
   return N.tickersIn(full, null).length >= 4; // много компаний в одном тексте — обзор, а не новость о бумаге
 }
 // Цитата без обрыва на полуслове: целиком до 700 знаков, иначе до конца предложения + «читать полностью»
@@ -398,6 +410,8 @@ async function newsBody(S, c, label, tk, s, ty, rumor) {
   // 1) цифры без картинки: изменение за день и уровни для обеих сторон
   const base = await makeCard({ t: main, kind, noimg: true });
   let lv = null, sc = null;
+  if (ns.side && base && base.ld && (Date.now() - Date.parse(base.ld)) / 864e5 > 4)
+    ns = { side: 0, v: ns.v, why: `по $${main} нет сделок с ${base.ld.slice(8, 10)}.${base.ld.slice(5, 7)} — торги, похоже, приостановлены` };
   if (ns.side && base && base.chg != null && base.chg * ns.side <= -0.01)
     ns = { side: 0, v: ns.v, why: `сегодня $${main} уже ${pc(base.chg, 1)} — цена идёт против новости, рынок её так не читает` };
   if (ns.side && base && base.lv) {
@@ -491,6 +505,8 @@ async function run(S, clusters, items) {
     if (!can()) break;
     const [tk, ty] = c.key.split('|');
     if (!(c.pub && (c.pub.rumor || c.pub.done)) && isDigest(c)) continue;
+    if (tk === 'РЫНОК' && COMPANY_TY.test(ty)) continue;
+    if (ty !== 'tone' && !(c.pub && (c.pub.rumor || c.pub.done))) { const pt = primaryType(srcFull(c)); if (pt && pt !== ty) continue; }
     const chs = Object.keys(c.srcs);
     const firstLink = c.first.link;
     c.pub = c.pub || {};
@@ -556,4 +572,4 @@ async function trade(S, html) {
   await publish(S, html);
 }
 
-module.exports = { run, trade, compLine, mktLines, SRC, _t: { newsSide, isDigest, newsBody, postNews, compImpact } };
+module.exports = { run, trade, compLine, mktLines, SRC, _t: { newsSide, isDigest, newsBody, postNews, compImpact, primaryType, COMPANY_TY } };
