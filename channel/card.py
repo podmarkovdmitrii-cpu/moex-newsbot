@@ -163,7 +163,7 @@ def main(src, out):
     chg = daily[-1]["c"] / daily[-2]["c"] - 1 if len(daily) > 1 else None
     side = d.get("side") or 0
     lv = levels(last, a, side)
-    res = dict(png=None, last=last, atr=a, chg=chg, lv={"1": levels(last, a, 1), "-1": levels(last, a, -1)})
+    res = dict(png=None, last=last, atr=a, chg=chg, ld=(daily[-1].get("t") or "")[:10] if daily else None, lv={"1": levels(last, a, 1), "-1": levels(last, a, -1)})
     if lv:
         res.update(lv)
     if not d.get("noimg") and len(daily) >= 20:

@@ -590,6 +590,7 @@ def pulse():
 NOISE = re.compile(r"\(про [^)]{2,25}\):|Идея:|Тикер:|Стоп-приказ|Потенциал идеи|Друзья,|Топ[- ]\d*\s*(дивидендн|акци)|подписывайтесь|#реклама|розыгрыш|Краткий обзор", re.I)
 TRUST_CH = {"interfaxonline", "ifax_go", "if_market_news", "tass_agency", "rbc_news", "ria_novosti", "prime1", "vedomosti", "kommersant", "bloomberg_ru", "forbesrussia",
             "thebell_io", "cbrstocks", "centralbank_russia", "minfin", "MID_Russia", "kremlinnews"}
+COMPANY_TY = re.compile(r"(div_|buyback|spo|ipo|results_|guidance_|analyst_|legal|production_|mna|delist_|management)")
 RU_REL = re.compile(r"росси|рф\b|рубл|мосбирж|imoex|ммвб|офз|банк росси|\bцб\b|минфин|набиуллин|силуанов|кремл|путин|песков|госдум|правительств|санкц|нефт|brent|urals|газ|опек|экспорт|импорт|украин|переговор|бюджет|ндпи|налог|инфляц|ключев", re.I)
 DIGEST = re.compile(r"Что произошло за|Главное за|Главное к|Главные новости|к этому часу|новости к утру|новости к вечеру|Итоги дня|Итоги недели|дайджест|#крипто|биткоин|#BTC|Утренний обзор|Вечерний обзор|Краткий обзор|обзор (экономической |новостной )?повестки|к вечеру индекс", re.I)
 
@@ -704,7 +705,9 @@ def news_pick(cls, since, tks=None, market=False, min_pct=0.5, k=5):
     for c in sorted(cls, key=lambda c: -cl_weight(c)):
         if c.get("ts", 0) < since:
             continue
-        tk = (c.get("key") or "|").split("|")[0]
+        tk, ty = ((c.get("key") or "|") + "|").split("|")[:2]
+        if tk == "РЫНОК" and COMPANY_TY.match(ty or ""):
+            continue  # тип события компании у «рынка в целом» — ошибка разметки (чужое IPO, обыски в НБУ)
         if market and tk != "РЫНОК":
             continue
         if tks is not None and tk not in tks:
