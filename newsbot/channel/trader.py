@@ -442,6 +442,8 @@ def share_bars(eq, ix_days, days_back):
     td = now_msk().date().isoformat()
     bars = {t: [b for b in B if b["t"] < td] for t, B in cache.get("bars", {}).items()}
     last = cache.get("last")
+    if last and last >= td:  # кэш с сегодняшней неполной свечой — откатываемся на последний закрытый день
+        last = max((B[-1]["t"] for B in bars.values() if B), default=None)
     want = [d for d in ix_days if last and d > last]
     full = not last or len(want) > 15
     if not full:
