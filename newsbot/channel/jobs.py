@@ -34,7 +34,8 @@ CBR_DAYS = ["2026-10-23", "2026-12-18", "2027-02-12", "2027-03-20", "2027-04-24"
 FAM_RU = {"mom": "импульс", "pull": "откат к EMA 20", "sbrk": "шорт пробоя"}
 SEC_RU = {"bank": "банки", "oil": "нефтегаз", "metal": "металлурги", "retail": "ритейл", "tech": "IT и связь", "power": "энергетика", "chem": "химия", "devel": "девелоперы", "transport": "транспорт"}
 SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "weekly", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
-         "45 10 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening"}
+         "45 10 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening",
+         "20 3 * * 1-5": "trader_prep", "20 4 * * 1-5": "trader_open", "20 7 * * 1-5": "trader_open", "45 16 * * 5": "trader_week"}
 PUB = Publisher()
 DISCLAIMER_TXT = DISCLAIMER
 
@@ -2382,12 +2383,18 @@ def main():
     if not mode:
         h = now_msk().strftime("%H:%M")
         mode = "morning" if "06:00" <= h < "08:30" else "pulse"
-    if mode in ("morning_dry", "evening_dry"):  # проверка без публикации: всё собирается, текст — в журнал
+    if mode.endswith("_dry"):  # проверка без публикации: всё собирается, текст — в журнал
         PUB.dry = True
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "anom_next": anom_next, "telegraph_check": telegraph_check}[mode]()
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "anom_next": anom_next, "telegraph_check": telegraph_check,
+     "trader_prep": lambda: trader_mod().prep(PUB), "trader_open": lambda: trader_mod().open_(PUB), "trader_week": lambda: trader_mod().week(PUB)}[mode]()
+
+
+def trader_mod():
+    import trader  # рубрика «Трейдер» (channel/trader.py)
+    return trader
 
 
 if __name__ == "__main__":
