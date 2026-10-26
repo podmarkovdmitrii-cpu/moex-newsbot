@@ -415,6 +415,63 @@ def eq_list():
     return [r for r in table(js, "securities") if r.get("INSTRID") == "EQIN"]
 
 
+BARS_FILE = "trader_bars.json"
+KEEP = 560
+
+
+def hist_day(d):
+    """Дневные бары всех акций TQBR за дату (ISS history): {тикер: бар}."""
+    out, start = {}, 0
+    for _ in range(20):
+        js = iss("history/engines/stock/markets/shares/boards/TQBR/securities.json", date=d, start=start,
+                 **{"history.columns": "SECID,TRADEDATE,OPEN,HIGH,LOW,CLOSE,VALUE"})
+        rows = table(js, "history")
+        for r in rows:
+            if r.get("CLOSE"):
+                out[r["SECID"]] = dict(t=r["TRADEDATE"], o=r.get("OPEN") or r["CLOSE"], h=r.get("HIGH") or r["CLOSE"],
+                                       l=r.get("LOW") or r["CLOSE"], c=r["CLOSE"], v=r.get("VALUE") or 0)
+        if len(rows) < 100:
+            break
+        start += len(rows)
+    return out
+
+
+def share_bars(eq, ix_days, days_back):
+    """Сырые дневные бары акций с кэшем в состоянии: полная загрузка один раз, дальше — только новые дни."""
+    cache = load_json(BARS_FILE, {})
+    bars = cache.get("bars", {})
+    last = cache.get("last")
+    want = [d for d in ix_days if last and d > last]
+    full = not last or len(want) > 15
+    if not full:
+        for d in want:
+            try:
+                day = hist_day(d)
+            except Exception as e:  # noqa: BLE001
+                log("трейдер: история за", d, e)
+                full = True
+                break
+            for t, b in day.items():
+                if t in bars and (not bars[t] or bars[t][-1]["t"] < d):
+                    bars[t].append(b)
+            time.sleep(0.2)
+    n_full = 0
+    for r in eq:
+        t = r["SECID"]
+        if full or t not in bars:
+            try:
+                bars[t] = clean(candles(f"engines/stock/markets/shares/boards/TQBR/securities/{t}/candles.json", days_back, 24))
+                n_full += 1
+            except Exception as e:  # noqa: BLE001
+                log("свечи", t, e)
+            time.sleep(0.03)
+        bars[t] = bars.get(t, [])[-KEEP:]
+    cache = dict(bars=bars, last=ix_days[-1] if ix_days else last)
+    save_json(BARS_FILE, cache)
+    log("трейдер: бары акций —", "полная загрузка" if full else f"дозагрузка {len(want)} дн.", "; заново по", n_full, "бумагам")
+    return bars
+
+
 def build_features(days_back=760):
     """Признаки всех акций и металлов по вчерашнему закрытию + рыночный фон. Возвращает словарь для состояния."""
     first, divs = ref_tables()
@@ -431,14 +488,12 @@ def build_features(days_back=760):
     eq = eq_list()
     short = []
     log("трейдер: акций в списке TQBR", len(eq), "; IMOEX баров", len(ix), "; отраслевых индексов", len(sect))
+    SB = share_bars(eq, [b["t"] for b in ix], days_back)
     for r in eq:
         t = r["SECID"]
         names[t] = r.get("SHORTNAME") or t
-        try:
-            B = clean(candles(f"engines/stock/markets/shares/boards/TQBR/securities/{t}/candles.json", days_back, 24))
-        except Exception as e:  # noqa: BLE001
-            log("свечи", t, e)
-            continue
+        from common import adjust_splits
+        B = adjust_splits([dict(b) for b in SB.get(t, [])])
         if len(B) < 260:
             short.append(f"{t}:{len(B)}")
             continue
