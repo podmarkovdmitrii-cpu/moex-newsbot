@@ -439,7 +439,8 @@ def hist_day(d):
 def share_bars(eq, ix_days, days_back):
     """Сырые дневные бары акций с кэшем в состоянии: полная загрузка один раз, дальше — только новые дни."""
     cache = load_json(BARS_FILE, {})
-    bars = cache.get("bars", {})
+    td = now_msk().date().isoformat()
+    bars = {t: [b for b in B if b["t"] < td] for t, B in cache.get("bars", {}).items()}
     last = cache.get("last")
     want = [d for d in ix_days if last and d > last]
     full = not last or len(want) > 15
@@ -460,7 +461,8 @@ def share_bars(eq, ix_days, days_back):
         t = r["SECID"]
         if full or t not in bars:
             try:
-                bars[t] = clean(candles(f"engines/stock/markets/shares/boards/TQBR/securities/{t}/candles.json", days_back, 24))
+                td = now_msk().date().isoformat()
+                bars[t] = [b for b in clean(candles(f"engines/stock/markets/shares/boards/TQBR/securities/{t}/candles.json", days_back, 24)) if b["t"] < td]
                 n_full += 1
             except Exception as e:  # noqa: BLE001
                 log("свечи", t, e)
@@ -475,11 +477,13 @@ def share_bars(eq, ix_days, days_back):
 def build_features(days_back=760):
     """Признаки всех акций и металлов по вчерашнему закрытию + рыночный фон. Возвращает словарь для состояния."""
     first, divs = ref_tables()
-    ix = clean(candles("engines/stock/markets/index/securities/IMOEX/candles.json", days_back, 24))
+    today = now_msk().date().isoformat()
+    past = lambda B: [b for b in B if b["t"] < today]  # noqa: E731 — только закрытые дни: сегодняшняя свеча (уже с аукциона) в признаки не идёт
+    ix = past(clean(candles("engines/stock/markets/index/securities/IMOEX/candles.json", days_back, 24)))
     sect = {}
     for code in SECTOR_IX:
         try:
-            sect[code] = clean(candles(f"engines/stock/markets/index/securities/{code}/candles.json", days_back, 24))
+            sect[code] = past(clean(candles(f"engines/stock/markets/index/securities/{code}/candles.json", days_back, 24)))
         except Exception as e:  # noqa: BLE001
             log("индекс", code, e)
     mk_by_day, mk_next = market_feats(ix, sect)
@@ -493,7 +497,7 @@ def build_features(days_back=760):
         t = r["SECID"]
         names[t] = r.get("SHORTNAME") or t
         from common import adjust_splits
-        B = adjust_splits([dict(b) for b in SB.get(t, [])])
+        B = adjust_splits([dict(b) for b in past(SB.get(t, []))])
         if len(B) < 260:
             short.append(f"{t}:{len(B)}")
             continue
@@ -513,7 +517,7 @@ def build_features(days_back=760):
     for a in METALS:
         try:
             B, roll_t = fut_series(a, days_back)
-            B = clean(B)
+            B = past(clean(B))
         except Exception as e:  # noqa: BLE001
             log("фьючерс", a, e)
             continue
@@ -881,10 +885,10 @@ def open_(pub):
         log("трейдер: признаки не готовы — считаю сейчас")
         feats = build_features()
         st["feats"] = feats
-    if feats.get("last_day") == today:
-        log("трейдер: последняя свеча — сегодняшняя, торги, видимо, уже идут давно; пропуск")
-        _save(pub, st)
-        return
+    if feats.get("last_day", "") >= today:  # старое состояние с сегодняшней (неполной) свечой — пересчитать
+        log("трейдер: признаки содержали сегодняшнюю свечу — пересчитываю")
+        feats = build_features()
+        st["feats"] = feats
     if (st.get("entries") or {}).get(today):
         log("трейдер: вход сегодня уже был:", st["entries"][today])
         _save(pub, st)
