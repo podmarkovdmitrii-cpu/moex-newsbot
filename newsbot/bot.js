@@ -53,6 +53,7 @@ const CHANNELS = {
 };
 const PRIORITY = ['markettwits', 'interfaxonline', 'ifax_go', 'prime1', 'tass_agency', 'rbc_news', 'cbrstocks', 'centralbank_russia', 'minfin', 'headlines_for_traders', 'moscowexchangeofficial', 'government_rus', 'news_kremlin', 'kadmitriev', 'if_market_news', 'bloomberg_ru'];
 const CH = require('./channel.js');
+const NC = require('./newscheck.js');
 const TYPE_RU = {
   div_rec: 'дивиденды', div_cut: 'отказ от дивидендов', buyback: 'обратный выкуп', spo: 'допэмиссия/SPO', ipo: 'IPO', results_up: 'отчётность: рост', results_down: 'отчётность: снижение',
   guidance_up: 'прогноз повышен', guidance_down: 'прогноз понижен', analyst_up: 'аналитики повысили', analyst_down: 'аналитики понизили', sanctions: 'санкции', legal: 'суды, штрафы, обыски',
@@ -135,10 +136,14 @@ async function collectNews(S) {
     } catch (e) { log('канал', ch, e.message); }
     await sleep(250);
   }
-  // разметка
+  // разметка (список акций Мосбиржи обновляется раз в день: новые бумаги получают названия, старые тикеры отсеиваются)
+  try { await NC.refreshTickers(STATE_DIR); for (const t of Object.keys(N.ALIASES)) KNOWN_NEWS.add(t); } catch (e) { log('список акций:', e.message); }
   return items.map(p => {
     const c = N.classify(p.tx);
     let tks = N.subjectTickers(p.tx, KNOWN_NEWS).filter(t => t !== 'IMOEX');
+    // тикер должен быть субъектом события в тексте (а не случайным словом: «самолёт» в новости об Иране ≠ $SMLT) и торговаться на Мосбирже
+    const tys = c.types.map(t => t[0]);
+    tks = tks.filter(t => (tys.length ? tys : [null]).some(ty => NC.tickerInContext(t, p.tx, ty).ok));
     const types = c.types.length ? c.types : (tks.length && c.s ? [['tone', 0]] : []);
     let score = 0, best = null;
     for (const [ty, d0] of types) {
