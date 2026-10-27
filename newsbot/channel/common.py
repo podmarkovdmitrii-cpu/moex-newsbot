@@ -192,7 +192,14 @@ FUT = {
     "SUGAR": ("Сахар", "₽/т", ["RAGR"]),
     "COCOA": ("Какао", "$/т", []),
     "COFFEE": ("Кофе", "$/фунт", []),
+    # валютные пары (фьючерсы срочного рынка Мосбиржи); для акций: рост курса — плюс экспортёрам
+    "Si": ("Доллар/рубль", "₽ за $1000", ["LKOH", "ROSN", "NVTK", "GMKN", "PLZL", "PHOR", "CHMF"]),
+    "CNY": ("Юань/рубль", "₽ за ¥1", ["LKOH", "ROSN", "NVTK", "GMKN", "PLZL", "PHOR", "CHMF"]),
+    "Eu": ("Евро/рубль", "₽ за €1000", ["LKOH", "NVTK", "PHOR", "CHMF"]),
+    "ED": ("Евро/доллар", "$ за €1", []),
+    "UCNY": ("Доллар/юань", "¥ за $1", []),
 }
+FX = ("Si", "CNY", "Eu", "ED", "UCNY")
 
 
 def fut_fronts(assets=None):
@@ -221,7 +228,8 @@ def fut_fronts(assets=None):
 
 
 FUT_CODE = {"BR": ("BR", "m"), "NG": ("NG", "m"), "GOLD": ("GD", "q"), "SILV": ("SV", "q"), "COPPER": ("CE", "q"), "WHEAT": ("W4", "m"),
-            "PLT": ("PT", "q"), "PLD": ("PD", "q"), "ALUM": ("AN", "q"), "NICKEL": ("NC", "q"), "TTF": ("FF", "m")}
+            "PLT": ("PT", "q"), "PLD": ("PD", "q"), "ALUM": ("AN", "q"), "NICKEL": ("NC", "q"), "TTF": ("FF", "m"),
+            "Si": ("Si", "q"), "CNY": ("CR", "q"), "Eu": ("Eu", "q"), "ED": ("ED", "q"), "UCNY": ("UC", "q")}
 MCODE = "FGHJKMNQUVXZ"
 
 

@@ -24,7 +24,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (plural, DISCLAIMER, MSK as MSKTZ, BG, BLUE, DEMO, DN, FG, GRID, NEWS_STATE, ORANGE, OUT, UP, VIOLET, Publisher, bln, candle_chart, currency_candles, ema, esc, fmt, hbars,  # noqa: E402
                     http_get, index_candles, iss, load_json, log, now_msk, pc, plt, save_json, share_candles, style, table,
-                    FUT, FUT_CODE, fut_continuous, fut_fronts, fut_candles, tf_bars, atr, TF_RU)
+                    FUT, FX, FUT_CODE, fut_continuous, fut_fronts, fut_candles, tf_bars, atr, TF_RU)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = json.load(open(os.path.join(HERE, "data.json"), encoding="utf-8"))
@@ -172,7 +172,7 @@ def flows():
             a20 = avg.get(t) or 0
             thr = float(os.environ.get("BIG_TRADE", "50e6")) if a20 > 3e9 else max(5e6, min(50e6, 0.05 * a20 if a20 else 20e6))
         else:
-            thr = 30e6
+            thr = 500e6 if r.get("asset") in FX else 30e6  # валютные фьючерсы торгуются на десятки миллиардов — китом считаем от 500 млн
         try:
             if DEMO:
                 rows = demo_trades(t, s["last"])
@@ -260,16 +260,36 @@ def flows():
            f"\nПокупки по рынку {pc(share_b, 0, False)} · чистый {'приток' if net >= 0 else 'отток'} <b>{'+' if net >= 0 else '−'}{bln(abs(net))}</b> — {mood}</blockquote>", "",
            "🟢 <b>Перевес покупок</b>", *([row(x) for x in buyers] or ["<i>нет бумаг с заметным перевесом</i>"]),
            "", "🔴 <b>Перевес продаж</b>", *([row(x) for x in sellers] or ["<i>нет бумаг с заметным перевесом</i>"])]
+    # куда могут дойти: самые сильные потоки, подтверждённые оборотом, новостями и графиком
+    tg_rows = []
+    if os.environ.get("FLOW_TARGETS", "1") != "0":
+        cls = all_clusters()
+        vxm = {v[0]: v[1] for v in vol}
+        for x in buyers[:3] + sellers[:3]:
+            k_ = key(x)
+            if abs(k_) < 0.25:
+                continue
+            side = 1 if k_ > 0 else -1
+            r_ = level_target(x["t"], side, flow=k_, vx=vxm.get(x["t"]), ndir=news_dir(x["t"], cls=cls), chg=x["chg"] or 0)
+            if r_ and r_["pts"] >= 1:
+                tg_rows.append(r_)
+            time.sleep(0.05)
+        tg_rows.sort(key=lambda r: -r["pts"])
+        tg_rows = tg_rows[:4]
+        if tg_rows:
+            save_targets(tg_rows)
+    if tg_rows:
+        txt += ["", "🎯 <b>Куда могут дойти</b> <i>(оценка на 1–5 дней: потоки + новости + уровни графика)</i>"] + [target_line(r) for r in tg_rows]
     if vup or vdn:
         txt += ["", "📊 <b>Резкие изменения оборота</b> <i>(к среднему за 20 дней на это время)</i>"]
         txt += [f"🔺 <b>${t}</b> ×{fmt(x, 1)} · {bln(v)} · цена <code>{pc(c, 1)}</code>" for t, x, v, c, _ in vup]
         txt += [f"🔻 <b>${t}</b> ×{fmt(x, 2)} — оборот почти иссяк · {bln(v)}" for t, x, v, c, _ in vdn]
     if fu:
         fl = []
-        for x in sorted(fu, key=lambda x: -x["tot"])[:6]:
+        for x in sorted([x for x in fu if x["lab"] not in FX], key=lambda x: -x["tot"])[:5] + [x for x in fu if x["lab"] in FX]:
             w = f"{pc(x['wimb'], 0)} за 30 мин" if x["wimb"] is not None and x["wtot"] > 0 else f"{pc(x['imb'], 0)} за день"
             fl.append(f"{esc(FUT[x['lab']][0])}: {w} · {bln(x['tot'])} · цена {pc(x['chg'], 1)}")
-        txt += ["", "<blockquote expandable>🛢 <b>Сырьё (фьючерсы)</b>\n" + "\n".join(fl) + "</blockquote>"]
+        txt += ["", "<blockquote expandable>🛢 <b>Сырьё и валюта (фьючерсы)</b>\n" + "\n".join(fl) + "</blockquote>"]
     if bigs:
         # одинаковые сделки одной минуты (заявка, разбитая на части) — одной строкой
         agg = {}
@@ -282,11 +302,152 @@ def flows():
               for (t, k_, tm, side), (v, n_, p_) in top]
         txt += ["", "<blockquote expandable>🐋 <b>Киты за 30 минут</b> — крупнейшие сделки\n" + "\n".join(wl) + "</blockquote>"]
     txt += ["", "<blockquote expandable>ℹ️ <b>Как читать</b>\nПеревес — доля оборота, где инициатором была покупка или продажа по рынку; +40% значит, что покупок по рынку было на 40% больше, чем продаж. "
+            "Цель — ближайший значимый уровень графика в сторону потока (не ближе 0,5 и не дальше 4 дневных ATR); уверенность растёт, если совпадают поток, оборот, тренд и смысл свежих новостей. Это оценка, не прогноз и не рекомендация. "
             "«Кит» — сделка от 50 млн ₽ в голубых фишках, от 5% среднего дневного оборота во 2–3 эшелоне, от 30 млн ₽ во фьючерсах. Данные Мосбиржи с задержкой до 15 минут; перевес — не прогноз.</blockquote>", "#потоки"]
     rows = [(x["lab"], key(x), None) for x in sorted(buyers + sellers[::-1], key=lambda x: -key(x))]
     img = hbars(rows, os.path.join(OUT, "flows.png"), f"Перевес покупок (+) и продаж (−), {now.strftime('%d.%m')} {hm} МСК", fmt_v=lambda v: pc(v, 0))
     PUB.post("\n".join(txt), [(img, f"Перевес покупателей и продавцов на {hm} МСК")])
     save_json("flows_last.json", dict(time=now.isoformat(), tot_all=tot_all, net=net, vol_up=[v[0] for v in vup], buyers=[(x["lab"], key(x)) for x in buyers], sellers=[(x["lab"], key(x)) for x in sellers], share=allb / allt))
+
+
+# =============================================================================================
+# Предположительный уровень: потоки + новости + технический анализ (уровни графика, тренд, ATR)
+# =============================================================================================
+NEWS_POS = {"div_rec", "buyback", "results_up", "guidance_up", "analyst_up", "production_up", "cbr_cut", "geo_peace"}
+NEWS_NEG = {"div_cut", "spo", "results_down", "guidance_down", "analyst_down", "sanctions", "legal", "tax", "production_down", "cbr_hike", "geo_escal"}
+
+
+def news_dir(t, hours=12, cls=None):
+    """Направление свежих новостей о бумаге по смыслу события (не по статистике реакции): +1, −1 или 0."""
+    since, sc = time.time() - hours * 3600, 0
+    for c in cls if cls is not None else all_clusters():
+        tk, ty = ((c.get("key") or "|") + "|").split("|")[:2]
+        if tk != t or c.get("ts", 0) < since or c.get("rumorOnly"):
+            continue
+        sc += 1 if ty in NEWS_POS else -1 if ty in NEWS_NEG else 0
+    return (sc > 0) - (sc < 0)
+
+
+def level_target(t, side, kind="share", flow=0.0, vx=None, ndir=0, chg=0.0):
+    """Куда цена может дойти за 1–5 дней в сторону потока: ближайший значимый уровень графика (локальные экстремумы 120 дней)
+    не ближе 0,5 и не дальше 4 дневных ATR; нет уровня — 2 ATR. Отмена — ближайший уровень с другой стороны или 1 ATR."""
+    try:
+        B = tf_bars(t, "1d", kind)
+    except Exception as e:  # noqa: BLE001
+        log("уровни", t, e)
+        return None
+    if len(B) < 40 or not side:
+        return None
+    last = B[-1]["c"]
+    a = atr(B[-15:]) or last * 0.02
+    c = [b["c"] for b in B]
+    e20, e50 = ema(c, 20)[-1], ema(c, 50)[-1]
+    trend = 1 if e20 > e50 and last > e50 else -1 if e20 < e50 and last < e50 else 0
+    H = B[-121:-1]
+    piv = []
+    for i in range(3, len(H) - 3):
+        w = H[i - 3:i + 4]
+        if H[i]["h"] == max(b["h"] for b in w):
+            piv.append((H[i]["h"], H[i]["t"][:10]))
+        if H[i]["l"] == min(b["l"] for b in w):
+            piv.append((H[i]["l"], H[i]["t"][:10]))
+    ahead = sorted([p for p in piv if 0.5 * a <= (p[0] - last) * side <= 4 * a], key=lambda p: abs(p[0] - last))
+    behind = sorted([p for p in piv if 0.4 * a <= (last - p[0]) * side <= 2.5 * a], key=lambda p: abs(p[0] - last))
+    stop = behind[0][0] if behind else last - side * a
+    risk = abs(last - stop)
+    # цель имеет смысл, только если путь до неё не короче расстояния до отмены
+    ahead = [p for p in ahead if abs(p[0] - last) >= 0.8 * risk]
+    if ahead:
+        tgt = ahead[0][0]
+        touches = sum(1 for p in piv if abs(p[0] - tgt) <= 0.3 * a)
+        why = f"{'сопротивление' if side > 0 else 'поддержка'} {ahead[0][1][8:10]}.{ahead[0][1][5:7]}" + (f", уровень проверялся {touches} {plural(touches, 'раз', 'раза', 'раз')}" if touches >= 2 else "")
+    else:
+        tgt = last + side * max(2 * a, risk)
+        why = "значимых уровней рядом нет — оценка по дневной волатильности"
+    pts, pro, con = 0, [], []
+    if abs(flow) >= 0.35:
+        pts += 1
+        pro.append(f"поток {pc(flow, 0)}")
+    if vx and vx >= 1.5:
+        pts += 1
+        pro.append(f"оборот {fmt(vx, 1)}×")
+    if trend == side:
+        pts += 1
+        pro.append("тренд в ту же сторону")
+    elif trend == -side:
+        pts -= 1
+        con.append("против тренда")
+    if ndir == side:
+        pts += 1
+        pro.append("новости в ту же сторону")
+    elif ndir == -side:
+        pts -= 1
+        con.append("новости против")
+    if chg * side < -0.01:
+        pts -= 1
+        con.append("цена пока идёт против потока")
+    conf = "высокая" if pts >= 3 else "средняя" if pts == 2 else "низкая"
+    return dict(t=t, side=side, last=last, tgt=tgt, stop=stop, move=tgt / last - 1, why=why, conf=conf, pts=pts, pro=pro, con=con, atr=a)
+
+
+def target_line(x, name=None):
+    d = dec_of(x["last"])
+    return (f"<b>{name or '$' + x['t']}</b> {'🟢' if x['side'] > 0 else '🔴'} → <code>{fmt(x['tgt'], d)}</code> ({pc(x['move'], 1)}) · уверенность <b>{x['conf']}</b>"
+            f"\n   <i>{esc(x['why'])}; {', '.join(x['pro'] + x['con']) or 'без подтверждений'}; отмена за <code>{fmt(x['stop'], d)}</code></i>")
+
+
+def dec_of(x):
+    return 0 if x >= 1000 else 1 if x >= 100 else 2 if x >= 2 else 4
+
+
+def save_targets(rows):
+    """Журнал прогнозов уровня — для честной статистики попаданий в итогах дня."""
+    st_ = load_json("targets.json", [])
+    now = time.time()
+    for x in rows:
+        st_.append(dict(t=x["t"], kind=x.get("kind", "share"), side=x["side"], last=x["last"], tgt=x["tgt"], stop=x["stop"], ts=now, conf=x["conf"]))
+    save_json("targets.json", [r for r in st_ if now - r["ts"] < 20 * 86400][-400:])
+
+
+def targets_review(days=5):
+    """Сколько прогнозов уровня за последние дни дошли до цели раньше отмены (по дневным свечам)."""
+    st_ = load_json("targets.json", [])
+    now = time.time()
+    done, hit, miss = set(), 0, 0
+    for r in st_:
+        if now - r["ts"] > days * 86400 or now - r["ts"] < 3600:
+            continue
+        key = (r["t"], r["side"], round(r["tgt"], 4))
+        if key in done:
+            continue
+        done.add(key)
+        try:
+            B = tf_bars(r["t"], "1d", r.get("kind") or "share")
+        except Exception:  # noqa: BLE001
+            continue
+        d0 = dt.datetime.fromtimestamp(r["ts"], MSKTZ).date().isoformat()
+        res = None
+        for b in [b for b in B if b["t"][:10] >= d0]:
+            up, dn = b["h"], b["l"]
+            if r["side"] > 0:
+                if dn <= r["stop"]:
+                    res = 0
+                    break
+                if up >= r["tgt"]:
+                    res = 1
+                    break
+            else:
+                if up >= r["stop"]:
+                    res = 0
+                    break
+                if dn <= r["tgt"]:
+                    res = 1
+                    break
+        if res == 1:
+            hit += 1
+        elif res == 0:
+            miss += 1
+    return hit, miss
 
 
 # =============================================================================================
@@ -1105,7 +1266,7 @@ def morning():
         log("сырьё", e)
 
 
-COMMOD_MAIN = ["BR", "NG", "TTF", "GOLD", "SILV", "PLT", "PLD", "COPPER", "ALUM", "NICKEL", "WHEAT"]
+COMMOD_MAIN = ["BR", "NG", "TTF", "GOLD", "SILV", "PLT", "PLD", "COPPER", "ALUM", "NICKEL", "WHEAT", "Si", "CNY", "Eu", "ED", "UCNY"]
 
 
 def commod_state(a, f):
@@ -1147,8 +1308,13 @@ def commod_plan():
     if not rows:
         return
     now = now_msk()
-    txt = [f"🛢 <b>Сырьё: план на {now.strftime('%d.%m')}</b> (фьючерсы Мосбиржи, ближайший контракт)", ""]
+    txt = [f"🛢 <b>Сырьё и валюта: план на {now.strftime('%d.%m')}</b> (фьючерсы Мосбиржи, ближайший контракт)", ""]
+    rows = [x for x in rows if x["a"] not in FX] + [x for x in rows if x["a"] in FX]
+    fx_head = False
     for x in rows:
+        if x["a"] in FX and not fx_head:
+            txt += ["", "💱 <b>Валютные пары</b>"]
+            fx_head = True
         f = x["f"]
         tr = {1: "🟢 восходящий тренд", -1: "🔴 нисходящий тренд", 0: "⚪ боковик"}[x["trend"]]
         line = f"<b>{esc(f['name'])}</b> ({f['secid']}): {fmt(x['last'], 2)} {f['unit']} · {pc(f['chg'], 1)} за день" + (f" · {pc(x['r1m'], 1)} за месяц" if x["r1m"] is not None else "") + f"\n  {tr}" + (f", {x['brk']}" if x["brk"] else "")
@@ -1157,9 +1323,21 @@ def commod_plan():
             line += f"\n  Идея по тренду: {'ЛОНГ' if i['side'] > 0 else 'ШОРТ'} от {fmt(i['entry'], 2)}, стоп {fmt(i['stop'], 2)}, тейк {fmt(i['take'], 2)}"
         rel = FUT[x["a"]][2]
         if rel and x["trend"]:
-            line += f"\n  Для акций: {' '.join('$' + r for r in rel[:4])} — {'попутный ветер' if x['trend'] > 0 else 'встречный ветер'}"
+            if x["a"] in FX:
+                line += f"\n  {'Рубль слабеет' if x['trend'] > 0 else 'Рубль крепнет'} — {'плюс' if x['trend'] > 0 else 'минус'} для экспортёров: {' '.join('$' + r for r in rel[:4])}"
+            else:
+                line += f"\n  Для акций: {' '.join('$' + r for r in rel[:4])} — {'попутный ветер' if x['trend'] > 0 else 'встречный ветер'}"
+        if x["trend"]:
+            try:
+                lt = level_target(x["f"]["secid"], x["trend"], kind="fut", ndir=0, chg=x["f"].get("chg") or 0)
+                if lt:
+                    d = dec_of(lt["last"])
+                    line += f"\n  🎯 Предположительный уровень: <code>{fmt(lt['tgt'], d)}</code> ({pc(lt['move'], 1)}) — {esc(lt['why'])}; отмена за <code>{fmt(lt['stop'], d)}</code>"
+            except Exception as e:  # noqa: BLE001
+                log("уровень", x["a"], e)
         txt.append(line)
-    txt += ["", "<i>Тренд — по EMA 20/50 дневных свечей склеенных контрактов; стоп — 1,5 дневного ATR, тейк — 2 риска. Фьючерсы — плечевой инструмент: гарантийное обеспечение и вариационная маржа.</i>", "#сырьё #фьючерсы"]
+    txt += ["", "<i>Тренд — по EMA 20/50 дневных свечей склеенных контрактов; стоп — 1,5 дневного ATR, тейк — 2 риска. Предположительный уровень — ближайший значимый уровень графика по тренду (оценка, не прогноз). "
+            "Фьючерсы — плечевой инструмент: гарантийное обеспечение и вариационная маржа. Цены Si и Eu — в рублях за 1000 единиц валюты.</i>", "#сырьё #валюта #фьючерсы"]
     imgs = []
     for x in sorted(rows, key=lambda x: -(x["f"].get("val") or 0))[:4]:
         try:
@@ -1208,6 +1386,12 @@ def evening():
         txt.append(f"Лучший сектор — {best[0]} ({pc(best[1] / 100, 2)}), худший — {worst[0]} ({pc(worst[1] / 100, 2)}).")
     txt += ["", "📈 <b>Лидеры роста</b>: " + ", ".join(f"${r['SECID']} {pc((r.get('LASTTOPREVPRICE') or 0) / 100, 1)}" for r in up),
             "📉 <b>Лидеры падения</b>: " + ", ".join(f"${r['SECID']} {pc((r.get('LASTTOPREVPRICE') or 0) / 100, 1)}" for r in dn)]
+    try:
+        th_, tm_ = targets_review(5)
+        if th_ + tm_ >= 3:
+            txt.append(f"🎯 <b>Уровни из потоков за 5 дней</b>: дошли до цели {th_} из {th_ + tm_} (остальные — сработала отмена); незакрытые не считаются.")
+    except Exception as e:  # noqa: BLE001
+        log("проверка уровней", e)
     fl = load_json("flows_last.json", None)
     if fl and fl.get("time", "")[:10] == now.date().isoformat():
         txt.append("⚖️ <b>Перевес к закрытию</b>: покупатели — " + ", ".join(f"${t}" for t, _ in fl["buyers"][:3]) + "; продавцы — " + ", ".join(f"${t}" for t, _ in fl["sellers"][:3]))
@@ -1901,6 +2085,23 @@ def reg_lines(t, hours=24):
     return out[-3:]
 
 
+def level_cli():
+    """python jobs.py level ТИКЕР СТОРОНА → LEVEL_JSON: предположительный уровень с учётом последних потоков (для постов новостей)."""
+    a = [x for x in sys.argv[1:] if not x.startswith("--")][1:]
+    t, side = a[0], int(a[1])
+    fl = _state_json("flows_last.json")
+    flow = 0.0
+    if fl.get("time", "") >= (now_msk() - dt.timedelta(hours=8)).isoformat()[:13]:
+        for lab, v in (fl.get("buyers") or []) + (fl.get("sellers") or []):
+            if lab == t:
+                flow = v
+    r = level_target(t, side, flow=flow, ndir=side)
+    if r:
+        r["pro"] = [p_ for p_ in r["pro"] if not p_.startswith("новости")] + ["смысл новости"]
+        r["text"] = target_line(r).replace("\n   ", " — ")
+    print("LEVEL_JSON " + json.dumps(r or {}, ensure_ascii=False, default=float), flush=True)
+
+
 def trade_prob_cli():
     """python jobs.py trade_prob ТИКЕР СТОРОНА ВХОД СТОП [ТЕЙК] [ГОРИЗОНТ] → JSON + готовый текст (для бота на Node)."""
     a = [x for x in sys.argv[1:] if not x.startswith("--")][1:]
@@ -2378,7 +2579,9 @@ def anomaly_post(x, md, by_sec, ixc):
         cl = news_for([t])
     else:
         cl = news_for(FUT[x["asset"]][2], types={"BR": ["oil_", "geo_", "sanctions"], "NG": ["oil_", "geo_", "sanctions"], "TTF": ["oil_", "geo_", "sanctions"],
-                                                     "GOLD": ["geo_", "cbr_"], "SILV": ["geo_"], "WHEAT": ["geo_", "tax"]}.get(x["asset"]))
+                                                     "GOLD": ["geo_", "cbr_"], "SILV": ["geo_"], "WHEAT": ["geo_", "tax"],
+                                                     "Si": ["ruble_", "cbr_", "sanctions", "oil_", "geo_"], "CNY": ["ruble_", "cbr_", "sanctions", "oil_", "geo_"],
+                                                     "Eu": ["ruble_", "cbr_", "sanctions", "geo_"], "ED": ["geo_"], "UCNY": ["geo_"]}.get(x["asset"]))
     if cl:
         txt.append("📰 <b>Возможная причина — свежие новости:</b>")
         for c in cl:
@@ -2453,7 +2656,7 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "anom_next": anom_next, "telegraph_check": telegraph_check,
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "anom_next": anom_next, "telegraph_check": telegraph_check,
      "trader_prep": lambda: trader_mod().prep(PUB), "trader_open": lambda: trader_mod().open_(PUB), "trader_week": lambda: trader_mod().week(PUB)}[mode]()
 
 
