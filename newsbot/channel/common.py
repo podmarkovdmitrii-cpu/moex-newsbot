@@ -62,8 +62,20 @@ def pc(x, d=1, sign=True):
     return (f"{x * 100:+.{d}f}" if sign else f"{x * 100:.{d}f}").replace(".", ",").replace("-", "−") + "%"
 
 
+def plural(n, one, few, many):
+    """plural(21, 'сделка', 'сделки', 'сделок') → 'сделка'."""
+    n = abs(int(n))
+    if 11 <= n % 100 <= 14:
+        return many
+    return one if n % 10 == 1 else few if 2 <= n % 10 <= 4 else many
+
+
 def bln(x):
-    return fmt(x / 1e9, 1) + " млрд ₽" if abs(x) >= 1e9 else fmt(x / 1e6, 0) + " млн ₽"
+    if abs(x) >= 0.995e9:
+        return fmt(x / 1e9, 1) + " млрд ₽"
+    if abs(x) < 0.5e6:
+        return "меньше 1 млн ₽"
+    return fmt(x / 1e6, 0) + " млн ₽"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -489,6 +501,18 @@ class Publisher:
                     cap = nx
                 else:
                     k = len(blocks)
+                if not cap and blocks:
+                    # первый блок длиннее подписи — режем его по строкам (не внутри цитаты), остаток уйдёт продолжением
+                    lines, acc = blocks[0].split("\n"), []
+                    for ln in lines:
+                        nx = "\n".join(acc + [ln])
+                        if len(re.sub(r"<[^>]+>", "", nx)) > room:
+                            break
+                        acc.append(ln)
+                    if acc and "\n".join(acc).count("<blockquote") == "\n".join(acc).count("</blockquote>"):
+                        cap = "\n".join(acc)
+                        blocks = ["\n".join(lines[len(acc):])] + blocks[1:]
+                        k = 0
                 if cap and disc:
                     cap += "\n\n" + disc
                 with open(photos[0][0], "rb") as f:
@@ -497,8 +521,11 @@ class Publisher:
                 rest = "\n\n".join(blocks[k:]) if cap else text
                 if rest.strip() and cap and disc:
                     rest += "\n\n" + disc
-                for part in split_text(rest, 4000) if rest.strip() else []:
-                    self._tg("sendMessage", {"chat_id": self.tg_chat, "text": part, "parse_mode": "HTML", "disable_web_page_preview": True})
+                # продолжение — ответом на пост с картинкой (видно, к чему оно относится)
+                for j, part in enumerate(split_text(rest, 3980) if rest.strip() else []):
+                    self._tg("sendMessage", {"chat_id": self.tg_chat, "text": ("↑ <b>Продолжение</b>\n" if j == 0 and cap else "") + part, "parse_mode": "HTML",
+                                             "disable_web_page_preview": True,
+                                             "reply_parameters": {"message_id": pm["message_id"], "allow_sending_without_reply": True}})
             except Exception as e:  # noqa: BLE001
                 log("Telegram: ошибка", e)
         elif self.tg_chat:
@@ -660,20 +687,21 @@ def hbars(rows, path, title, xlabel="", fmt_v=lambda v: pc(v, 0), height=None):
     """rows: [(подпись, значение, цвет или None)]."""
     if not rows:
         return None
-    fig, ax = plt.subplots(figsize=(10, height or max(3.2, 0.36 * len(rows) + 1.2)), dpi=110, facecolor=BG)
+    fig, ax = plt.subplots(figsize=(10, height or max(3.6, 0.5 * len(rows) + 1.4)), dpi=110, facecolor=BG)
     style(ax)
     ys = list(range(len(rows)))[::-1]
     vals = [r[1] for r in rows]
     ax.barh(ys, vals, color=[r[2] or (UP if r[1] >= 0 else DN) for r in rows], height=0.62, zorder=3)
     ax.set_yticks(ys)
-    ax.set_yticklabels([r[0] for r in rows], color=FG, fontsize=9)
+    ax.set_yticklabels([r[0] for r in rows], color=FG, fontsize=13, fontweight="bold")
     ax.axvline(0, color="#787b86", linewidth=0.8)
     span = max(abs(v) for v in vals) or 1
     for y, v in zip(ys, vals):
-        ax.text(v + (span * 0.02 if v >= 0 else -span * 0.02), y, fmt_v(v), va="center", ha="left" if v >= 0 else "right", color=FG, fontsize=8.5)
+        ax.text(v + (span * 0.02 if v >= 0 else -span * 0.02), y, fmt_v(v), va="center", ha="left" if v >= 0 else "right", color=FG, fontsize=12, fontweight="bold")
     ax.set_xlim(-span * 1.25 if min(vals) < 0 else 0, span * 1.25 if max(vals) > 0 else 0)
     ax.set_xlabel(xlabel, color=FG, fontsize=8.5)
-    ax.set_title(title, color="#ffffff", fontsize=11.5, loc="left")
+    ax.set_title(title, color="#ffffff", fontsize=14, fontweight="bold", loc="left", pad=12)
+    ax.tick_params(axis="x", labelsize=10)
     fig.text(0.86, 0.01, "данные: Мосбиржа", color="#787b86", fontsize=7)
     fig.tight_layout()
     fig.savefig(path, facecolor=BG)

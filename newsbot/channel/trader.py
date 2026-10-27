@@ -831,7 +831,7 @@ def week_text(st, names, now):
             tick = c["t"][2:] if c["t"].startswith("F:") else c["t"]
             lines.append(f"{'✅' if c['R'] > 0 else '❌'} {esc(tick)}: {'+' if c['R'] >= 0 else ''}{fmt(c['R'], 2)}R ({pc(c['ret'])}), {c['why']}, {dmy(c['d0'])}→{dmy(c['d1'])}")
     else:
-        lines.append("За неделю закрытых сделок нет. Сигналы рубрики редкие: в истории — 1–2 в месяц, бывают недели без них.")
+        lines.append("За неделю закрытых сделок нет. Сигналы рубрики редкие: в истории — 2–3 в месяц, бывают недели без них.")
     op = st.get("open", [])
     if op:
         lines += ["", "<b>Открыты:</b>"]

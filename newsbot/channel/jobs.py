@@ -22,7 +22,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (DISCLAIMER, MSK as MSKTZ, BG, BLUE, DEMO, DN, FG, GRID, NEWS_STATE, ORANGE, OUT, UP, VIOLET, Publisher, bln, candle_chart, currency_candles, ema, esc, fmt, hbars,  # noqa: E402
+from common import (plural, DISCLAIMER, MSK as MSKTZ, BG, BLUE, DEMO, DN, FG, GRID, NEWS_STATE, ORANGE, OUT, UP, VIOLET, Publisher, bln, candle_chart, currency_candles, ema, esc, fmt, hbars,  # noqa: E402
                     http_get, index_candles, iss, load_json, log, now_msk, pc, plt, save_json, share_candles, style, table,
                     FUT, FUT_CODE, fut_continuous, fut_fronts, fut_candles, tf_bars, atr, TF_RU)
 
@@ -156,8 +156,9 @@ def flows():
     stt = load_json("flows.json", {})
     if stt.get("date") != today:
         stt = {"date": today, "tk": {}}
-    md = liquid_shares(int(os.environ.get("FLOWS_N", "60")))
-    avg = turnover_avg([r["SECID"] for r in md])
+    md_all = liquid_shares(2000)  # все акции TQBR — для общего объёма денег за день
+    md = md_all[:int(os.environ.get("FLOWS_N", "60"))]
+    avg = turnover_avg([r["SECID"] for r in md_all])
     try:
         fut = fut_fronts()
     except Exception as e:  # noqa: BLE001
@@ -225,30 +226,67 @@ def flows():
     key = lambda x: x["wimb"] if x["wimb"] is not None and x["wtot"] > 0.02 * x["tot"] else x["imb"]
     buyers = sorted([x for x in sh if key(x) > 0], key=lambda x: -key(x) * min(1.5, (x["x"] or 1)))[:6]
     sellers = sorted([x for x in sh if key(x) < 0], key=lambda x: key(x) * min(1.5, (x["x"] or 1)))[:6]
-    bigs = sorted([(x["lab"], x["kind"], *b[:4]) for x in res for b in x["big"]], key=lambda z: -z[4])[:10]
+    bigs_all = [(x["lab"], x["kind"], *b[:4]) for x in res for b in x["big"]]
+    bigs = sorted(bigs_all, key=lambda z: -z[4])[:10]
     hm = now.strftime("%H:%M")
 
+    buyers, sellers = buyers[:4], sellers[:4]
+
     def row(x):
-        xx = f", оборот {fmt(x['x'], 1)}× к среднему" if x["x"] else ""
-        w = f"за 30 мин {pc(x['wimb'], 0)}, " if x["wimb"] is not None and x["wtot"] > 0 else ""
-        return f"• <b>${x['lab']}</b> {w}за день {pc(x['imb'], 0)} · {bln(x['tot'])}{xx} · цена {pc(x['chg'], 1)}"
-    txt = [f"⚖️ <b>Покупатели vs продавцы</b> — {now.strftime('%d.%m')}, на {hm} МСК",
-           f"{len(sh)} акций 1–3 эшелона: покупок по рынку {pc(allb / allt, 0, False)} от оборота {bln(allt)}.", "",
-           "🟢 <b>Перевес покупателей</b>:", *(row(x) for x in buyers), "", "🔴 <b>Перевес продавцов</b>:", *(row(x) for x in sellers)]
+        k_ = key(x)
+        per = "за 30 мин" if x["wimb"] is not None and x["wtot"] > 0.02 * x["tot"] else "за день"
+        xx = f" · оборот <b>{fmt(x['x'], 1)}×</b> к норме" if x["x"] and x["x"] >= 1.3 else ""
+        return f"<b>${x['lab']}</b> {pc(k_, 0)} {per}{xx} · цена <code>{pc(x['chg'], 1)}</code>"
+    share_b = allb / allt
+    mood = "покупатели сильнее" if share_b >= 0.53 else "продавцы сильнее" if share_b <= 0.47 else "силы равны"
+    # общий объём денег за день во всех акциях и его сравнение с обычным на это время сессии
+    mins = (now.hour * 60 + now.minute) - 600
+    frac = max(0.08, min(1.0, mins / 530))
+    tot_all = sum(r.get("VALTODAY") or 0 for r in md_all)
+    avg_all = sum(v for v in (avg.get(r["SECID"]) for r in md_all) if v)
+    norm_x = tot_all / (avg_all * frac) if avg_all else None
+    net = allb - (allt - allb)
+    # резкие изменения оборота по бумагам (к среднему за 20 дней с поправкой на время дня)
+    vol = []
+    for r in md_all:
+        a20 = avg.get(r["SECID"]) or 0
+        if a20 < 20e6 or not r.get("VALTODAY"):
+            continue
+        vol.append((r["SECID"], r["VALTODAY"] / (a20 * frac), r["VALTODAY"], (r.get("LASTTOPREVPRICE") or 0) / 100, a20))
+    vup = sorted([v for v in vol if v[1] >= 2.5], key=lambda v: -v[1])[:6]
+    vdn = sorted([v for v in vol if v[1] <= 0.35 and v[4] >= 150e6], key=lambda v: v[1])[:5]
+    txt = [f"⚖️ <b>Покупатели vs продавцы</b> · {now.strftime('%d.%m')}, {hm} МСК",
+           f"<blockquote>💰 <b>Деньги в акциях за день: {bln(tot_all)}</b>" + (f" ({fmt(norm_x, 1)}× к обычному на это время)" if norm_x else "") +
+           f"\nПокупки по рынку {pc(share_b, 0, False)} · чистый {'приток' if net >= 0 else 'отток'} <b>{'+' if net >= 0 else '−'}{bln(abs(net))}</b> — {mood}</blockquote>", "",
+           "🟢 <b>Перевес покупок</b>", *([row(x) for x in buyers] or ["<i>нет бумаг с заметным перевесом</i>"]),
+           "", "🔴 <b>Перевес продаж</b>", *([row(x) for x in sellers] or ["<i>нет бумаг с заметным перевесом</i>"])]
+    if vup or vdn:
+        txt += ["", "📊 <b>Резкие изменения оборота</b> <i>(к среднему за 20 дней на это время)</i>"]
+        txt += [f"🔺 <b>${t}</b> ×{fmt(x, 1)} · {bln(v)} · цена <code>{pc(c, 1)}</code>" for t, x, v, c, _ in vup]
+        txt += [f"🔻 <b>${t}</b> ×{fmt(x, 2)} — оборот почти иссяк · {bln(v)}" for t, x, v, c, _ in vdn]
     if fu:
-        txt += ["", "🛢 <b>Сырьё (фьючерсы)</b>:"]
-        for x in sorted(fu, key=lambda x: -x["tot"])[:8]:
-            w = f"за 30 мин {pc(x['wimb'], 0)}, " if x["wimb"] is not None and x["wtot"] > 0 else ""
-            txt.append(f"• {esc(FUT[x['lab']][0])} ({x['t']}): {w}за день {pc(x['imb'], 0)} · {bln(x['tot'])} · цена {pc(x['chg'], 1)}")
+        fl = []
+        for x in sorted(fu, key=lambda x: -x["tot"])[:6]:
+            w = f"{pc(x['wimb'], 0)} за 30 мин" if x["wimb"] is not None and x["wtot"] > 0 else f"{pc(x['imb'], 0)} за день"
+            fl.append(f"{esc(FUT[x['lab']][0])}: {w} · {bln(x['tot'])} · цена {pc(x['chg'], 1)}")
+        txt += ["", "<blockquote expandable>🛢 <b>Сырьё (фьючерсы)</b>\n" + "\n".join(fl) + "</blockquote>"]
     if bigs:
-        txt += ["", "🐋 <b>Сделки китов за последние 30 минут</b> (крупнейшие одной сделкой):"]
-        txt += [f"• {'$' + t if k_ == 'share' else esc(FUT[t][0])} {tm[:5]} — {'покупка' if side == 'B' else 'продажа'} по рынку на {bln(v)} по {fmt(p, 2)}" for t, k_, tm, p, v, side in bigs]
-    txt += ["", "<i>Перевес — доля оборота, где инициатором была покупка (B) или продажа (S) по рынку. «Кит» — сделка от 50 млн ₽ в голубых фишках, "
-            "от 5% среднего дневного оборота во 2–3 эшелоне, от 30 млн ₽ во фьючерсах. Данные Мосбиржи с задержкой до 15 минут; перевес — не прогноз.</i>", "#потоки #перевес #киты"]
+        # одинаковые сделки одной минуты (заявка, разбитая на части) — одной строкой
+        agg = {}
+        for t, k_, tm, p_, v, side in bigs_all:
+            g = agg.setdefault((t, k_, tm[:5], side), [0.0, 0, p_])
+            g[0] += v
+            g[1] += 1
+        top = sorted(agg.items(), key=lambda z: -z[1][0])[:6]
+        wl = [f"{'$' + t if k_ == 'share' else esc(FUT[t][0])} {tm} — {'🟢 покупка' if side == 'B' else '🔴 продажа'} <b>{bln(v)}</b> по {fmt(p_, 2)}" + (f" ({n_} сделки)" if n_ > 1 else "")
+              for (t, k_, tm, side), (v, n_, p_) in top]
+        txt += ["", "<blockquote expandable>🐋 <b>Киты за 30 минут</b> — крупнейшие сделки\n" + "\n".join(wl) + "</blockquote>"]
+    txt += ["", "<blockquote expandable>ℹ️ <b>Как читать</b>\nПеревес — доля оборота, где инициатором была покупка или продажа по рынку; +40% значит, что покупок по рынку было на 40% больше, чем продаж. "
+            "«Кит» — сделка от 50 млн ₽ в голубых фишках, от 5% среднего дневного оборота во 2–3 эшелоне, от 30 млн ₽ во фьючерсах. Данные Мосбиржи с задержкой до 15 минут; перевес — не прогноз.</blockquote>", "#потоки"]
     rows = [(x["lab"], key(x), None) for x in sorted(buyers + sellers[::-1], key=lambda x: -key(x))]
-    img = hbars(rows, os.path.join(OUT, "flows.png"), f"Перевес покупок (+) и продаж (−) за 30 мин, {now.strftime('%d.%m')} {hm} МСК", fmt_v=lambda v: pc(v, 0))
+    img = hbars(rows, os.path.join(OUT, "flows.png"), f"Перевес покупок (+) и продаж (−), {now.strftime('%d.%m')} {hm} МСК", fmt_v=lambda v: pc(v, 0))
     PUB.post("\n".join(txt), [(img, f"Перевес покупателей и продавцов на {hm} МСК")])
-    save_json("flows_last.json", dict(time=now.isoformat(), buyers=[(x["lab"], key(x)) for x in buyers], sellers=[(x["lab"], key(x)) for x in sellers], share=allb / allt))
+    save_json("flows_last.json", dict(time=now.isoformat(), tot_all=tot_all, net=net, vol_up=[v[0] for v in vup], buyers=[(x["lab"], key(x)) for x in buyers], sellers=[(x["lab"], key(x)) for x in sellers], share=allb / allt))
 
 
 # =============================================================================================
@@ -352,33 +390,40 @@ def ofz():
     thr = 0.03 * sum(x["val"] for x in lines[2:])
     if abs(longnet) < thr and abs(shortnet) < 0.03 * sum(x["val"] for x in lines[:2]):
         concl = "Потоки сбалансированы — заметного перекоса покупателей или продавцов нет."
-    elif longnet > thr and (dylong is None or dylong < 0):
+    elif longnet > thr and (dylong is None or dylong < 0) and (rg1 is None or rg1 >= -0.001):
         concl = "Деньги идут в длинные ОФЗ, доходности снижаются — рынок закладывает снижение ключевой ставки. Обычно это поддерживает акции роста, девелоперов и банки."
-    elif longnet < -thr and (dylong is None or dylong > 0):
+    elif longnet < -thr and (dylong is None or dylong > 0) and (rg1 is None or rg1 <= 0.001):
         concl = "Длинные ОФЗ продают, доходности растут — рынок закладывает более жёсткую политику ЦБ. Для акций это фон осторожности."
-    elif shortnet > 0 and longnet <= 0:
+    elif shortnet > 0.03 * sum(x["val"] for x in lines[:2]) and longnet <= 0:
         concl = "Покупают в основном короткие выпуски — деньги паркуются без ставки на снижение ключевой."
     else:
         concl = "Потоки смешанные, явного направления нет."
     mins = (now.hour * 60 + now.minute) - 600
     frac = max(0.1, min(1.0, mins / 530))
     xa = f" ({fmt(tot / (avg * frac), 1)}× к обычному обороту {'на это время' if frac < 1 else 'за день'})" if avg else ""
-    txt = [f"🏦 <b>Потоки в ОФЗ</b> — {now.strftime('%d.%m')}, {'середина дня, ' if now.hour < 16 else 'итоги дня, '}{now.strftime('%H:%M')} МСК", f"Оборот гособлигаций: {bln(tot)}{xa}." + (f" Индекс RGBI {pc(rg1, 2)} за день, {pc(rg5, 2)} за 5 дней." if rg1 is not None else ""), ""]
+    txt = [f"🏦 <b>Потоки в ОФЗ</b> · {now.strftime('%d.%m')}, {'середина дня' if now.hour < 16 else 'итоги дня'}, {now.strftime('%H:%M')} МСК",
+           f"<blockquote><b>Вывод:</b> {concl}</blockquote>",
+           f"Оборот гособлигаций: <b>{bln(tot)}</b>{xa}." + (f" Индекс RGBI <code>{pc(rg1, 2)}</code> за день, <code>{pc(rg5, 2)}</code> за 5 дней." if rg1 is not None else ""), ""]
     for x in lines:
-        dy = f", доходность {fmt(x['y'] * 100, 2)}%" + (f" ({'+' if x['dy'] >= 0 else '−'}{fmt(abs(x['dy']) * 1e4, 0)} б.п. за неделю)" if x["dy"] is not None else "") if x["y"] else ""
-        txt.append(f"• {x['lab']}: {'покупки' if x['net'] >= 0 else 'продажи'} по рынку {'+' if x['net'] >= 0 else '−'}{bln(abs(x['net']))} из {bln(x['val'])}{dy}")
-    txt += ["", f"<b>Вывод:</b> {concl}", "", "<i>Чистый поток — покупки минус продажи по рынку (агрессор сделки), данные Мосбиржи. Аукционы Минфина по средам — в ленте официальных новостей.</i>", "#ОФЗ #облигации"]
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(10.5, 4.2), dpi=110, facecolor=BG)
+        if x["val"] < 50e6 and abs(x["net"]) < 5e6:
+            continue  # в этом сроке почти не торговали — строка без смысла
+        dy = f" · доходность {fmt(x['y'] * 100, 2)}%" + (f" ({'+' if x['dy'] >= 0 else '−'}{fmt(abs(x['dy']) * 1e4, 0)} б.п. за неделю)" if x["dy"] is not None else "") if x["y"] else ""
+        flow = "без перекоса" if abs(x["net"]) < 0.01 * x["val"] else f"{'🟢 покупки' if x['net'] > 0 else '🔴 продажи'} <b>{bln(abs(x['net']))}</b>"
+        txt.append(f"<b>{x['lab']}</b>: {flow} из {bln(x['val'])}{dy}")
+    txt += ["", "<blockquote expandable>ℹ️ <b>Как читать</b>\nЧистый поток — покупки минус продажи по рынку (кто был инициатором сделки), данные Мосбиржи. "
+            "Деньги в длинные ОФЗ при падении доходностей — рынок ждёт снижения ставки; продажи длинных при росте доходностей — ждёт более жёсткого ЦБ. Аукционы Минфина по средам — в ленте официальных новостей.</blockquote>", "#ОФЗ"]
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.8), dpi=110, facecolor=BG)
     for a in (a1, a2):
         style(a)
+        a.tick_params(labelsize=11)
     labs = [x["lab"] for x in lines]
     a1.bar(labs, [x["net"] / 1e9 for x in lines], color=[UP if x["net"] >= 0 else DN for x in lines], zorder=3)
-    a1.set_title("Чистые покупки по рынку, млрд ₽", color="#ffffff", fontsize=10.5, loc="left")
+    a1.set_title("Чистые покупки по рынку, млрд ₽", color="#ffffff", fontsize=13, fontweight="bold", loc="left")
     a1.axhline(0, color="#787b86", linewidth=0.8)
     a2.plot(labs, [(x["y"] or 0) * 100 for x in lines], color=BLUE, marker="o", label="сегодня")
     if ref:
         a2.plot(labs, [((ref.get(lab) or 0) * 100) or None for lab in labs], color=ORANGE, marker="o", linestyle="--", label="неделю назад")
-    a2.set_title("Доходность ОФЗ по сроку, %", color="#ffffff", fontsize=10.5, loc="left")
+    a2.set_title("Доходность ОФЗ по сроку, %", color="#ffffff", fontsize=13, fontweight="bold", loc="left")
     leg = a2.legend(fontsize=8, facecolor=BG, edgecolor=GRID)
     for t in leg.get_texts():
         t.set_color(FG)
@@ -567,7 +612,9 @@ def pulse():
 NOISE = re.compile(r"\(про [^)]{2,25}\):|Идея:|Тикер:|Стоп-приказ|Потенциал идеи|Друзья,|Топ[- ]\d*\s*(дивидендн|акци)|подписывайтесь|#реклама|розыгрыш|Краткий обзор", re.I)
 TRUST_CH = {"interfaxonline", "ifax_go", "if_market_news", "tass_agency", "rbc_news", "ria_novosti", "prime1", "vedomosti", "kommersant", "bloomberg_ru", "forbesrussia",
             "thebell_io", "cbrstocks", "centralbank_russia", "minfin", "MID_Russia", "kremlinnews"}
-DIGEST = re.compile(r"Что произошло за|Главное за|Главное к|Главные новости|к этому часу|новости к утру|новости к вечеру|Итоги дня|Итоги недели|дайджест|#крипто|биткоин|#BTC|Утренний обзор|Вечерний обзор", re.I)
+COMPANY_TY = re.compile(r"(div_|buyback|spo|ipo|results_|guidance_|analyst_|legal|production_|mna|delist_|management)")
+RU_REL = re.compile(r"росси|рф\b|рубл|мосбирж|imoex|ммвб|офз|банк росси|\bцб\b|минфин|набиуллин|силуанов|кремл|путин|песков|госдум|правительств|санкц|нефт|brent|urals|газ|опек|экспорт|импорт|украин|переговор|бюджет|ндпи|налог|инфляц|ключев", re.I)
+DIGEST = re.compile(r"Что произошло за|Главное за|Главное к|Главные новости|к этому часу|новости к утру|новости к вечеру|Итоги дня|Итоги недели|дайджест|#крипто|биткоин|#BTC|Утренний обзор|Вечерний обзор|Краткий обзор|обзор (экономической |новостной )?повестки|к вечеру индекс", re.I)
 
 
 SECTORS = [("oil", "🛢 Нефть и газ", "MOEXOG"), ("bank", "🏦 Банки и финансы", "MOEXFN"), ("metal", "⛏ Металлы и добыча", "MOEXMM"), ("tech", "💻 IT и связь", "MOEXIT"),
@@ -680,7 +727,9 @@ def news_pick(cls, since, tks=None, market=False, min_pct=0.5, k=5):
     for c in sorted(cls, key=lambda c: -cl_weight(c)):
         if c.get("ts", 0) < since:
             continue
-        tk = (c.get("key") or "|").split("|")[0]
+        tk, ty = ((c.get("key") or "|") + "|").split("|")[:2]
+        if tk == "РЫНОК" and COMPANY_TY.match(ty or ""):
+            continue  # тип события компании у «рынка в целом» — ошибка разметки (чужое IPO, обыски в НБУ)
         if market and tk != "РЫНОК":
             continue
         if tks is not None and tk not in tks:
@@ -1859,7 +1908,8 @@ def trade_prob_cli():
     take = float(a[4]) if len(a) > 4 and a[4] not in ("", "0", "null", "None") else None
     hz = int(a[5]) if len(a) > 5 else 10
     sc = trade_scen(t, side, entry, stop, take, hz)
-    print("SCEN_JSON " + json.dumps(dict(sc or {}, text=scen_text(sc, t)), ensure_ascii=False, default=float), flush=True)
+    txt = scen_text(sc, t)
+    print("SCEN_JSON " + json.dumps(dict(sc or {}, text=txt, notes=txt.split("\n", 1)[1] if "\n" in txt else ""), ensure_ascii=False, default=float), flush=True)
 
 
 def anom_dir_note(name, when):
@@ -2096,9 +2146,18 @@ def index_move(stt, md):
         worst = [x for x in secs[::-1] if x not in secs[:3]][:3]
         txt.append("🏭 Отраслевые индексы: сильнее всех — " + ", ".join(f"{n} {pc(v / 100, 1)}" for n, v in secs[:3]) + ("; слабее всех — " + ", ".join(f"{n} {pc(v / 100, 1)}" for n, v in worst) if worst else ""))
     cls = all_clusters()
-    nn = news_pick(cls, now - 4 * 3600, market=True, min_pct=0.3, k=2) + news_pick(cls, now - 4 * 3600, tks={r["t"] for r in drivers[:3]}, min_pct=0.3, k=2)
+    nn = news_pick(cls, now - 4 * 3600, market=True, min_pct=0.3, k=4) + news_pick(cls, now - 4 * 3600, tks={r["t"] for r in drivers[:3]}, min_pct=0.3, k=3)
+
+    def fits(c):
+        # причина движения — только новость о российском рынке, чьё направление совпадает с движением индекса
+        tx = clean_tx(c["first"].get("tx"))
+        if (c.get("key") or "").startswith("РЫНОК") and not RU_REL.search(tx):
+            return False
+        d = (c.get("wt") or {}).get("dir") or (1 if (c.get("score") or 0) > 0 else -1 if (c.get("score") or 0) < 0 else 0)
+        return d == 0 or (d > 0) == up
+    nn = [c for c in nn if fits(c)]
     if nn:
-        txt += ["", "📰 <b>Возможные причины — свежие новости:</b>"] + [news_line(c, short=True) for c in nn[:3]]
+        txt += ["", "📰 <b>Возможные причины — свежие новости в ту же сторону:</b>"] + [news_line(c, short=True) for c in nn[:3]]
     else:
         txt += ["", "📰 Весомых новостей за 4 часа нет — вероятно, движение за счёт потоков крупных участников, внешнего фона (нефть, рубль) или технических уровней."]
     txt += ["", "<i>Пост выходит, когда индекс за день проходит очередной 1% или делает рывок от 0,7% за полчаса.</i>", "#индекс #рынок"]
@@ -2112,7 +2171,7 @@ def index_move(stt, md):
     except Exception as e:  # noqa: BLE001
         log("картинка индекса", e)
         img = None
-    PUB.post("\n".join(txt), [(img, "Индекс МосБиржи: свечи 1 час")] if img and os.path.exists(img) else None)
+    PUB.post("\n".join(txt), [(img, "Индекс МосБиржи: дневные свечи")] if img and os.path.exists(img) else None)
     if reason == "level":
         s["lv"] = lv
     else:
@@ -2296,8 +2355,8 @@ def anomaly():
 def anomaly_post(x, md, by_sec, ixc):
     t, up = x["t"], (x["exc"] if x["kind"] == "share" else x["chg"]) > 0
     lab = "$" + t if x["kind"] == "share" else f"{FUT[x['asset']][0]} ({t})"
-    txt = [f"🚨 <b>Аномалия: {lab}</b> — {'резкий рост' if up else 'резкое падение'}" + (" на большом объёме" if x.get("vx") and x["vx"] >= 4 else ""),
-           "Что случилось: " + "; ".join(x["why"]) + "."]
+    txt = [f"🚨 <b>Аномалия: {lab} — {'резкий рост' if up else 'резкое падение'}" + (" на большом объёме" if x.get("vx") and x["vx"] >= 4 else "") + "</b>",
+           "<blockquote>" + "; ".join(x["why"]) + ".</blockquote>", ""]
     # кто двигал: последние сделки
     tr = recent_trades(t, x["kind"])
     if tr:
@@ -2310,8 +2369,10 @@ def anomaly_post(x, md, by_sec, ixc):
         vs = sum(v for v, s_, _ in vals if s_ == "S")
         big = max(vals, key=lambda z: z[0])
         if vb + vs:
-            txt.append(f"Кто двигал: в последних {len(tr)} сделках {'покупатели' if vb >= vs else 'продавцы'} ({pc((vb - vs) / (vb + vs), 0)} перевес), "
+            n_ = len(tr)
+            txt.append(f"👥 <b>Кто двигал:</b> {'покупатели' if vb >= vs else 'продавцы'} — перевес <b>{pc((vb - vs) / (vb + vs), 0)}</b> в последних {n_} {plural(n_, 'сделке', 'сделках', 'сделках')}; "
                        f"крупнейшая — {'покупка' if big[1] == 'B' else 'продажа'} на {bln(big[0])} в {str(big[2].get('TRADETIME', ''))[:5]}.")
+            txt.append("")
     # причины
     if x["kind"] == "share":
         cl = news_for([t])
@@ -2319,16 +2380,16 @@ def anomaly_post(x, md, by_sec, ixc):
         cl = news_for(FUT[x["asset"]][2], types={"BR": ["oil_", "geo_", "sanctions"], "NG": ["oil_", "geo_", "sanctions"], "TTF": ["oil_", "geo_", "sanctions"],
                                                      "GOLD": ["geo_", "cbr_"], "SILV": ["geo_"], "WHEAT": ["geo_", "tax"]}.get(x["asset"]))
     if cl:
-        txt.append("Возможная причина — свежие новости:")
+        txt.append("📰 <b>Возможная причина — свежие новости:</b>")
         for c in cl:
             head = cut(clean_tx(c["first"].get("tx")), 170)
-            txt.append(f"• {esc(head)} — <a href=\"{c['first']['link']}\">{esc(c['first'].get('ch', ''))}</a>")
+            txt.append(f"• {esc(head)} — <a href=\"{c['first']['link']}\">{esc(src_name(c['first'].get('ch', '')))}</a>")
     elif x["kind"] == "fut":
         exp = (fut_fronts([x["asset"]]).get(x["asset"]) or {}).get("exp")
-        txt.append("Возможная причина: в публичных новостях за 6 часов объяснения нет — вероятно, движение мировых цен на это сырьё, крупный участник или приближение экспирации контракта"
+        txt.append("📰 <b>Возможная причина:</b> в публичных новостях за 6 часов объяснения нет — вероятно, движение мировых цен на это сырьё, крупный участник или приближение экспирации контракта"
                    + (f" ({exp[8:10]}.{exp[5:7]})" if exp else "") + ". Проверьте зарубежные котировки.")
     else:
-        txt.append("Возможная причина: в публичных новостях за 6 часов объяснения нет — так бывает при выходе крупного участника, перед корпоративными событиями (отчётность, дивиденды, допэмиссия) или из-за слухов. Осторожно: такие движения часто частично откатываются.")
+        txt.append("📰 <b>Возможная причина:</b> в публичных новостях за 6 часов объяснения нет — так бывает при выходе крупного участника, перед корпоративными событиями (отчётность, дивиденды, допэмиссия) или из-за слухов. Осторожно: такие движения часто частично откатываются.")
     if x["kind"] == "share":
         rl = reg_lines(t, 24)
         if rl:
@@ -2353,7 +2414,11 @@ def anomaly_post(x, md, by_sec, ixc):
         rel = FUT[x["asset"]][2]
         if rel:
             txt.append(f"На что может повлиять: {' '.join('$' + r for r in rel)} — {'позитивно' if up else 'негативно'} для выручки экспортёров этого сырья; для рубля — {'поддержка' if up and x['asset'] in ('BR', 'NG', 'TTF') else 'давление' if x['asset'] in ('BR', 'NG', 'TTF') else 'влияние слабое'}.")
-    txt += ["", "<i>Аномалия — движение цены или оборота намного сильнее обычного. Это повод присмотреться, а не готовый сигнал на сделку.</i>", "#аномалия" + (" #" + t if x["kind"] == "share" else "")]
+    # контекст — в разворачиваемую цитату, чтобы главное читалось сразу
+    k0 = next((i for i, l in enumerate(txt) if l.startswith(("Индекс МосБиржи", "На что может повлиять", "📍"))), len(txt))
+    ctx_l = [l for l in txt[k0:] if l]
+    txt = txt[:k0] + ["", "<blockquote expandable>📊 <b>Контекст</b>\n" + "\n".join(ctx_l + ["<i>Аномалия — движение цены или оборота намного сильнее обычного. Это повод присмотреться, а не готовый сигнал на сделку.</i>"]) + "</blockquote>",
+                      "#аномалия" + (" #" + t if x["kind"] == "share" else "")]
     import card as cardmod
     src = os.path.join(OUT, f"an_{t}.json")
     img = os.path.join(OUT, f"an_{t}.png")
@@ -2365,7 +2430,7 @@ def anomaly_post(x, md, by_sec, ixc):
     except Exception as e:  # noqa: BLE001
         log("картинка аномалии", e)
         img = None
-    PUB.post("\n".join(txt), [(img, f"{lab}: свечи 1 час")] if img and os.path.exists(img) else None)
+    PUB.post("\n".join(txt), [(img, f"{lab}: дневные свечи")] if img and os.path.exists(img) else None)
 
 
 _SEC = None
