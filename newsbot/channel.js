@@ -130,9 +130,13 @@ function newsWeight(c) {
   const W0 = wOf(v.a5, v.up5, v.n);
   return { W: W0 * p, E: Math.abs(v.a5), n: v.n, p, pct: pctOf(PCT.comp, W0), dir: Math.sign(v.a5), lvl: v.lvl };
 }
-function weightLine(w) {
+function weightLine(w, ty) {
   if (!w) return '';
   const lab = w.pct >= 0.9 ? 'высокий' : w.pct >= 0.75 ? 'повышенный' : 'средний';
+  const base = ty ? BASE_DIR[ty] : 0;
+  // история реакции против смысла события («продажа на факте») — пишем прямо, без прогноза, чтобы не было противоречия
+  if (base && w.dir && Math.sign(w.dir) !== Math.sign(base))
+    return `⚖️ Вес новости: <b>${lab}</b> (сильнее ${Math.round(w.pct * 100)}% похожих) · <i>на истории после таких ${base > 0 ? 'хороших' : 'плохих'} новостей бумага чаще ${w.dir < 0 ? 'отставала от' : 'обгоняла'} индекс${w.dir < 0 ? 'а' : ''} (${pc(w.E * w.dir, 1)} за 5 дн.) — ${base > 0 ? '«продажа на факте»' : 'негатив уже был в цене'}; это не сигнал</i>`;
   return `⚖️ Вес новости: <b>${lab}</b> (сильнее ${Math.round(w.pct * 100)}% похожих) · ждём ${w.dir < 0 ? '▼' : '▲'} <b>${pc(w.E * (w.dir || 1), 1)}</b> ${w.lvl === 'рынок' ? 'по индексу' : 'к индексу'} за 5 дн.`;
 }
 function weightMore(w) {
@@ -551,7 +555,7 @@ async function run(S, clusters, items) {
       c.pub.done = true; mark(firstLink); n++;
       const nb = await newsBody(S, c, TYPE_RU[ty] || ty, tk, s, ty);
       if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
-      c.pub.msg = await postNews(S, { head: `🏛 <b>Заявление</b> · ${esc(TYPE_RU[ty] || ty)}`, nb, src: sourcesLine(c), weight: weightLine(w), checked,
+      c.pub.msg = await postNews(S, { head: `🏛 <b>Заявление</b> · ${esc(TYPE_RU[ty] || ty)}`, nb, src: sourcesLine(c), weight: weightLine(w, ty), checked,
         more: [weightMore(w), ...(nb.react.length ? ['<b>Как реагировал рынок на такие заявления:</b>', ...nb.react] : [])], tg: '\n#заявление' });
       continue;
     }
@@ -563,7 +567,7 @@ async function run(S, clusters, items) {
       if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
       c.pub.msg = await postNews(S, { head: `🕵️ <b>Слух, не подтверждён</b> · ${nb.tks.map(t => '$' + t).join(' ')} · ${esc(TYPE_RU[ty] || ty)}`, nb,
         extra: [`❓ Вероятность подтверждения: <b>~${Math.round(w.p * 100)}%</b> <i>(как часто подтверждались прошлые сообщения этих источников)</i>`],
-        src: sourcesLine(c), weight: weightLine(w), checked: checked.replace('Автопроверка пройдена', 'Автопроверка (слух)'), more: [weightMore(w), ...nb.react, pulseLine(nb.tks || [], w.dir)], tg: tags(nb.tks) });
+        src: sourcesLine(c), weight: weightLine(w, ty), checked: checked.replace('Автопроверка пройдена', 'Автопроверка (слух)'), more: [weightMore(w), ...nb.react, pulseLine(nb.tks || [], w.dir)], tg: tags(nb.tks) });
       continue;
     }
     // 5) факт — публикуем сразу по первому источнику, если вес высокий; иначе ждём второго источника или надёжного СМИ
@@ -578,10 +582,11 @@ async function run(S, clusters, items) {
     if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
     const who = tk === 'РЫНОК' ? 'Рынок' : '$' + nb.main;
     const also = nb.tks.length > 1 ? ` <i>(также ${nb.tks.slice(1).map(t => '$' + t).join(' ')})</i>` : '';
-    const emo = (w.pct >= 0.9 ? '⚡️' : '') + (w.dir > 0 ? '🟢' : w.dir < 0 ? '🔴' : '⚪️');
+    const ed = BASE_DIR[ty] || w.dir; // цвет — по смыслу события, а не по статистике реакции
+    const emo = (w.pct >= 0.9 ? '⚡️' : '') + (ed > 0 ? '🟢' : ed < 0 ? '🔴' : '⚪️');
     const today = tk !== 'РЫНОК' && nb.chg != null ? ` · сегодня ${pc(nb.chg, 1)}` : '';
     c.pub.msg = await postNews(S, { head: `${emo} <b>${who} · ${esc(TYPE_RU[ty] || ty)}</b>${also}${today}`, nb,
-      src: sourcesLine(c) + (single ? ' · <i>пока один источник</i>' : ''), weight: weightLine(w), checked,
+      src: sourcesLine(c) + (single ? ' · <i>пока один источник</i>' : ''), weight: weightLine(w, ty), checked,
       more: [weightMore(w), ...(nb.react.length ? ['<b>Реакция рынка на такие новости (2017–2026):</b>', ...nb.react] : []), pulseLine(nb.tks || [], w.dir)], tg: tags(nb.tks) });
   }
   if (n) log('опубликовано', n, 'за день', S.pub.count);
