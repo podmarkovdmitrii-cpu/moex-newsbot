@@ -377,6 +377,17 @@ function scenCall(t, side, entry, stop, take, hz) {
     return line ? JSON.parse(line.slice(10)) : null;
   } catch (e) { log('сценарии сделки:', e.message.slice(0, 160)); return null; }
 }
+// Предположительный уровень по смыслу новости + потокам + графику (channel/jobs.py level)
+function levelCall(t, side) {
+  try {
+    const sd = process.env.STATE_DIR || path.join(__dirname, 'state');
+    const out = require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(__dirname, 'channel', 'jobs.py'), 'level', t, String(side)].concat(process.argv.includes('--demo') ? ['--demo'] : []),
+      { timeout: 60e3, encoding: 'utf8', env: Object.assign({}, process.env, { MODE: 'level', CHANNEL_STATE: path.join(sd, 'channel'), NEWS_STATE: sd }) });
+    const line = out.split('\n').find(l => l.startsWith('LEVEL_JSON '));
+    const r = line ? JSON.parse(line.slice(11)) : null;
+    return r && r.t ? r : null;
+  } catch (e) { log('уровень:', e.message.slice(0, 160)); return null; }
+}
 // Вероятная реакция рынка: сектор бумаги и индекс на такой тип новостей
 function reactLines(tk, ty, s) {
   const k = typeKey(ty, s), out = [];
@@ -434,6 +445,15 @@ async function newsBody(S, c, label, tk, s, ty, rumor) {
   // 2) картинка: график с зонами сделки (если сигнал есть и это не слух)
   const card = await makeCard({ t: main, kind, label, sign: s, side: rumor ? 0 : ns.side, sector });
   const sig = main !== 'РЫНОК' && ty ? sigBlock(main, ns, lv, sc, rumor) : { main: '', more: [] };
+  // без сигнала — предположительный уровень в сторону смысла новости, если его подтверждают поток или график
+  // (не показываем, если история реакций противоречит смыслу события или торги остановлены)
+  let level = '';
+  const bd = BASE_DIR[ty] || 0, hist = ns.v && ns.v.lvl === 'бумага' ? Math.sign(ns.v.a5) : 0;
+  if (!ns.side && main !== 'РЫНОК' && bd && !rumor && !(hist && hist !== bd) && !(base && base.ld && (Date.now() - Date.parse(base.ld)) / 864e5 > 4)) {
+    const r = levelCall(main, bd);
+    if (r && r.pts >= 2) level = '🎯 <b>Предположительный уровень</b> (1–5 дней): ' + r.text.replace(/^<b>\$\w+<\/b> /, '');
+  }
+  sig.main = [sig.main, level].filter(Boolean).join('\n');
   // в пост — только суть (1–2 предложения), полная новость — по ссылке
   const sum = NC.summary(pack && pack.retell ? pack.retell : full, ty);
   const body = esc(sum) + (link ? ` <a href="${link}">Подробнее →</a>` : '');
