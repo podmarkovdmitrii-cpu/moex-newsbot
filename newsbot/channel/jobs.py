@@ -232,11 +232,19 @@ def flows():
 
     buyers, sellers = buyers[:4], sellers[:4]
 
+    oi_map = stock_oi() if not DEMO else {}
+    flow_by = {x["t"]: key(x) for x in sh}
+    news_cls = all_clusters()
+
+    def why(t, chg, x_=None):
+        b = behavior(chg, flow=flow_by.get(t), x=x_, oi=oi_map.get(t), r5=ret5(t) if (chg or 0) >= 0.03 else None, ndir=news_dir(t, cls=news_cls))
+        return ("\n   ↳ <i>" + esc("; ".join(b)) + "</i>") if b else ""
+
     def row(x):
         k_ = key(x)
         per = "за 30 мин" if x["wimb"] is not None and x["wtot"] > 0.02 * x["tot"] else "за день"
         xx = f" · оборот <b>{fmt(x['x'], 1)}×</b> к норме" if x["x"] and x["x"] >= 1.3 else ""
-        return f"<b>${x['lab']}</b> {pc(k_, 0)} {per}{xx} · цена <code>{pc(x['chg'], 1)}</code>"
+        return f"<b>${x['lab']}</b> {pc(k_, 0)} {per}{xx} · цена <code>{pc(x['chg'], 1)}</code>" + why(x["t"], x["chg"], x["x"])
     share_b = allb / allt
     mood = "покупатели сильнее" if share_b >= 0.53 else "продавцы сильнее" if share_b <= 0.47 else "силы равны"
     # общий объём денег за день во всех акциях и его сравнение с обычным на это время сессии
@@ -282,8 +290,9 @@ def flows():
         txt += ["", "🎯 <b>Куда могут дойти</b> <i>(оценка на 1–5 дней: потоки + новости + уровни графика)</i>"] + [target_line(r) for r in tg_rows]
     if vup or vdn:
         txt += ["", "📊 <b>Резкие изменения оборота</b> <i>(к среднему за 20 дней на это время)</i>"]
-        txt += [f"🔺 <b>${t}</b> ×{fmt(x, 1)} · {bln(v)} · цена <code>{pc(c, 1)}</code>" for t, x, v, c, _ in vup]
-        txt += [f"🔻 <b>${t}</b> ×{fmt(x, 2)} — оборот почти иссяк · {bln(v)}" for t, x, v, c, _ in vdn]
+        shown = {x["t"] for x in buyers + sellers}
+        txt += [f"🟢▲ <b>${t}</b> ×{fmt(x, 1)} · {bln(v)} · цена <code>{pc(c, 1)}</code>" + ("" if t in shown else why(t, c, x)) for t, x, v, c, _ in vup]
+        txt += [f"🔴▼ <b>${t}</b> ×{fmt(x, 2)} — оборот почти иссяк · {bln(v)}" for t, x, v, c, _ in vdn]
     if fu:
         fl = []
         for x in sorted([x for x in fu if x["lab"] not in FX], key=lambda x: -x["tot"])[:5] + [x for x in fu if x["lab"] in FX]:
@@ -302,12 +311,79 @@ def flows():
               for (t, k_, tm, side), (v, n_, p_) in top]
         txt += ["", "<blockquote expandable>🐋 <b>Киты за 30 минут</b> — крупнейшие сделки\n" + "\n".join(wl) + "</blockquote>"]
     txt += ["", "<blockquote expandable>ℹ️ <b>Как читать</b>\nПеревес — доля оборота, где инициатором была покупка или продажа по рынку; +40% значит, что покупок по рынку было на 40% больше, чем продаж. "
+            "↳ — что может стоять за движением: цена против открытого интереса фьючерса (рост цены при падении интереса — закрытие шортов, при росте — новые покупки; падение цены при росте интереса — новые шорты, при падении — выход из лонгов), перевес сделок против цены — поглощение крупным игроком. Это интерпретация, а не факт. "
             "Цель — ближайший значимый уровень графика в сторону потока (не ближе 0,5 и не дальше 4 дневных ATR); уверенность растёт, если совпадают поток, оборот, тренд и смысл свежих новостей. Это оценка, не прогноз и не рекомендация. "
             "«Кит» — сделка от 50 млн ₽ в голубых фишках, от 5% среднего дневного оборота во 2–3 эшелоне, от 30 млн ₽ во фьючерсах. Данные Мосбиржи с задержкой до 15 минут; перевес — не прогноз.</blockquote>", "#потоки"]
     rows = [(x["lab"], key(x), None) for x in sorted(buyers + sellers[::-1], key=lambda x: -key(x))]
     img = hbars(rows, os.path.join(OUT, "flows.png"), f"Перевес покупок (+) и продаж (−), {now.strftime('%d.%m')} {hm} МСК", fmt_v=lambda v: pc(v, 0))
     PUB.post("\n".join(txt), [(img, f"Перевес покупателей и продавцов на {hm} МСК")])
     save_json("flows_last.json", dict(time=now.isoformat(), tot_all=tot_all, net=net, vol_up=[v[0] for v in vup], buyers=[(x["lab"], key(x)) for x in buyers], sellers=[(x["lab"], key(x)) for x in sellers], share=allb / allt))
+
+
+# =============================================================================================
+# Поведение денег в бумаге: кто и зачем двигает (по цене, перевесу сделок, обороту и открытому интересу фьючерса)
+# =============================================================================================
+FUT2STOCK = {"SBRF": "SBER", "SBPR": "SBERP", "GAZR": "GAZP", "SNGR": "SNGS", "SNGP": "SNGSP", "MTSI": "MTSS", "NOTKM": "NVTK", "TRNF": "TRNFP", "TATP": "TATNP"}
+
+
+def stock_oi():
+    """Изменение открытого интереса по фьючерсам на акции за день: {тикер акции: (доля, контракты)}."""
+    try:
+        js = iss("engines/futures/markets/forts/securities.json", **{"iss.only": "securities,marketdata", "securities.columns": "SECID,ASSETCODE,PREVOPENPOSITION",
+                                                                     "marketdata.columns": "SECID,OPENPOSITION"})
+    except Exception as e:  # noqa: BLE001
+        log("открытый интерес", e)
+        return {}
+    now_ = {r["SECID"]: r.get("OPENPOSITION") for r in table(js, "marketdata")}
+    agg = {}
+    for r in table(js, "securities"):
+        a = r.get("ASSETCODE")
+        cur, prev = now_.get(r["SECID"]), r.get("PREVOPENPOSITION")
+        if not a or cur is None or not prev:
+            continue
+        g = agg.setdefault(FUT2STOCK.get(a, a), [0, 0])
+        g[0] += cur
+        g[1] += prev
+    return {t: (c / p - 1, c - p) for t, (c, p) in agg.items() if p >= 1000}
+
+
+def behavior(chg, flow=None, x=None, oi=None, r5=None, ndir=0):
+    """Короткое объяснение, что может стоять за движением денег. Возвращает список из 0–2 фраз."""
+    out = []
+    chg = chg or 0
+    if oi and abs(oi[0]) >= 0.03 and abs(chg) >= 0.005:
+        o = pc(oi[0], 0)
+        if chg > 0 and oi[0] < 0:
+            out.append(f"похоже на закрытие шортов: цена растёт, а открытый интерес по фьючерсу {o} — рост во многом за счёт откупа коротких позиций и может быстро выдохнуться")
+        elif chg > 0:
+            out.append(f"новые покупки: растут и цена, и открытый интерес по фьючерсу ({o}) — в бумагу заходят новые деньги")
+        elif oi[0] > 0:
+            out.append(f"новые шорты: цена падает, а открытый интерес по фьючерсу {o} — продавцы наращивают короткие позиции")
+        else:
+            out.append(f"закрытие лонгов: снижаются и цена, и открытый интерес ({o}) — фиксация прибыли, давление может ослабнуть")
+    if flow is not None:
+        if flow >= 0.2 and chg <= -0.005:
+            out.append("покупки по рынку не поднимают цену — крупный продавец стоит лимитными заявками (поглощение)")
+        elif flow <= -0.2 and chg >= 0.005:
+            out.append("продажи по рынку не роняют цену — кто-то крупный выкупает предложение лимитками")
+    if not out and r5 is not None and r5 <= -0.05 and chg >= 0.03 and (flow is None or flow > 0):
+        out.append(f"резкий отскок после падения ({pc(r5, 0)} за 5 дней) — часть покупок может быть закрытием шортов")
+    if x and x >= 2.5:
+        if chg <= -0.04 and (flow is None or flow < 0):
+            out.append("обвал на большом объёме — возможны вынужденные продажи (маржин-коллы)")
+        elif abs(chg) < 0.01 and len(out) < 2:
+            out.append("большой оборот почти без движения цены — похоже на перекладку крупного пакета или борьбу за уровень")
+        elif chg >= 0.05 and ndir <= 0 and len(out) < 2:
+            out.append("сильный импульс на большом объёме без новости в ту же сторону — такие движения часто частично откатываются")
+    return out[:2]
+
+
+def ret5(t):
+    try:
+        B = tf_bars(t, "1d", "share")
+        return B[-1]["c"] / B[-6]["c"] - 1 if len(B) > 6 else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # =============================================================================================
@@ -2573,8 +2649,18 @@ def anomaly_post(x, md, by_sec, ixc):
         big = max(vals, key=lambda z: z[0])
         if vb + vs:
             n_ = len(tr)
+            if x["kind"] == "share":
+                try:
+                    bh = behavior(x["chg"], flow=(vb - vs) / (vb + vs), x=x.get("vx"), oi=stock_oi().get(t), r5=ret5(t) if x["chg"] >= 0.03 else None, ndir=news_dir(t))
+                except Exception as e:  # noqa: BLE001
+                    log("поведение", t, e)
+                    bh = []
+            else:
+                bh = []
             txt.append(f"👥 <b>Кто двигал:</b> {'покупатели' if vb >= vs else 'продавцы'} — перевес <b>{pc((vb - vs) / (vb + vs), 0)}</b> в последних {n_} {plural(n_, 'сделке', 'сделках', 'сделках')}; "
                        f"крупнейшая — {'покупка' if big[1] == 'B' else 'продажа'} на {bln(big[0])} в {str(big[2].get('TRADETIME', ''))[:5]}.")
+            if bh:
+                txt.append("🔎 <b>Что может стоять за движением:</b> " + esc("; ".join(bh)) + ".")
             txt.append("")
     # причины
     if x["kind"] == "share":
