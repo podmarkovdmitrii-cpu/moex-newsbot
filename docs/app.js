@@ -179,7 +179,7 @@ function renderTable() {
   $('#more').hidden = S.showAll || !!q || list.length <= 30;
   document.querySelectorAll('#tbl th').forEach(th => th.classList.toggle('sorted', th.dataset.sort === k));
   $('#tbl tbody').innerHTML = list.slice(0, n).map(x => {
-    const xb = x.x == null ? '—' : `<span class="xb ${x.x >= 2.5 ? 'hot' : x.x <= 0.4 ? 'cold' : ''}">×${nf(x.x, x.x >= 10 ? 0 : 1)}</span>`;
+    const xb = x.x == null ? '—' : `<span class="xb ${x.x >= 2.5 ? 'hot' : x.x <= 0.4 ? 'cold' : ''}">${x.x >= 2.5 ? '▲' : x.x <= 0.4 ? '▼' : ''}×${nf(x.x, x.x >= 10 ? 0 : 1)}</span>`;
     return `<tr tabindex="0" data-t="${x.t}"><td class="l"><span class="tk">${x.t}</span><span class="nm">${esc(x.name)}</span></td><td>${rub(x.val)}</td><td>${xb}</td><td class="hide-s">${x.d15 == null ? '—' : rub(x.d15)}</td><td class="${x.chg > 0 ? 'up' : x.chg < 0 ? 'dn' : ''}">${pct(x.chg)}</td></tr>`;
   }).join('') || '<tr><td class="l" colspan="5">Ничего не найдено</td></tr>';
 }
@@ -210,6 +210,44 @@ function drawPulse() {
   $('#pulseHint').textContent = `10-минутные свечи, ${Object.keys(S.bars).length} самых торгуемых акций; последняя свеча ещё идёт`;
 }
 
+// ---------- поведение денег: что может стоять за движением ----------
+// Цена против открытого интереса фьючерса на акцию (классическая матрица), перевес сделок против цены, оборот без движения цены.
+const FUT2STOCK = { SBRF: 'SBER', SBPR: 'SBERP', GAZR: 'GAZP', SNGR: 'SNGS', SNGP: 'SNGSP', MTSI: 'MTSS', NOTKM: 'NVTK', TRNF: 'TRNFP', TATP: 'TATNP' };
+async function loadOI() {
+  const js = await iss('engines/futures/markets/forts/securities.json', { 'iss.only': 'securities,marketdata', 'securities.columns': 'SECID,ASSETCODE,PREVOPENPOSITION', 'marketdata.columns': 'SECID,OPENPOSITION' });
+  const now = Object.fromEntries(rows(js, 'marketdata').map(r => [r.SECID, r.OPENPOSITION]));
+  const agg = {};
+  for (const r of rows(js, 'securities')) {
+    const cur = now[r.SECID], prev = r.PREVOPENPOSITION; if (!r.ASSETCODE || cur == null || !prev) continue;
+    const t = FUT2STOCK[r.ASSETCODE] || r.ASSETCODE; const g = agg[t] = agg[t] || [0, 0]; g[0] += cur; g[1] += prev;
+  }
+  S.oi = Object.fromEntries(Object.entries(agg).filter(([, [, p]]) => p >= 1000).map(([t, [c, p]]) => [t, c / p - 1]));
+  S.oiAt = Date.now();
+}
+function behavior(x, flow) {
+  const out = [], chg = x.chg || 0, oi = S.oi ? S.oi[x.t] : null;
+  if (oi != null && Math.abs(oi) >= 0.03 && Math.abs(chg) >= 0.005) {
+    const o = pct(oi, 0);
+    if (chg > 0 && oi < 0) out.push(`похоже на закрытие шортов: цена растёт, а открытый интерес по фьючерсу ${o} — рост во многом за счёт откупа коротких позиций и может быстро выдохнуться`);
+    else if (chg > 0) out.push(`новые покупки: растут и цена, и открытый интерес по фьючерсу (${o}) — в бумагу заходят новые деньги`);
+    else if (oi > 0) out.push(`новые шорты: цена падает, а открытый интерес по фьючерсу ${o} — продавцы наращивают короткие позиции`);
+    else out.push(`закрытие лонгов: снижаются и цена, и открытый интерес (${o}) — фиксация прибыли, давление может ослабнуть`);
+  }
+  if (flow != null) {
+    if (flow >= 0.2 && chg <= -0.005) out.push('покупки по рынку не поднимают цену — крупный продавец стоит лимитными заявками (поглощение)');
+    else if (flow <= -0.2 && chg >= 0.005) out.push('продажи по рынку не роняют цену — кто-то крупный выкупает предложение лимитками');
+  }
+  const low = x.x != null && x.x <= 0.35;
+  const xx = low ? 0 : Math.max(x.x || 0, x.r30 || 0);
+  if (xx >= 2.5) {
+    if (chg <= -0.04 && (flow == null || flow < 0)) out.push('обвал на большом объёме — возможны вынужденные продажи (маржин-коллы)');
+    else if (Math.abs(chg) < 0.01 && out.length < 2) out.push('большой оборот почти без движения цены — похоже на перекладку крупного пакета или борьбу за уровень');
+    else if (chg >= 0.05 && out.length < 2) out.push('сильный импульс на большом объёме — проверьте новости: без повода такие движения часто частично откатываются');
+  }
+  if (x.x != null && x.x <= 0.35 && out.length < 2) out.push('интерес к бумаге пропал — крупные участники ждут, движение цены на малом объёме ненадёжно');
+  return out.slice(0, 2);
+}
+
 // ---------- всплески ----------
 function renderSpikes() {
   const up = [], dn = [];
@@ -218,13 +256,13 @@ function renderSpikes() {
     const why = [];
     if (x.r30 != null && x.r30 >= 3 && x.v30 >= 20e6) why.push(`сейчас ×${nf(x.r30, 1)}: ${rub(x.v30)} за 30 мин`);
     if (x.x != null && x.x >= 2.5 && x.val >= 30e6) why.push(`за день ×${nf(x.x, 1)}: ${rub(x.val)}`);
-    if (why.length) up.push({ x, score: Math.max(x.r30 || 0, x.x || 0), why });
-    if (x.x != null && x.x <= 0.35 && x.avg >= 150e6 && S.frac > 0.15) dn.push({ x, score: x.x, why: [`за день ×${nf(x.x, 2)}: ${rub(x.val)} при обычных ${rub(x.avg * S.frac)} к этому времени`] });
+    if (why.length) up.push({ x, score: Math.max(x.r30 || 0, x.x || 0), why, bh: behavior(x) });
+    if (x.x != null && x.x <= 0.35 && x.avg >= 150e6 && S.frac > 0.15) dn.push({ x, score: x.x, why: [`за день ×${nf(x.x, 2)}: ${rub(x.val)} при обычных ${rub(x.avg * S.frac)} к этому времени`], bh: behavior(x) });
   }
   up.sort((a, b) => b.score - a.score); dn.sort((a, b) => a.score - b.score);
-  const li = (o, cls) => `<li tabindex="0" data-t="${o.x.t}"><span class="x ${cls}">×${nf(o.score, o.score >= 10 ? 0 : 1)}</span><span><span class="tk">${o.x.t}</span> <span class="hint">${esc(o.x.name)}</span></span><span class="${o.x.chg > 0 ? 'up' : o.x.chg < 0 ? 'dn' : ''} mono">${pct(o.x.chg)}</span><span class="why">${o.why.join(' · ')}</span></li>`;
-  $('#spUp').innerHTML = up.slice(0, 25).map(o => li(o, 'am')).join('') || '<li class="empty">Сейчас резких всплесков нет</li>';
-  $('#spDn').innerHTML = dn.slice(0, 15).map(o => li(o, 'hint')).join('') || '<li class="empty">Нет ликвидных бумаг с провалом оборота</li>';
+  const li = (o, cls, arrow) => `<li tabindex="0" data-t="${o.x.t}"><span class="x ${cls}">${arrow}×${nf(o.score, o.score >= 10 ? 0 : o.score < 1 ? 2 : 1)}</span><span><span class="tk">${o.x.t}</span> <span class="hint">${esc(o.x.name)}</span></span><span class="${o.x.chg > 0 ? 'up' : o.x.chg < 0 ? 'dn' : ''} mono">${pct(o.x.chg)}</span><span class="why">${o.why.join(' · ')}</span>${o.bh.length ? `<span class="bh">🔎 ${esc(o.bh.join('; '))}</span>` : ''}</li>`;
+  $('#spUp').innerHTML = up.slice(0, 25).map(o => li(o, 'up', '▲')).join('') || '<li class="empty">Сейчас резких всплесков нет</li>';
+  $('#spDn').innerHTML = dn.slice(0, 15).map(o => li(o, 'dn', '▼')).join('') || '<li class="empty">Нет ликвидных бумаг с провалом оборота</li>';
   $('#spikeCount').textContent = up.length ? String(up.length) : '';
   $('#upHint').textContent = S.avgDays ? `норма — средний оборот за ${S.avgDays} дней` : '';
   notifySpikes(up);
@@ -247,6 +285,7 @@ async function openShare(t) {
   $('#shTitle').textContent = `${t} · ${x.name}`;
   $('#shSub').textContent = `${SEC_RU[x.sec] || 'Прочие'} · цена ${nf(x.last, x.last >= 100 ? 1 : 2)} ₽ (${pct(x.chg)})`;
   $('#shBody').innerHTML = `<div class="kv"><div>Оборот за день<b>${rub(x.val)}</b></div><div>К норме на это время<b>${x.x ? '×' + nf(x.x, 2) : '—'}</b></div><div>За последние 30 мин<b>${x.v30 != null ? rub(x.v30) : '—'}</b></div><div>Сделок<b>${nf(x.num)}</b></div></div>
+    ${(b => b.length ? `<p class="bh">🔎 ${esc(b.join('; '))}</p>` : '')(behavior(x))}
     <div class="label">Оборот по 10 минут сегодня, пунктир — обычный темп</div><canvas id="shChart" height="180"></canvas>
     <div id="bs"><button class="btn" id="bsBtn" type="button">Посчитать покупки и продажи за день</button><p class="hint">Разберу все сделки дня по ${t}: кто был инициатором — покупатель или продавец. Для самых ликвидных бумаг это до минуты загрузки.</p></div>`;
   if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
@@ -276,8 +315,10 @@ async function buySell(t) {
       if (r.length < 5000) break;
     }
     const tot = b + s, net = b - s;
+    const bh = behavior(S.byT[t], tot ? net / tot : null);
     big.sort((a, c) => c.VALUE - a.VALUE);
     $('#bs').innerHTML = `<div class="kv"><div>Покупки по рынку<b class="up">${rub(b)}</b></div><div>Продажи по рынку<b class="dn">${rub(s)}</b></div><div>Чистый поток<b class="${net >= 0 ? 'up' : 'dn'}">${rubS(net)}</b></div><div>Доля покупок<b>${tot ? nf(b / tot * 100, 0) + '%' : '—'}</b></div></div>
+      ${bh.length ? `<p class="bh">🔎 ${esc(bh.join('; '))}</p>` : ''}
       <p class="hint">${nf(n)} сделок. ${big.length ? 'Крупнейшие (от 50 млн ₽): ' + big.slice(0, 5).map(z => `${z.TRADETIME.slice(0, 5)} ${z.BUYSELL === 'B' ? 'покупка' : 'продажа'} ${rub(z.VALUE)}`).join(' · ') : 'Сделок от 50 млн ₽ не было.'}</p>`;
   } catch (e) { btn.disabled = false; btn.textContent = 'Не удалось загрузить сделки — повторить'; }
 }
@@ -416,6 +457,7 @@ async function refresh(first) {
     }
     const top = [...S.shares].sort((a, b) => b.val - a.val).slice(0, 40).map(x => x.t);
     if (first || !S.lastBars || Date.now() - S.lastBars > 4 * 60e3) { loadBars(top).then(() => { S.lastBars = Date.now(); enrich(); render(); }).catch(() => {}); }
+    if (!S.oiAt || Date.now() - S.oiAt > 5 * 60e3) loadOI().then(render).catch(() => {});
     snapshot(); enrich(); render(); setStatus();
   } catch (e) {
     st.textContent = 'Нет связи с Мосбиржей — пробую снова через минуту';

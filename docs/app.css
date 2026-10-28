@@ -88,8 +88,8 @@ input[type=search] { font: 14px var(--f-body); color: var(--ink); background: va
 .nm { display: block; font: 12px var(--f-body); color: var(--muted); max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
 .up { color: var(--up); } .dn { color: var(--dn); } .am { color: var(--amber); }
 .xb { display: inline-block; padding: 1px 6px; border-radius: 6px; }
-.xb.hot { background: var(--amber-soft); color: var(--amber); font-weight: 600; }
-.xb.cold { color: var(--muted); }
+.xb.hot { background: var(--accent-soft); color: var(--up); font-weight: 600; }
+.xb.cold { color: var(--dn); }
 .more { display: block; width: 100%; padding: 10px; background: none; border: 0; color: var(--accent); font: 600 13.5px var(--f-body); cursor: pointer; }
 
 /* всплески */
@@ -98,9 +98,10 @@ input[type=search] { font: 14px var(--f-body); color: var(--ink); background: va
 .spikes li:hover { background: var(--accent-soft); }
 .spikes .x { font: 600 20px var(--f-num); min-width: 72px; }
 .spikes .why { color: var(--muted); font-size: 12.5px; grid-column: 2 / 4; }
+.spikes .bh, .bh { grid-column: 2 / 4; font-size: 12.5px; color: var(--ink); background: var(--accent-soft); border-radius: 8px; padding: 6px 8px; margin: 2px 0 0; }
 .spikes .empty { display: block; color: var(--muted); cursor: default; }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-.dot.up { background: var(--amber); } .dot.dn { background: var(--muted); }
+.dot.up { background: var(--up); } .dot.dn { background: var(--dn); }
 
 /* физ/юр */
 .notice { background: var(--amber-soft); color: var(--ink); border-radius: 12px; padding: 12px 14px; font-size: 13.5px; }
