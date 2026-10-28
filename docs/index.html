@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Денежный пульс</title>
+<meta name="description" content="Деньги в акциях Мосбиржи в течение дня: оборот, резкие изменения объёмов, позиции физических и юридических лиц">
+<meta name="theme-color" content="#0e1a17" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f3f6f4" media="(prefers-color-scheme: light)">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Денежный пульс">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&family=Unbounded:wght@600&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-in">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 32 32" width="28" height="28"><rect x="3" y="17" width="5" height="11" rx="1"/><rect x="11" y="10" width="5" height="18" rx="1"/><rect x="19" y="4" width="5" height="24" rx="1"/><path d="M2 14 L10 8 L18 11 L30 2" fill="none" stroke-width="2.4"/></svg></span>
+      <div>
+        <h1>Денежный пульс</h1>
+        <p class="sub" id="status">Загружаю данные Мосбиржи…</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button id="btnLive" class="chip on" type="button" aria-pressed="true" title="Автообновление раз в минуту">● Онлайн</button>
+      <button id="btnRefresh" class="chip" type="button">Обновить</button>
+    </div>
+  </div>
+  <nav class="wrap tabs" role="tablist">
+    <button role="tab" id="tab-money" aria-selected="true" data-view="money">Деньги</button>
+    <button role="tab" id="tab-spikes" aria-selected="false" data-view="spikes">Всплески <span class="count" id="spikeCount"></span></button>
+    <button role="tab" id="tab-fizyur" aria-selected="false" data-view="fizyur">Физ и юр лица</button>
+  </nav>
+</header>
+
+<main class="wrap">
+  <!-- ДЕНЬГИ -->
+  <section id="view-money" class="view" aria-labelledby="tab-money">
+    <div class="hero">
+      <div class="hero-main">
+        <div class="label">В акциях сегодня</div>
+        <div class="big" id="totalVal">—</div>
+        <div class="hero-sub" id="totalSub">&nbsp;</div>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="label">За 15 минут</div><div class="num" id="flow15">—</div><div class="hint" id="flow15h">считается после 2 обновлений</div></div>
+        <div class="stat"><div class="label">К обычному дню</div><div class="num" id="normX">—</div><div class="hint" id="normH">средний оборот за 15 дней на это время</div></div>
+        <div class="stat wide-s"><div class="label">Растут / падают</div><div class="num" id="breadth">—</div><div class="hint">по числу акций</div></div>
+      </div>
+    </div>
+    <div class="pulse-card">
+      <div class="card-head"><h2>Поток денег по минутам</h2><span class="hint" id="pulseHint">оборот всех акций между обновлениями</span></div>
+      <canvas id="pulse" height="120" aria-label="Оборот по минутам"></canvas>
+    </div>
+    <div class="cols">
+      <div class="card">
+        <div class="card-head"><h2>По секторам</h2><span class="hint">оборот за день</span></div>
+        <div id="sectors" class="sectors"></div>
+      </div>
+      <div class="card grow">
+        <div class="card-head">
+          <h2>Акции</h2>
+          <input id="search" type="search" placeholder="Тикер или название" autocomplete="off">
+        </div>
+        <div class="table-wrap">
+          <table class="tbl" id="tbl">
+            <thead><tr>
+              <th data-sort="t" class="l">Бумага</th>
+              <th data-sort="val">Оборот</th>
+              <th data-sort="x" title="Оборот к среднему за 15 дней с поправкой на время дня">×норма</th>
+              <th data-sort="d15" class="hide-s" title="Сколько денег прошло за последние 15 минут">15 мин</th>
+              <th data-sort="chg">Цена</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <button id="more" class="more" type="button">Показать все</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ВСПЛЕСКИ -->
+  <section id="view-spikes" class="view" hidden aria-labelledby="tab-spikes">
+    <p class="lead">Бумаги, где объём торгов резко отклонился от обычного. «Сейчас» — последние 30 минут к среднему темпу за 15 дней, «за день» — весь оборот дня с поправкой на время.</p>
+    <div class="cols">
+      <div class="card">
+        <div class="card-head"><h2><span class="dot up"></span>Резкий рост объёма</h2><span class="hint" id="upHint"></span></div>
+        <ul class="spikes" id="spUp"></ul>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2><span class="dot dn"></span>Резкое падение объёма</h2><span class="hint">ликвидные бумаги, где торговля почти встала</span></div>
+        <ul class="spikes" id="spDn"></ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ФИЗ / ЮР -->
+  <section id="view-fizyur" class="view" hidden aria-labelledby="tab-fizyur">
+    <div class="notice" id="fyNote">Мосбиржа бесплатно раскрывает позиции физических и юридических лиц только по фьючерсам и с задержкой 14 дней. По самим акциям такой разбивки в открытом доступе нет.</div>
+    <div class="hero fy-hero">
+      <div class="stat"><div class="label">Физлица — нетто</div><div class="num" id="fyFiz">—</div><div class="hint" id="fyFizH"></div></div>
+      <div class="stat"><div class="label">Юрлица — нетто</div><div class="num" id="fyYur">—</div><div class="hint" id="fyYurH"></div></div>
+      <div class="stat"><div class="label">Данные на</div><div class="num" id="fyDate">—</div><div class="hint">последняя бесплатная дата</div></div>
+    </div>
+    <div class="seg" role="group" aria-label="Группа фьючерсов">
+      <button class="chip on" data-g="all" type="button">Все</button>
+      <button class="chip" data-g="fx" type="button">Валюта</button>
+      <button class="chip" data-g="share" type="button">Акции</button>
+      <button class="chip" data-g="index" type="button">Индексы</button>
+      <button class="chip" data-g="comm" type="button">Сырьё</button>
+    </div>
+    <div class="card">
+      <div class="table-wrap">
+        <table class="tbl fy" id="fyTbl">
+          <thead><tr><th class="l">Фьючерс</th><th>Физлица, лонг / шорт</th><th>Физлица нетто</th><th>Юрлица нетто</th><th title="Сколько счетов физлиц в лонге и шорте">Счета физлиц</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint pad">Деньги — позиции в контрактах × текущая стоимость контракта. Нажмите строку, чтобы увидеть, как менялись позиции за месяц.</p>
+    </div>
+  </section>
+</main>
+
+<dialog id="sheet" class="sheet">
+  <div class="sheet-in">
+    <div class="sheet-head">
+      <div><h2 id="shTitle">—</h2><p class="hint" id="shSub"></p></div>
+      <button class="chip" id="shClose" type="button" aria-label="Закрыть">✕</button>
+    </div>
+    <div id="shBody"></div>
+  </div>
+</dialog>
+
+<footer class="wrap foot">
+  Данные: Мосбиржа (ISS), бесплатный доступ — с задержкой около 15 минут. Не является индивидуальной инвестиционной рекомендацией.
+</footer>
+<script src="app.js"></script>
+</body>
+</html>
