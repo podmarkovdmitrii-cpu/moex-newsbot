@@ -517,6 +517,8 @@ def ofz():
             log("ОФЗ сделки", b["SECID"], e)
             continue
         for x in rows:
+            if x.get("BOARDID") not in (None, "TQOB"):
+                continue  # только основной режим: сделки РЕПО и переговорные (PSOB и др.) раздували «продажи» в разы больше оборота
             v = x.get("VALUE") or 0
             if x.get("BUYSELL") == "B":
                 a["vb"] += v
