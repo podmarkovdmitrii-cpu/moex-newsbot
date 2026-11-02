@@ -10,7 +10,9 @@
    и продолжает ли понедельник движение выходных.
 
 Честность: всё, что используется для отбора события дня D, известно к закрытию дня D; результат меряется с D+1.
-Обучение/проверка: правило фиксируется на 2018–2022, результат отдельно показывается на 2023–2026.
+История — с 2008 г. (свечи Мосбиржи; новости бота — с 2018 г., поэтому условие «без новостей» проверяется только с 2018 г.).
+Описательная таблица: 2008–2022 против 2023–2026. Решение «давать сигнал или нет» принимает research/walkforward.py — обучение
+на разных промежутках (расширяющееся окно, скользящие 3 и 5 лет) с проверкой на следующем году.
 Независимая проверка — research/verify.py (другой код, перестановочный тест, стабильность по годам).
 """
 import datetime as dt
@@ -27,7 +29,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "anomaly"))
 sys.path.insert(0, os.path.join(HERE, "..", "channel"))
 OUT = os.environ.get("RESEARCH_DIR") or os.path.join(HERE, "out")
-START = os.environ.get("RESEARCH_START", "2018-01-01")
+START = os.environ.get("RESEARCH_START", "2008-01-01")
+NEWS_FROM = os.environ.get("RESEARCH_NEWS_FROM", "2018-01-01")  # история новостей бота начинается с 2018 г.; раньше «без новостей» не определить
+HIST = os.environ.get("RESEARCH_HIST") or os.path.join(os.path.dirname(OUT), "research-hist")
 SPLIT = os.environ.get("RESEARCH_SPLIT", "2023-01-01")
 MSK = dt.timedelta(hours=3)
 
@@ -62,7 +66,68 @@ def load_panel(tickers=None):
             tickers = [f[:-8] for f in os.listdir(os.path.join(T.DATA, "d")) if f.endswith(".json.gz")]
     tickers = [t for t in tickers if t != "IMOEX"]
     H = T.load_series("d", tickers + ["IMOEX"], START, index=("IMOEX",))
+    H = backfill(H, T)
     return build_panel(H)
+
+
+def _adjust(rows):
+    """Склейка истории: дробления/консолидации акций (скачок цены в 3,5+ раза за ночь) — приводим прошлое к текущему масштабу."""
+    rows = [list(r) for r in rows]
+    for i in range(len(rows) - 1, 0, -1):
+        p, b = rows[i - 1], rows[i]
+        if not (p[4] and b[1] and p[4] > 0 and b[1] > 0):
+            continue
+        r = b[1] / p[4]
+        if r > 3.5 or r < 1 / 3.5:
+            for q in rows[:i]:
+                for k in (1, 2, 3, 4):
+                    q[k] *= r
+    return rows
+
+
+def backfill(H, T):
+    """Кэш свечей модели аномалий начинается с 2012 г. Для исследования докачиваем с Мосбиржи историю с START (по умолчанию 2008)
+    и храним её отдельно (кэш research-hist), чтобы не менять данные обучения моделей."""
+    import concurrent.futures as cf
+    os.makedirs(HIST, exist_ok=True)
+    lim = (dt.date.fromisoformat(START) + dt.timedelta(days=45)).isoformat()
+
+    def one(t):
+        rows = H.get(t) or []
+        if rows and rows[0][0][:10] <= lim:
+            return t, rows, 0
+        p = os.path.join(HIST, t + ".json.gz")
+        pre, got = None, 0
+        if os.path.exists(p):
+            with gzip.open(p, "rt") as f:
+                pre = json.load(f)
+        else:
+            try:
+                full = T.fetch("d", t, START, index=t == "IMOEX")
+            except Exception as e:  # noqa: BLE001
+                log("история до кэша недоступна:", t, e)
+                return t, rows, 0
+            first = rows[0][0][:10] if rows else "9999"
+            pre = [r for r in full if r[0][:10] < first]
+            if not rows:
+                pre = full
+            with gzip.open(p, "wt") as f:
+                json.dump(pre, f, separators=(",", ":"))
+            got = 1
+        if not pre:
+            return t, rows, got
+        first = rows[0][0][:10] if rows else "9999"
+        return t, _adjust([r for r in pre if r[0][:10] < first] + rows), got
+    out, n_new = {}, 0
+    with cf.ThreadPoolExecutor(4) as ex:
+        for k, (t, rows, got) in enumerate(ex.map(one, list(H.keys()))):
+            out[t] = rows
+            n_new += got
+            if k % 50 == 0:
+                log("история с", START, ":", k, "/", len(H))
+    early = sum(1 for r in out.values() if r and r[0][0][:10] <= lim)
+    log("история: докачано", n_new, "бумаг; с", START, "есть данные у", early, "из", len(out))
+    return out
 
 
 def build_panel(H):
@@ -71,8 +136,8 @@ def build_panel(H):
         df = pd.DataFrame([r[:6] for r in rows], columns=["d", "o", "h", "l", "c", "v"])
         df["d"] = pd.to_datetime(df["d"].str[:10])
         df = df[df["d"] >= pd.Timestamp(START)].drop_duplicates("d").set_index("d").sort_index()
-        wd = df[df.index.weekday < 5]
-        we = df[df.index.weekday >= 5]
+        wd = df[df.index.day_of_week < 5]
+        we = df[df.index.day_of_week >= 5]
         if len(wd) > 60:
             wk[t] = wd
         if len(we):
@@ -148,6 +213,7 @@ def crowd_events(P, news, divs, prm=CROWD):
     vx = V.rolling(w).mean() / med20
     liq = V.rolling(20, min_periods=15).median().shift(1)
     rows = []
+    j_news = int(np.searchsorted(days.values, np.datetime64(NEWS_FROM)))
     for t in C.columns:
         e, x, lq = ex[t].values, vx[t].values, liq[t].values
         nd, dv = news.get(t, set()), divs.get(t, set())
@@ -157,7 +223,7 @@ def crowd_events(P, news, divs, prm=CROWD):
                 continue
             if any(k in dv for k in range(j - w + 1, j + 1)):
                 continue
-            n_news = sum(1 for k in range(j - w + 1, j + 1) if k in nd)
+            n_news = sum(1 for k in range(j - w + 1, j + 1) if k in nd) if j - w + 1 >= j_news else -1  # −1: новостей за те годы нет в истории
             last = j
             rows.append((t, j, days[j], 1 if e[j] > 0 else -1, float(e[j]), float(x[j]), n_news))
     return pd.DataFrame(rows, columns=["t", "j", "d", "dir", "ex", "vx", "news"])
@@ -203,7 +269,8 @@ def summarize(ev, by_dir=True):
 def crowd_study(P, news, divs):
     ev = forward(P, crowd_events(P, news, divs))
     log("толпа: событий", len(ev), "без новостей", int((ev.news == 0).sum()))
-    res = {"params": CROWD, "no_news": summarize(ev[ev.news == 0]), "with_news": summarize(ev[ev.news > 0])}
+    res = {"params": CROWD, "no_news": summarize(ev[ev.news == 0]), "with_news": summarize(ev[ev.news > 0]),
+           "any_news": summarize(ev), "news_from": NEWS_FROM}
     # сила движения: 6–10% и 10%+
     for lo, hi, name in ((0.06, 0.10, "6-10"), (0.10, 9, "10+")):
         e = ev[(ev.news == 0) & (ev.ex.abs() >= lo) & (ev.ex.abs() < hi)]
@@ -282,12 +349,12 @@ def weekend_rows(wend, liq_map):
         if t == "IMOEX":
             continue
         d = df.index
-        we = df[d.weekday >= 5]
+        we = df[d.day_of_week >= 5]
         if not len(we):
             continue
         for sat in sorted({(x - pd.Timedelta(days=x.weekday() - 5)).normalize() for x in we.index}):
-            fri = df[(d < sat) & (d.weekday < 5)]
-            mon = df[(d > sat + pd.Timedelta(days=1)) & (d.weekday < 5)]
+            fri = df[(d < sat) & (d.day_of_week < 5)]
+            mon = df[(d > sat + pd.Timedelta(days=1)) & (d.day_of_week < 5)]
             w = we[(we.index >= sat) & (we.index <= sat + pd.Timedelta(days=1))]
             if not len(fri) or not len(mon) or not len(w):
                 continue

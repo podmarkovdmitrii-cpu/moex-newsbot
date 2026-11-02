@@ -38,12 +38,13 @@ def years_same_sign(d, x, sign):
     return (float(((by > 0) == (sign > 0)).mean()) if len(by) else 0.0), {int(k): round(float(v), 4) for k, v in by.items()}
 
 
-def crowd_recount(P, news, divs, prm):
+def crowd_recount(P, news, divs, prm, news_from="2018-01-01", hs=(3, 5, 10)):
     """Независимый пересчёт событий толпы: цикл по бумагам, своё окно и свои нормы оборота."""
     C, V, ix = P["c"], P["v"], P["ix"].values
     days = C.index
     w = prm["win"]
     out = []
+    j_news = int(np.searchsorted(days.values, np.datetime64(news_from)))
     for t in C.columns:
         c, v = C[t].values, V[t].values
         nd, dv = news.get(t, set()), divs.get(t, set())
@@ -66,9 +67,12 @@ def crowd_recount(P, news, divs, prm):
             if any(k in dv for k in range(j - w + 1, j + 1)):
                 continue
             last = j
-            k5 = j + 5
-            f5 = (c[k5] / c[j] - 1) - (ix[k5] / ix[j] - 1) if k5 < len(days) and c[k5] == c[k5] else np.nan
-            out.append(dict(t=t, j=j, d=days[j], dir=1 if e > 0 else -1, news=sum(1 for k in range(j - w + 1, j + 1) if k in nd), f5=f5))
+            row = dict(t=t, j=j, d=days[j], dir=1 if e > 0 else -1,
+                       news=sum(1 for k in range(j - w + 1, j + 1) if k in nd) if j - w + 1 >= j_news else -1)
+            for h in hs:
+                kh = j + h
+                row[f"f{h}"] = (c[kh] / c[j] - 1) - (ix[kh] / ix[j] - 1) if kh < len(days) and c[kh] == c[kh] else np.nan
+            out.append(row)
     return pd.DataFrame(out)
 
 
@@ -92,14 +96,14 @@ def lookahead_audit(P, ev, prm, k=150):
     return ok / len(smp)
 
 
-def permutation(P, ev, side, n_perm=300):
+def permutation(P, ev, side, n_perm=300, h=5, nw="no"):
     """p-value: средний результат событий против того же числа случайных дней тех же бумаг (без условия события)."""
     C, ix = P["c"].values, P["ix"].values
     col = {t: i for i, t in enumerate(P["c"].columns)}
-    e = ev[(ev.dir == side) & (ev.news == 0)].dropna(subset=["f5"])
+    e = ev[(ev.dir == side) & ((ev.news == 0) if nw == "no" else (ev.news >= -1))].dropna(subset=[f"f{h}"])
     if len(e) < 15:
         return None, None
-    real = float((e.f5 * side).mean())
+    real = float((e[f"f{h}"] * side).mean())
     tick = [col[t] for t in e.t]
     n = len(P["c"])
     vals = []
@@ -107,9 +111,9 @@ def permutation(P, ev, side, n_perm=300):
         acc = []
         for i in tick:
             for _try in range(6):
-                j = RNG.randrange(30, n - 6)
-                if C[j, i] == C[j, i] and C[j + 5, i] == C[j + 5, i]:
-                    acc.append(((C[j + 5, i] / C[j, i] - 1) - (ix[j + 5] / ix[j] - 1)) * side)
+                j = RNG.randrange(30, n - h - 1)
+                if C[j, i] == C[j, i] and C[j + h, i] == C[j + h, i]:
+                    acc.append(((C[j + h, i] / C[j, i] - 1) - (ix[j + h] / ix[j] - 1)) * side)
                     break
         vals.append(np.mean(acc) if acc else 0.0)
     vals = np.array(vals)
@@ -189,6 +193,94 @@ def verify_spill(study, n_perm=300):
     return res
 
 
+def stat(x):
+    x = np.asarray(x, dtype=float)
+    x = x[x == x]
+    if len(x) < 2:
+        return dict(n=int(len(x)))
+    sd = x.std(ddof=1)
+    return dict(n=int(len(x)), mean=round(float(x.mean()), 5), hit=round(float((x > 0).mean()), 3), t=round(float(x.mean() / (sd / np.sqrt(len(x)))) if sd > 0 else 0.0, 2))
+
+
+def verify_crowd_wf(P, news, divs, wf, cost):
+    """Проверка живого правила «толпы», выбранного обучением на разных промежутках (walkforward.py)."""
+    out = {}
+    for side, name in ((1, "up"), (-1, "down")):
+        dec = ((wf.get("crowd") or {}).get(name) or {}).get("decision") or {}
+        if not dec.get("on"):
+            out[name] = dict(verified=False, reasons=[dec.get("why") or "правило не выбрано"], on=False)
+            log(f"толпа {name} (обучение 2008+): сигналов нет — {dec.get('why')}")
+            continue
+        prm, h, nw, mode = dec["params"], int(dec["h"]), dec["news"], dec["mode"]
+        ev = crowd_recount(P, news, divs, prm, hs=(h,))
+        e = ev[(ev.dir == side) & ((ev.news == 0) if nw == "no" else True)].dropna(subset=[f"f{h}"]) if len(ev) else ev
+        sg = 1 if mode == "continue" else -1
+        x = (e[f"f{h}"] * side * sg - cost).values if len(e) else np.array([])
+        lo = dec["train"][0]
+        mine = stat(x[(e.d.dt.year >= lo).values]) if len(e) else dict(n=0)
+        theirs = dec.get("train_stat") or {}
+        consistent = mine.get("n", 0) > 0 and abs(mine.get("mean", 0) - theirs.get("mean", 0)) <= max(0.003, abs(theirs.get("mean", 0)) * 0.35) \
+            and abs(mine["n"] - theirs.get("n", 0)) <= max(5, 0.15 * theirs.get("n", 1))
+        la = lookahead_audit(P, ev, prm)
+        real, p = permutation(P, ev, side, h=h, nw=nw)
+        frac, by_year = years_same_sign(e.d, x, 1) if len(e) else (0.0, {})
+        reasons = []
+        if not consistent:
+            reasons.append(f"пересчёт не совпал с обучением ({mine.get('mean')} при n={mine.get('n')} против {theirs.get('mean')} при n={theirs.get('n')})")
+        if p is None or p > 0.05:
+            reasons.append(f"не отличается от случайных дней (p={p})")
+        if frac < 0.6:
+            reasons.append(f"чистый результат положителен лишь в {frac:.0%} лет")
+        if la < 0.97:
+            reasons.append(f"событие находится без будущих данных лишь в {la:.0%} случаев")
+        out[name] = dict(on=True, verified=not reasons, reasons=reasons, perm_p=p, years_same_sign=round(frac, 2), by_year=by_year, lookahead_ok=round(la, 3),
+                         recount=mine, gross=stat(e[f"f{h}"] * side) if len(e) else dict(n=0))
+        log(f"толпа {name} (обучение 2008+): {mode}, {prm}, {h} дн., новости={nw} → {'ПОДТВЕРЖДЕНО' if not reasons else 'не подтверждено: ' + '; '.join(reasons)}")
+    return out
+
+
+def verify_spill_wf(wf, n_perm=500):
+    """Проверка живого правила по смежным бумагам: выбранные соседи против случайных соседей в те же дни (перестановка)."""
+    out = {}
+    for dn in ("up", "down"):
+        dec = ((wf.get("spill") or {}).get(dn) or {}).get("decision") or {}
+        p = os.path.join(OUT, f"wf_spill_rows_{dn}.csv.gz")
+        if not dec.get("on") or not os.path.exists(p):
+            out[dn] = dict(on=False, verified=False, reasons=[dec.get("why") or "правило не выбрано"])
+            log(f"смежные {dn} (обучение 2008+): сигналов нет — {dec.get('why')}")
+            continue
+        g = pd.read_csv(p, parse_dates=["d"]).dropna(subset=["f"])
+        scope = dec["scope"]
+        if scope == "same":
+            sel = g.s1 == g.s2
+        elif scope == "pairs":
+            sel = (g.s1 + ">" + g.s2).isin({">".join(x) for x in dec["pairs"]})
+        else:
+            sel = pd.Series(True, index=g.index)
+        real_u = g[sel].groupby(["d", "lead"]).f.mean()
+        real = float(real_u.mean())
+        # нуль: в те же дни лидера — столько же случайных соседей из всех отставших бумаг
+        ev = g.groupby(["d", "lead"])
+        sizes = g[sel].groupby(["d", "lead"]).size()
+        pools = {k: v.f.values for k, v in ev}
+        rng = np.random.default_rng(20261102)
+        null = []
+        for _ in range(n_perm):
+            acc = [rng.choice(pools[k], size=min(int(nk), len(pools[k])), replace=False).mean() for k, nk in sizes.items()]
+            null.append(np.mean(acc))
+        pv = float((np.array(null) >= real).mean())
+        frac, by_year = years_same_sign(real_u.index.get_level_values(0), real_u.values - dec.get("cost", 0.003), 1)
+        reasons = []
+        if pv > 0.05:
+            reasons.append(f"выбранные соседи не лучше случайных (p={pv:.2f})")
+        if frac < 0.6:
+            reasons.append(f"чистый результат положителен лишь в {frac:.0%} лет")
+        out[dn] = dict(on=True, verified=not reasons, reasons=reasons, perm_p=round(pv, 3), years_same_sign=round(frac, 2), by_year=by_year,
+                       gross=stat(real_u.values), n_events=int(len(real_u)))
+        log(f"смежные {dn} (обучение 2008+): {scope}, {dec['params']}, {dec['h']} дн. → {'ПОДТВЕРЖДЕНО' if not reasons else 'не подтверждено: ' + '; '.join(reasons)}")
+    return out
+
+
 def verify_weekend(study, n_boot=2000):
     p = os.path.join(OUT, "weekend_rows.csv")
     if not os.path.exists(p):
@@ -217,29 +309,59 @@ def verify_weekend(study, n_boot=2000):
 def main():
     import study as S
     st = json.load(open(os.path.join(OUT, "study.json")))
+    try:
+        wf = json.load(open(os.path.join(OUT, "wf.json")))
+    except Exception:  # noqa: BLE001
+        wf = {}
+        log("wf.json нет — обучение на разных промежутках не запускалось")
+    cost = wf.get("cost", 0.003)
     P, wend = S.load_panel()
     news = S.load_news(P["c"].index)
     divs = S.ex_div(P["c"].index)
     v = {"built": dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat(timespec="minutes"), "coverage": {
-        "tickers_with_data": int(P["c"].shape[1]), "days": int(len(P["c"])),
+        "tickers_with_data": int(P["c"].shape[1]), "days": int(len(P["c"])), "from": str(P["c"].index[0].date()),
         "tickers_with_news": int(sum(1 for t in P["c"].columns if news.get(t))),
         "news_by_year": {int(y): int(n) for y, n in pd.Series([P["c"].index[j].year for s in news.values() for j in s if j < len(P["c"])]).value_counts().sort_index().items()}}}
     log("покрытие:", v["coverage"])
     v["crowd"] = verify_crowd(P, news, divs, st)
     v["spill"] = verify_spill(st)
+    v["crowd_wf"] = verify_crowd_wf(P, news, divs, wf, cost)
+    v["spill_wf"] = verify_spill_wf(wf)
     v["weekend"] = verify_weekend(st)
     json.dump(v, open(os.path.join(OUT, "verify.json"), "w"), ensure_ascii=False, default=float)
-    # итог для живого бота
-    live = {"built": v["built"], "range": st["range"],
-            "crowd": {k: dict(st["crowd"]["rules"][k], verified=v["crowd"][k]["verified"], reasons=v["crowd"][k]["reasons"], perm_p=v["crowd"][k]["perm_p"],
-                              all=st["crowd"]["no_news"][k]["all"], with_news=st["crowd"]["with_news"][k]["all"]) for k in ("up", "down")},
-            "crowd_params": st["crowd"]["params"],
-            "spill": [dict(r, verified=v["spill"].get(f"{r['s1']}>{r['s2']}>{r['dir']}", {}).get("verified", False)) for r in st["spill"]["pairs"] if r["ok"]],
-            "spill_params": st["spill"]["params"],
-            "weekend": dict(st["weekend"], verify=v["weekend"])}
+    # итог для живого бота: сигнал — только если правило выбрано обучением на разных промежутках И подтверждено здесь
+    crowd = {}
+    for k in ("up", "down"):
+        dec = ((wf.get("crowd") or {}).get(k) or {}).get("decision") or {}
+        cw = v["crowd_wf"].get(k) or {}
+        ok = bool(dec.get("on") and cw.get("verified"))
+        base = dict(all=st["crowd"]["no_news"][k]["all"], with_news=st["crowd"]["with_news"][k]["all"], any_news=st["crowd"]["any_news"][k]["all"])
+        if ok:
+            h = int(dec["h"])
+            crowd[k] = dict(base, mode=dec["mode"], verified=True, reasons=[], perm_p=cw.get("perm_p"), params=dec["params"], h=h, news=dec["news"],
+                            scheme=dec["scheme"], oos=dec["oos"], stat=cw.get("gross"), source="walkforward")
+        else:
+            reasons = (cw.get("reasons") or []) or [dec.get("why") or "не подтверждено"]
+            crowd[k] = dict(base, mode="neutral", verified=False, reasons=reasons, perm_p=cw.get("perm_p"), params=None, h=5, news="no",
+                            scheme=dec.get("scheme"), oos=dec.get("oos"), stat=base["all"]["f5"], source="walkforward")
+    spill_live = {}
+    for dn in ("up", "down"):
+        dec = ((wf.get("spill") or {}).get(dn) or {}).get("decision") or {}
+        sw = v["spill_wf"].get(dn) or {}
+        ok = bool(dec.get("on") and sw.get("verified"))
+        spill_live[dn] = dict(on=ok, scope=dec.get("scope"), params=dec.get("params"), h=dec.get("h"), pairs=dec.get("pairs"), top_peers=dec.get("top_peers"),
+                              oos=dec.get("oos"), stat=sw.get("gross"), scheme=dec.get("scheme"),
+                              reasons=[] if ok else ((sw.get("reasons") or []) or [dec.get("why") or "не подтверждено"]))
+    live = {"built": v["built"], "range": st["range"], "crowd": crowd,
+            "crowd_params": next((crowd[k]["params"] for k in ("up", "down") if crowd[k]["params"]), st["crowd"]["params"]),
+            "spill": [dict(r, verified=False) for r in st["spill"]["pairs"] if r["ok"]],
+            "spill_params": st["spill"]["params"], "spill_live": spill_live,
+            "weekend": dict(st["weekend"], verify=v["weekend"]),
+            "wf": {"cost": cost, "schemes": wf.get("schemes"), "first_test": wf.get("first_test")}}
     json.dump(live, open(os.path.join(OUT, "stats.json"), "w"), ensure_ascii=False, default=float)
-    n_ok = sum(1 for k in ("up", "down") if live["crowd"][k]["verified"]) + sum(1 for r in live["spill"] if r["verified"])
-    log("ИТОГ: подтверждённых правил", n_ok, "— живой бот использует только их; остальные идут в посты как справка без сигналов")
+    n_ok = sum(1 for k in ("up", "down") if crowd[k]["verified"]) + sum(1 for k in ("up", "down") if spill_live[k]["on"])
+    log("ИТОГ: подтверждённых живых правил", n_ok, "(толпа:", ", ".join(f"{k}={'да' if crowd[k]['verified'] else 'нет'}" for k in crowd),
+        "| смежные:", ", ".join(f"{k}={'давать' if spill_live[k]['on'] else 'не давать'}" for k in spill_live), ")")
 
 
 if __name__ == "__main__":
