@@ -38,12 +38,15 @@ def years_same_sign(d, x, sign):
     return (float(((by > 0) == (sign > 0)).mean()) if len(by) else 0.0), {int(k): round(float(v), 4) for k, v in by.items()}
 
 
-def crowd_recount(P, news, divs, prm, news_from="2018-01-01", hs=(3, 5, 10)):
+def crowd_recount(P, news, divs, prm, news_from=None, hs=(3, 5, 10)):
     """Независимый пересчёт событий толпы: цикл по бумагам, своё окно и свои нормы оборота."""
     C, V, ix = P["c"], P["v"], P["ix"].values
     days = C.index
     w = prm["win"]
     out = []
+    if news_from is None:
+        import study
+        news_from = study.NEWS_FROM
     j_news = int(np.searchsorted(days.values, np.datetime64(news_from)))
     for t in C.columns:
         c, v = C[t].values, V[t].values

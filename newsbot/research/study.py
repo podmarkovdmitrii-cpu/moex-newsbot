@@ -10,7 +10,8 @@
    и продолжает ли понедельник движение выходных.
 
 Честность: всё, что используется для отбора события дня D, известно к закрытию дня D; результат меряется с D+1.
-История — с 2008 г. (свечи Мосбиржи; новости бота — с 2018 г., поэтому условие «без новостей» проверяется только с 2018 г.).
+История — с 2008 г.: свечи Мосбиржи; новости — архив раздела «Экономика» Интерфакса с 2008 г. (research/news_hist.py) и журнал бота
+с 2018 г. Условие «без новостей» проверяется с месяца, когда архив достаточно полный.
 Описательная таблица: 2008–2022 против 2023–2026. Решение «давать сигнал или нет» принимает research/walkforward.py — обучение
 на разных промежутках (расширяющееся окно, скользящие 3 и 5 лет) с проверкой на следующем году.
 Независимая проверка — research/verify.py (другой код, перестановочный тест, стабильность по годам).
@@ -30,7 +31,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "anomaly"))
 sys.path.insert(0, os.path.join(HERE, "..", "channel"))
 OUT = os.environ.get("RESEARCH_DIR") or os.path.join(HERE, "out")
 START = os.environ.get("RESEARCH_START", "2008-01-01")
-NEWS_FROM = os.environ.get("RESEARCH_NEWS_FROM", "2018-01-01")  # история новостей бота начинается с 2018 г.; раньше «без новостей» не определить
+NEWS_FROM = os.environ.get("RESEARCH_NEWS_FROM", "2018-01-01")  # журнал бота — с 2018 г.; с архивом Интерфакса (news_hist.py) — с 2008 г.
 HIST = os.environ.get("RESEARCH_HIST") or os.path.join(os.path.dirname(OUT), "research-hist")
 SPLIT = os.environ.get("RESEARCH_SPLIT", "2023-01-01")
 MSK = dt.timedelta(hours=3)
@@ -165,7 +166,15 @@ def build_panel(H):
 def load_news(days):
     """События новостей по бумагам → торговый день: до 18:45 МСК — этот день, позже — следующий. Возвращает {тикер: set(день)}."""
     import train as T
+    global NEWS_FROM
     ev = T.events_all()
+    ifx = ifx_events()
+    if ifx:
+        ev = ev + ifx
+        nf = ifx_from()
+        if nf and "RESEARCH_NEWS_FROM" not in os.environ:
+            NEWS_FROM = nf
+        log("новости Интерфакса (архив с 2008 г.):", len(ifx), "событий о компаниях; условие «без новостей» проверяется с", NEWS_FROM)
     dd = days.values.astype("datetime64[D]")
     out = {}
     for e in ev:
@@ -182,6 +191,25 @@ def load_news(days):
         out.setdefault(tk, set()).add(j)
     log("новостей привязано к дням:", sum(len(v) for v in out.values()), "по", len(out), "бумагам")
     return out
+
+
+def ifx_events():
+    """События из архива Интерфакса (research/news_hist.py + ifx_events.js), если они скачаны."""
+    p = os.path.join(HIST, "ifx_events.json.gz")
+    if not os.path.exists(p):
+        return []
+    with gzip.open(p, "rt") as f:
+        return [dict(tk=tk, ts=ts, ty=ty, s=s_, rum=rum, off=off, src="ifx") for tk, ts, ty, s_, rum, off in json.load(f)]
+
+
+def ifx_from(min_month=250):
+    """С какого месяца архив Интерфакса достаточно полный (≥ min_month заголовков в месяц), чтобы судить «новостей не было»."""
+    try:
+        cover = json.load(open(os.path.join(HIST, "ifx_meta.json")))
+    except Exception:  # noqa: BLE001
+        return None
+    ok = sorted(k for k, v in cover.items() if v >= min_month)
+    return ok[0] + "-01" if ok else None
 
 
 def ex_div(days):
