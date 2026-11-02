@@ -1,4 +1,4 @@
-name: Исследования на истории (толпа, смежные бумаги, выходные) и независимая проверка
+name: Исследования на истории 2008–2026 (толпа, смежные бумаги, выходные), обучение на разных промежутках и независимая проверка
 
 on:
   push:
@@ -29,6 +29,12 @@ jobs:
           path: anomaly-data
           key: anomaly-data-${{ github.run_id }}
           restore-keys: anomaly-data-
+      - name: История свечей до 2012 г. (докачка с Мосбиржи для исследований)
+        uses: actions/cache/restore@v4
+        with:
+          path: research-hist
+          key: research-hist-${{ github.run_id }}
+          restore-keys: research-hist-
       - name: Журнал новостей бота
         uses: actions/cache/restore@v4
         with:
@@ -41,20 +47,33 @@ jobs:
           NEWS_STATE: ${{ github.workspace }}/newsbot-state
           CHANNEL_STATE: ${{ github.workspace }}/tmp-state
           RESEARCH_DIR: ${{ github.workspace }}/research-stats
+          RESEARCH_HIST: ${{ github.workspace }}/research-hist
+          PYTHONWARNINGS: ignore
         run: python newsbot/research/study.py
+      - name: Сохранить докачанную историю
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: research-hist
+          key: research-hist-${{ github.run_id }}
+      - name: Обучение на разных промежутках и проверка на следующих годах (walkforward.py)
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          RESEARCH_DIR: ${{ github.workspace }}/research-stats
+          RESEARCH_HIST: ${{ github.workspace }}/research-hist
+          PYTHONWARNINGS: ignore
+        run: python newsbot/research/walkforward.py
       - name: Агент-проверяющий (verify.py)
         env:
           ANOM_DATA: ${{ github.workspace }}/anomaly-data
           NEWS_STATE: ${{ github.workspace }}/newsbot-state
           CHANNEL_STATE: ${{ github.workspace }}/tmp-state
           RESEARCH_DIR: ${{ github.workspace }}/research-stats
+          RESEARCH_HIST: ${{ github.workspace }}/research-hist
+          PYTHONWARNINGS: ignore
         run: python newsbot/research/verify.py
-      - name: Сохранить результаты для бота
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: research-stats
-          key: research-stats-${{ github.run_id }}
       - name: Отчёт (файлы для скачивания)
         if: always()
         uses: actions/upload-artifact@v4
@@ -64,6 +83,14 @@ jobs:
             research-stats/study.json
             research-stats/verify.json
             research-stats/stats.json
+            research-stats/wf.json
             research-stats/crowd_events.csv
             research-stats/weekend_rows.csv
           retention-days: 30
+      - name: Оставить для бота только итоговые файлы
+        run: rm -f research-stats/*.csv research-stats/*.csv.gz
+      - name: Сохранить результаты для бота
+        uses: actions/cache/save@v4
+        with:
+          path: research-stats
+          key: research-stats-${{ github.run_id }}
