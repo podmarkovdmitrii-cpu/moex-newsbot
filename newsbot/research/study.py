@@ -85,8 +85,20 @@ def _adjust(rows):
     return rows
 
 
+def fetch_market(t, T):
+    """Свечи по рынку акций без привязки к режиму: у многих бумаг история TQBR начинается только в 2010–2014 гг.
+    (раньше основным был режим EQBR/EQNE), а рыночные свечи Мосбиржи идут с 2008 г."""
+    if t == "IMOEX":
+        return T.fetch("d", t, START, index=True)
+    from common import candles
+    days = (dt.date.today() - dt.date.fromisoformat(START)).days + 1
+    B = candles(f"engines/stock/markets/shares/securities/{t}/candles.json", days, 24)
+    return [[b["t"], b["o"], b["h"], b["l"], b["c"], b["v"]] for b in B]
+
+
 def backfill(H, T):
-    """Кэш свечей модели аномалий начинается с 2012 г. Для исследования докачиваем с Мосбиржи историю с START (по умолчанию 2008)
+    """Кэш свечей модели аномалий (режим TQBR) у многих бумаг начинается в 2012–2014 гг. Для исследования докачиваем с Мосбиржи
+    рыночные свечи с START (по умолчанию 2008)
     и храним её отдельно (кэш research-hist), чтобы не менять данные обучения моделей."""
     import concurrent.futures as cf
     os.makedirs(HIST, exist_ok=True)
@@ -96,14 +108,14 @@ def backfill(H, T):
         rows = H.get(t) or []
         if rows and rows[0][0][:10] <= lim:
             return t, rows, 0
-        p = os.path.join(HIST, t + ".json.gz")
+        p = os.path.join(HIST, t + ".mkt.json.gz")
         pre, got = None, 0
         if os.path.exists(p):
             with gzip.open(p, "rt") as f:
                 pre = json.load(f)
         else:
             try:
-                full = T.fetch("d", t, START, index=t == "IMOEX")
+                full = fetch_market(t, T)
             except Exception as e:  # noqa: BLE001
                 log("история до кэша недоступна:", t, e)
                 return t, rows, 0
@@ -405,6 +417,8 @@ def main():
     P, wend = load_panel()
     days = P["c"].index
     log("панель:", P["c"].shape[1], "бумаг,", len(days), "дней", days[0].date(), "—", days[-1].date())
+    cnt = P["c"].notna().groupby(days.year).any().sum(axis=1)
+    log("бумаг с торгами по годам:", ", ".join(f"{y}: {int(n)}" for y, n in cnt.items()))
     news = load_news(days)
     divs = ex_div(days)
     res = {"built": dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat(timespec="minutes"), "range": [str(days[0].date()), str(days[-1].date())], "split": SPLIT,
