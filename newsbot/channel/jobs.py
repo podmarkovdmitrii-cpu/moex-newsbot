@@ -21,6 +21,8 @@ import statistics as st
 import sys
 import time
 
+import numpy as np
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (plural, DISCLAIMER, MSK as MSKTZ, BG, BLUE, DEMO, DN, FG, GRID, NEWS_STATE, ORANGE, OUT, UP, VIOLET, Publisher, bln, candle_chart, currency_candles, ema, esc, fmt, hbars,  # noqa: E402
                     http_get, index_candles, iss, load_json, log, now_msk, pc, plt, save_json, share_candles, style, table,
@@ -35,7 +37,8 @@ FAM_RU = {"mom": "импульс", "pull": "откат к EMA 20", "sbrk": "шо
 SEC_RU = {"bank": "банки", "oil": "нефтегаз", "metal": "металлурги", "retail": "ритейл", "tech": "IT и связь", "power": "энергетика", "chem": "химия", "devel": "девелоперы", "transport": "транспорт"}
 SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "weekly", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
          "45 10 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening",
-         "20 3 * * 1-5": "trader_prep", "20 4 * * 1-5": "trader_open", "20 7 * * 1-5": "trader_open", "45 16 * * 5": "trader_week"}
+         "20 3 * * 1-5": "trader_prep", "20 4 * * 1-5": "trader_open", "20 7 * * 1-5": "trader_open", "45 16 * * 5": "trader_week",
+         "15 9 * * 1-5": "stock_review", "30 16 * * 0": "weekend_review"}
 PUB = Publisher()
 DISCLAIMER_TXT = DISCLAIMER
 
@@ -288,6 +291,26 @@ def flows():
             save_targets(tg_rows)
     if tg_rows:
         txt += ["", "🎯 <b>Куда могут дойти</b> <i>(оценка на 1–5 дней: потоки + новости + уровни графика)</i>"] + [target_line(r) for r in tg_rows]
+    # психология толпы и смежные бумаги (статистика — research/, проверка — research/verify.py)
+    try:
+        crowd = crowd_scan(md_all, avg, frac, news_cls)
+    except Exception as e:  # noqa: BLE001
+        log("толпа", e)
+        crowd = []
+    if crowd:
+        txt += ["", "🧠 <b>Психология толпы</b> <i>(движение без новостей о компании)</i>"]
+        for x in crowd:
+            line, sig = crowd_line(x)
+            txt.append(line + (("\n" + sig) if sig else ""))
+    try:
+        spill = spill_scan(md_all, avg, frac, ix_day_change())
+    except Exception as e:  # noqa: BLE001
+        log("смежные", e)
+        spill = []
+    if spill:
+        txt += ["", "🔗 <b>Смежные бумаги</b> <i>(ещё не отреагировали на рывок лидера)</i>"]
+        for line, sig in spill:
+            txt.append(line + (("\n" + sig) if sig else ""))
     if vup or vdn:
         txt += ["", "📊 <b>Резкие изменения оборота</b> <i>(к среднему за 20 дней на это время)</i>"]
         shown = {x["t"] for x in buyers + sellers}
@@ -1337,7 +1360,10 @@ def morning():
         path = candle_chart(bars, os.path.join(OUT, f"m_{k}_{p['t']}.png"), ttl, lines=lines, emas=emas, note=note, mark="СИГНАЛ" if p["kind"] == "signal" else "ЖДЁМ")
         imgs.append((path, f"${p['t']}: {FAM_RU.get(p['fam'], '')}, {'лонг' if side > 0 else 'шорт'}"))
     import article
-    article.publish(PUB, title, B, "\n".join(tz), imgs, fname=f"plan_{today.isoformat()}")
+    # торговый план — обычным постом; отдельная ежедневная статья — обзор одной бумаги (режим stock_review)
+    with open(os.path.join(OUT, f"plan_{today.isoformat()}.html"), "w", encoding="utf-8") as f_:  # полная версия плана — только для проверки
+        f_.write(f"<meta charset='utf-8'><h1>{html.escape(title)}</h1>" + article.to_html(B))
+    PUB.post("\n".join(x for x in tz if x != "{LINK}"), imgs[:1])
     try:
         commod_plan()
     except Exception as e:  # noqa: BLE001
@@ -1519,6 +1545,13 @@ def evening():
             txt.append(f"• <b>${t}</b> — {r['p_y']:.0%} (ценовая {r.get('p_y_px') or 0:.0%}), {anom_dir_word(r)}" + (": " + "; ".join((r.get("why") or [])[:3]).replace("вчера", "сегодня") if r.get("why") else ""))
         base = sum((r.get("p_y") or 0) for r in nr.values()) / max(1, len(nr))
         txt.append(f"<i>В среднем по {len(nr)} бумагам — {pc(base, 1, False)}. " + anom_dir_note("daily_dir", "утром") + "</i>")
+    try:
+        nm = news_movers(md, now, (nxt or {}).get("rows"))
+    except Exception as e:  # noqa: BLE001
+        log("новости-движители", e)
+        nm = []
+    if nm:
+        txt += ["", "⚡️ <b>Новости, которые могут вызвать аномальное движение завтра</b> <i>(весомые новости дня, реакция цены на которые ещё не отыграна)</i>"] + nm
     if focus or notes:
         txt += ["", f"👀 <b>На что обратить внимание завтра, {tmr.strftime('%d.%m')} ({wd_ru(tmr)}):</b>"]
         for t, why in sorted(focus.items(), key=lambda x: -len(x[1]))[:10]:
@@ -2734,6 +2767,465 @@ def sec_of_cache():
     return _SEC
 
 
+# =============================================================================================
+# Исследования на истории (research/study.py + проверка research/verify.py): толпа, смежные бумаги, выходные
+# =============================================================================================
+RESEARCH_DIR = os.environ.get("RESEARCH_STATS") or os.path.join(HERE, "..", "research", "out")
+SEC_RU2 = dict(SEC_RU, consumer="потребсектор", industry="машиностроение")
+TYPE_RU = {"div_rec": "дивиденды", "div_cut": "отказ от дивидендов", "buyback": "обратный выкуп", "spo": "допэмиссия", "ipo": "IPO", "results_up": "рост прибыли/выручки",
+           "results_down": "снижение прибыли", "guidance_up": "прогноз повышен", "guidance_down": "прогноз понижен", "analyst_up": "аналитики повысили оценку",
+           "analyst_down": "аналитики понизили оценку", "sanctions": "санкции", "legal": "суды, штрафы, обыски", "tax": "налоги", "production_up": "рост добычи/продаж",
+           "production_down": "снижение добычи/продаж", "mna": "сделка M&A", "delist_redom": "делистинг/редомициляция", "management": "смена руководства",
+           "geo_escal": "эскалация", "geo_peace": "переговоры", "oil_up": "нефть дорожает", "oil_down": "нефть дешевеет", "tone": "тон новости"}
+_RS = None
+
+
+def research():
+    global _RS
+    if _RS is None:
+        _RS = {}
+        for p in (os.path.join(RESEARCH_DIR, "stats.json"),):
+            try:
+                _RS = json.load(open(p, encoding="utf-8"))
+                break
+            except Exception:  # noqa: BLE001
+                pass
+    return _RS
+
+
+_SEC_FULL = None
+
+
+def sector(t):
+    """Сектор бумаги по словарю бота (nlp.js SEC_OF) — шире, чем impact.json."""
+    global _SEC_FULL
+    if _SEC_FULL is None:
+        try:
+            src = open(os.path.join(HERE, "..", "nlp.js"), encoding="utf-8").read()
+            _SEC_FULL = json.loads(re.search(r"const SEC_OF = (\{.*?\});", src).group(1))
+        except Exception:  # noqa: BLE001
+            _SEC_FULL = dict(SEC_OF)
+    return _SEC_FULL.get(t) or SEC_OF.get(t)
+
+
+def company_news(t, since_ts, cls=None):
+    """Новости о компании (кластеры бота с этим тикером) после since_ts."""
+    out = []
+    for c in cls if cls is not None else all_clusters():
+        tk = (c.get("key") or "|").split("|")[0]
+        if tk == t and c.get("ts", 0) >= since_ts:
+            out.append(c)
+    return out
+
+
+def ix_day_change():
+    try:
+        js = iss("engines/stock/markets/index/securities/IMOEX.json", **{"iss.only": "marketdata", "marketdata.columns": "SECID,LASTCHANGEPRC"})
+        r = table(js, "marketdata")
+        return (r[0].get("LASTCHANGEPRC") or 0) / 100 if r else 0.0
+    except Exception as e:  # noqa: BLE001
+        log("индекс", e)
+        return 0.0
+
+
+def stat_txt(s, sign=1, h="5 дней"):
+    if not s or not s.get("n"):
+        return "истории мало"
+    return f"{pc(s['mean'] * sign, 1)} к индексу за {h}, в {round((s['hit'] if sign > 0 else 1 - s['hit']) * 100)}% случаев (выборка {s['n']})"
+
+
+def dir_txt(s, h="5 дней", base="к индексу"):
+    """Статистика «по направлению движения»: плюс — движение продолжалось, минус — откатывалось."""
+    if not s or not s.get("n"):
+        return "истории мало"
+    m = s["mean"]
+    if m >= 0:
+        return f"движение продолжалось — в среднем ещё на {pc(m, 1, False)} {base} за {h}, в {round(s['hit'] * 100)}% случаев (выборка {s['n']})"
+    return f"движение откатывалось — в среднем на {pc(-m, 1, False)} {base} за {h}, в {round((1 - s['hit']) * 100)}% случаев (выборка {s['n']})"
+
+
+def crowd_check(t, cls=None, frac=1.0):
+    """Психология толпы по бумаге сейчас: движение за 3 дня к индексу, оборот к норме, есть ли новости о компании."""
+    prm = research().get("crowd_params") or {"win": 3, "thr": 0.06, "vx": 2.0, "liq": 30e6}
+    w = prm["win"]
+    try:
+        B = share_candles(t, 60)
+        I = {b["t"]: b["c"] for b in index_candles("IMOEX", 60)}
+    except Exception as e:  # noqa: BLE001
+        log("толпа: свечи", t, e)
+        return None
+    B = [b for b in B if dt.date.fromisoformat(b["t"][:10]).weekday() < 5]
+    if len(B) < 28 or B[-1]["t"] not in I or B[-1 - w]["t"] not in I:
+        return None
+    e3 = (B[-1]["c"] / B[-1 - w]["c"] - 1) - (I[B[-1]["t"]] / I[B[-1 - w]["t"]] - 1)
+    today = B[-1]["t"][:10] == now_msk().date().isoformat()
+    vols = [b["v"] for b in B[-w:]]
+    if today and frac < 1:
+        vols[-1] = vols[-1] / max(frac, 0.1)
+    base = sorted(b["v"] for b in B[-w - 20:-w])
+    vx = (sum(vols) / w) / base[len(base) // 2] if base and base[len(base) // 2] else 0
+    since = dt.datetime.fromisoformat(B[-w]["t"][:10]).replace(hour=0, tzinfo=MSKTZ).timestamp() - 6 * 3600  # с вечера дня перед окном
+    news = [c for c in company_news(t, since, cls) if (c.get("key") or "").split("|")[-1] != "tone"]
+    return dict(t=t, e3=e3, vx=vx, news=len(news), dir=1 if e3 > 0 else -1, crowd=abs(e3) >= prm["thr"] and vx >= prm["vx"] and not news, last=B[-1]["c"])
+
+
+def crowd_line(x, with_signal=True):
+    """Текст про толпу и (если правило подтверждено проверкой) сигнал."""
+    R = (research().get("crowd") or {}).get("up" if x["dir"] > 0 else "down") or {}
+    s_all = R.get("all", {}).get("f5")
+    s_news = R.get("with_news", {}).get("f5")
+    head = f"🧠 <b>${x['t']}</b> {pc(x['e3'], 1)} к индексу за 3 дня, оборот {fmt(x['vx'], 1)}× к норме — <b>новостей о компании нет</b>"
+    if not R:
+        return head + ". Движение держится на настроении участников; статистика по таким случаям ещё считается.", None
+    mode, ok = R.get("mode"), R.get("verified")
+    if ok and mode == "continue":
+        why = f"Толпа сильнее здравого смысла: на истории после таких {'рывков' if x['dir'] > 0 else 'падений'} без новостей {dir_txt(s_all)}"
+        side = x["dir"]
+    elif ok and mode == "reverse":
+        why = f"На истории после таких {'рывков' if x['dir'] > 0 else 'падений'} без новостей {dir_txt(s_all)}"
+        side = -x["dir"]
+    else:
+        why = f"На истории после таких {'рывков' if x['dir'] > 0 else 'падений'} без новостей {dir_txt(s_all)}, но независимая проверка не подтвердила устойчивость — сигнала нет"
+        side = 0
+    cmp_ = f" Для сравнения, когда были новости: {dir_txt(s_news)}." if s_news and s_news.get("n") else ""
+    line = head + ". " + why + "." + cmp_
+    sig = None
+    if with_signal and side:
+        lt = level_target(x["t"], side, ndir=0, chg=0)
+        if lt:
+            sig = f"   🎯 {'ЛОНГ' if side > 0 else 'ШОРТ'} по {'импульсу' if side == x['dir'] else 'откату'}: цель <code>{fmt(lt['tgt'], dec_of(lt['last']))}</code> ({pc(lt['move'], 1)}), отмена за <code>{fmt(lt['stop'], dec_of(lt['last']))}</code>"
+    return line, sig
+
+
+def crowd_scan(md_all, avg, frac, cls, limit=10):
+    prm = research().get("crowd_params") or {"liq": 30e6}
+    seen = load_json("crowd_seen.json", {})
+    today = now_msk().date().isoformat()
+    seen = {k: v for k, v in seen.items() if v == today}
+    cand = [r for r in md_all if (avg.get(r["SECID"]) or 0) >= prm.get("liq", 30e6) and abs((r.get("LASTTOPREVPRICE") or 0) / 100) >= 0.015 and r["SECID"] not in seen]
+    cand = sorted(cand, key=lambda r: -abs(r.get("LASTTOPREVPRICE") or 0))[:limit]
+    out = []
+    for r in cand:
+        x = crowd_check(r["SECID"], cls, frac)
+        if x and x["crowd"]:
+            out.append(x)
+            seen[x["t"]] = today
+        time.sleep(0.05)
+    save_json("crowd_seen.json", seen)
+    return sorted(out, key=lambda x: -abs(x["e3"]))[:3]
+
+
+def spill_scan(md_all, avg, frac, ix_chg):
+    """Смежные бумаги: лидер сегодня резко обогнал индекс на большом обороте — какие соседи (тот же или смежный сектор) ещё не отреагировали."""
+    pairs = (research().get("spill") or [])
+    prm = research().get("spill_params") or {"thr": 0.04, "vx": 2.5, "liq": 50e6, "lag": 0.3}
+    if not pairs:
+        return []
+    by = {r["SECID"]: r for r in md_all}
+    chg = lambda t: (by[t].get("LASTTOPREVPRICE") or 0) / 100 - ix_chg if t in by else None
+    leaders = []
+    for r in md_all:
+        t, a = r["SECID"], avg.get(r["SECID"]) or 0
+        e = chg(t)
+        if a >= prm["liq"] and e is not None and abs(e) >= prm["thr"] and (r.get("VALTODAY") or 0) / (a * frac) >= prm["vx"] and sector(t):
+            leaders.append((t, e))
+    if len(leaders) > 6:  # всё растёт или падает — это рынок, а не цепочка
+        return []
+    out, used = [], set()
+    for t, e in sorted(leaders, key=lambda z: -abs(z[1]))[:3]:
+        d = 1 if e > 0 else -1
+        ps = sorted([p for p in pairs if p["s1"] == sector(t) and p["dir"] == d], key=lambda p: (not p.get("verified"), -(p["train"].get("mean") or 0)))
+        for p in ps[:2]:
+            prio = [q[0] for q in p.get("top_peers") or []]
+            peers = [u for u in by if u != t and u not in used and sector(u) == p["s2"] and (avg.get(u) or 0) >= prm["liq"] and chg(u) is not None and chg(u) * d < prm["lag"] * abs(e)]
+            peers.sort(key=lambda u: (prio.index(u) if u in prio else 99, -(avg.get(u) or 0)))
+            peers = peers[:3]
+            if not peers:
+                continue
+            used.update(peers)
+            s = p["train"]
+            same = p["s2"] == sector(t)
+            line = (f"🔗 За <b>${t}</b> ({pc(e, 1)} к индексу) обычно {'подтягиваются' if d > 0 else 'проседают'} {'бумаги того же сектора' if same else 'бумаги смежного сектора «' + SEC_RU2.get(p['s2'], p['s2']) + '»'}, "
+                    f"отставшие в день рывка: " + ", ".join(f"${u} ({pc(chg(u), 1)})" for u in peers) +
+                    f". На истории такие догоняли: {pc(s['mean'] * d, 1)} к индексу за 3 дня, в {round(s['hit'] * 100)}% случаев (выборка {s['n']})")
+            sig = None
+            if p.get("verified"):
+                lt = level_target(peers[0], d, ndir=0, chg=chg(peers[0]) or 0)
+                if lt:
+                    sig = f"   🎯 {'ЛОНГ' if d > 0 else 'ШОРТ'} ${peers[0]} вслед за ${t}: цель <code>{fmt(lt['tgt'], dec_of(lt['last']))}</code> ({pc(lt['move'], 1)}), отмена за <code>{fmt(lt['stop'], dec_of(lt['last']))}</code>, горизонт 1–3 дня"
+            else:
+                line += " — правило не прошло независимую проверку, это справка, не сигнал"
+            out.append((line + ".", sig))
+    return out
+
+
+def news_movers(md, now, nr=None):
+    """Вечер: новости дня о компаниях, которые могут дать аномальное движение завтра (реакция ещё не отыграна)."""
+    cls = all_clusters()
+    start = dt.datetime(now.year, now.month, now.day, 12, 0, tzinfo=MSKTZ).timestamp()
+    by = {r["SECID"]: r for r in md}
+    best = {}
+    for c in cls:
+        tk, ty = ((c.get("key") or "|") + "|").split("|")[:2]
+        w = c.get("wt") or {}
+        if tk in ("", "РЫНОК") or ty == "tone" or c.get("ts", 0) < start or w.get("pct", 0) < 0.75:
+            continue
+        raw = clean_tx(c["first"].get("tx"))
+        if DIGEST.search(raw) or NOISE.search(c["first"].get("tx") or ""):
+            continue
+        if tk not in best or w.get("W", 0) > (best[tk].get("wt") or {}).get("W", 0):
+            best[tk] = c
+    rows = []
+    for tk, c in best.items():
+        w = c["wt"]
+        ty = c["key"].split("|")[1]
+        d = 1 if ty in NEWS_POS else -1 if ty in NEWS_NEG else (w.get("dir") or 0)
+        ch = (by[tk].get("LASTTOPREVPRICE") or 0) / 100 if tk in by else None
+        E = w.get("E") or 0
+        late = dt.datetime.fromtimestamp(c["ts"], MSKTZ).strftime("%H:%M") >= "18:40"
+        priced = ch is not None and d and ch * d >= max(0.6 * E, 0.01)
+        if priced:
+            continue
+        p_an = (nr or {}).get(tk, {}).get("p_y")
+        rows.append((w.get("W", 0) + (0.01 if late else 0) + (p_an or 0) * 0.01, tk, ty, c, ch, late, p_an, d, E))
+    rows.sort(key=lambda r: -r[0])
+    out = []
+    for _, tk, ty, c, ch, late, p_an, d, E in rows[:6]:
+        tm = dt.datetime.fromtimestamp(c["ts"], MSKTZ).strftime("%H:%M")
+        why = ("вышла после основной сессии — рынок отреагирует завтра" if late else
+               f"сегодня цена {pc(ch, 1)}, реакция ещё не отыграна" if ch is not None else "реакции цены пока нет")
+        out.append(f"• <b>${tk}</b> — {TYPE_RU.get(ty, ty)}, {tm}: {esc(cut(clean_tx(c['first'].get('tx')), 110))} "
+                   f"<i>({why}; на истории такие новости давали {pc(E * (d or 1), 1)} к индексу за 5 дней" + (f"; модель аномалий: {p_an:.0%}" if p_an else "") + ")</i>")
+    return out
+
+
+# ---------------------------------------------------------------------------------------------
+# Торги выходного дня (сессии Мосбиржи; их же показывают Т-Инвестиции): итоги и прогноз на понедельник — воскресенье вечером
+# ---------------------------------------------------------------------------------------------
+def weekend_review():
+    now = now_msk()
+    sat = now.date() - dt.timedelta(days=(now.date().weekday() - 5) % 7)
+    md = liquid_shares(120)
+    avg = turnover_avg([r["SECID"] for r in md])
+    rows = []
+    for r in md:
+        t = r["SECID"]
+        try:
+            B = share_candles(t, 12)
+        except Exception as e:  # noqa: BLE001
+            log("выходные", t, e)
+            continue
+        fri = [b for b in B if dt.date.fromisoformat(b["t"][:10]) < sat and dt.date.fromisoformat(b["t"][:10]).weekday() < 5]
+        we = [b for b in B if sat <= dt.date.fromisoformat(b["t"][:10]) <= sat + dt.timedelta(days=1)]
+        if not fri or not we:
+            continue
+        F = fri[-1]["c"]
+        hi, lo, c = max(b["h"] for b in we), min(b["l"] for b in we), we[-1]["c"]
+        up, dn = hi / F - 1, lo / F - 1
+        rows.append(dict(t=t, F=F, c=c, ret=c / F - 1, wmax=up if abs(up) >= abs(dn) else dn, up=up, dn=dn, val=sum(b["v"] for b in we), avg=avg.get(t) or 0))
+        time.sleep(0.03)
+    if not rows:
+        log("выходные: торгов не было или данные недоступны")
+        return
+    rows = [x for x in rows if x["val"] >= 1e6]
+    tot = sum(x["val"] for x in rows)
+    W = research().get("weekend") or {}
+    ver = W.get("verify") or {}
+    cls = all_clusters()
+    since = dt.datetime(sat.year, sat.month, sat.day, tzinfo=MSKTZ).timestamp() - 5 * 3600
+    mon = sat + dt.timedelta(days=2)
+
+    def forecast(x):
+        b = next((b for b in W.get("buckets") or [] if b["lo"] < x["ret"] <= b["hi"]), None)
+        news = [c for c in company_news(x["t"], since, cls) if (c.get("key") or "").split("|")[-1] != "tone"]
+        parts = []
+        if news:
+            n0 = news[0]
+            parts.append(f"новость за выходные: {TYPE_RU.get(n0['key'].split('|')[1], '')} — рынок основной сессии может отыграть её сильнее")
+        if b and b.get("mon_dir", {}).get("n", 0) >= 30:
+            s = b["mon_dir"]
+            v_ = ver.get("strong" if abs(x["ret"]) >= 0.015 else "all", {})
+            parts.append(f"на истории после такого хода выходных в понедельник {dir_txt(s, 'день', 'от цены выходных')}"
+                         + ("" if v_.get("verified") else " — устойчивость не подтверждена, прогноз направления не даём"))
+            if b.get("beyond") is not None:
+                parts.append(f"в {round(b['beyond'] * 100)}% случаев понедельник уходил дальше экстремума выходных")
+        return "; ".join(parts)
+    movers = sorted(rows, key=lambda x: -abs(x["wmax"]))[:8]
+    txt = [f"🗓 <b>Торги выходного дня: итоги и что ждать в понедельник</b> · {sat.strftime('%d.%m')}–{(sat + dt.timedelta(days=1)).strftime('%d.%m')}",
+           f"<blockquote>💰 Деньги в акциях за выходные: <b>{bln(tot)}</b> по {len(rows)} бумагам · обычный будний день — {bln(sum(x['avg'] for x in rows))}</blockquote>", "",
+           "📈 <b>Максимальное движение за выходные</b> <i>(к закрытию пятницы; в скобках — где бумага закрыла выходные)</i>"]
+    for x in movers:
+        f_ = forecast(x)
+        txt.append(f"{'🟢▲' if x['wmax'] > 0 else '🔴▼'} <b>${x['t']}</b> до {pc(x['wmax'], 1)} ({pc(x['ret'], 1)} на закрытии) · оборот {bln(x['val'])}" + (f"\n   ↳ <i>{esc(f_)}</i>" if f_ else ""))
+    if W.get("n"):
+        txt += ["", f"<blockquote expandable>📊 <b>Что показывает история выходных сессий</b> ({W.get('weekends')} выходных, {W.get('first', '')[:7]}–{W.get('last', '')[:7]})\n"
+                + f"Медианный ход бумаги за выходные — {pc(W['move']['abs_wret_med'], 1, False)}, максимальный внутри выходных — {pc(W['move']['abs_wmax_med'], 1, False)}.\n"
+                + "\n".join(f"Выходные {b['name']}: в понедельник по направлению выходных {pc(b['mon_dir'].get('mean') or 0, 2)}, попаданий {round((b['mon_dir'].get('hit') or 0) * 100)}% (n={b['mon_dir'].get('n', 0)})" for b in W.get("buckets") or [])
+                + f"\nНезависимая проверка: {('продолжение подтверждено' if (ver.get('all') or {}).get('effect') == 'continue' else 'откат подтверждён' if (ver.get('all') or {}).get('effect') == 'reverse' else 'устойчивого перевеса нет')}.</blockquote>"]
+    txt += ["", f"<i>Торги выходного дня — сессии Мосбиржи по субботам и воскресеньям (их же транслируют Т-Инвестиции); ликвидность ниже будней, поэтому цены выходных шумнее. Понедельник — {mon.strftime('%d.%m')}.</i>",
+            "#выходные #прогноз"]
+    img = hbars([(f"${x['t']}", x["wmax"], None) for x in movers], os.path.join(OUT, "weekend.png"), f"Максимальное движение за выходные {sat.strftime('%d.%m')}–{(sat + dt.timedelta(days=1)).strftime('%d.%m')}, к пятнице")
+    PUB.post("\n".join(txt), [(img, "Торги выходного дня")] if img else None)
+
+
+# ---------------------------------------------------------------------------------------------
+# Ежедневный обзор одной бумаги (статья Telegraph) — отдельно от торгового плана
+# ---------------------------------------------------------------------------------------------
+def pick_review(md, avg):
+    st = load_json("reviews.json", {"done": {}})
+    now = time.time()
+    done = {t for t, ts in st["done"].items() if now - ts < 21 * 86400}
+    cls = all_clusters()
+    fl = load_json("flows_last.json", {})
+    flow = {lab: abs(v) for lab, v in (fl.get("buyers") or []) + (fl.get("sellers") or [])}
+    an = (load_json("anom_today.json", {}) or {}).get("rows") or {}
+    best, score = None, -1
+    for r in md[:80]:
+        t = r["SECID"]
+        if t in done:
+            continue
+        nw = sum((c.get("wt") or {}).get("W", 0) for c in company_news(t, now - 36 * 3600, cls))
+        x = (r.get("VALTODAY") or 0) / (avg.get(t) or 1e18)
+        sc = nw * 200 + flow.get(t, 0) + min(x, 5) * 0.2 + (an.get(t, {}).get("p_y") or 0) + abs((r.get("LASTTOPREVPRICE") or 0) / 100) * 5
+        if sc > score:
+            best, score = t, sc
+    return best
+
+
+def stock_review(ticker=None):
+    import article
+    now = now_msk()
+    md = liquid_shares(200)
+    by = {r["SECID"]: r for r in md}
+    avg = turnover_avg([r["SECID"] for r in md[:80]])
+    t = ticker or pick_review(md, avg)
+    if not t:
+        log("обзор: бумага не выбрана")
+        return
+    B = share_candles(t, 420)
+    I = index_candles("IMOEX", 420)
+    if len(B) < 60:
+        log("обзор: мало истории", t)
+        return
+    c = [b["c"] for b in B]
+    last = c[-1]
+    r_ = lambda k: c[-1] / c[-1 - k] - 1 if len(c) > k else None
+    ytd = next((b["c"] for b in B if b["t"][:4] == str(now.year)), c[0])
+    hi52, lo52 = max(b["h"] for b in B[-252:]), min(b["l"] for b in B[-252:])
+    e20, e50, e200 = ema(c, 20)[-1], ema(c, 50)[-1], ema(c, 200)[-1] if len(c) >= 200 else None
+    a14 = atr(B[-15:]) or 0
+    name = (by.get(t) or {}).get("NAME") or t
+    sec = sector(t)
+    trend = "восходящий" if last > e50 > (e200 or 0) else "нисходящий" if last < e50 and (e200 is None or e50 < e200) else "боковой"
+    Im = {b["t"]: b["c"] for b in I}
+    common_ = [b for b in B[-121:] if b["t"] in Im]
+    beta = None
+    if len(common_) > 60:
+        rs = np.diff(np.log([b["c"] for b in common_]))
+        ri = np.diff(np.log([Im[b["t"]] for b in common_]))
+        beta = float(np.cov(rs, ri)[0, 1] / np.var(ri)) if np.var(ri) > 0 else None
+    cls = all_clusters()
+    news = news_pick(cls, time.time() - 7 * 86400, tks={t}, min_pct=0.0, k=8)
+    up = level_target(t, 1)
+    dn = level_target(t, -1)
+    cr = crowd_check(t, cls)
+    imp = json.load(open(os.path.join(HERE, "..", "impact.json"), encoding="utf-8"))
+    reac = sorted([(k.split("|")[1], v) for k, v in imp["comp"].items() if k.startswith(t + "|") and v.get("n", 0) >= 20 and not k.split("|")[1].startswith("tone")],
+                  key=lambda z: -abs(z[1]["a5"]))[:4]
+    try:
+        import divs as DV
+        upc = [r for r in DV.upcoming(120) if r["t"] == t]
+    except Exception:  # noqa: BLE001
+        upc = []
+    dh = (DIVS.get(t) or [])[-3:]
+    peers = [u for u in by if u != t and sector(u) == sec][:6]
+    x_today = (by.get(t, {}).get("VALTODAY") or 0) / ((avg.get(t) or 0) * max(0.1, (now.hour * 60 + now.minute - 600) / 530)) if avg.get(t) else None
+    title = f"{name} (${t}): обзор на {now.strftime('%d.%m.%Y')}"
+    facts = [f"{name} ({t}), сектор {SEC_RU2.get(sec, sec or '—')}. Цена {fmt(last, dec_of(last))} ₽: за день {pc(r_(1), 1)}, неделю {pc(r_(5), 1)}, месяц {pc(r_(21), 1)}, 3 месяца {pc(r_(63), 1)}, с начала года {pc(last / ytd - 1, 1)}.",
+             f"Тренд {trend}: цена {'выше' if last > e50 else 'ниже'} EMA 50" + (f", {'выше' if last > e200 else 'ниже'} EMA 200" if e200 else "") + f". До максимума за год {pc(hi52 / last - 1, 1)}, до минимума {pc(lo52 / last - 1, 1)}. Дневной ход (ATR) {pc(a14 / last, 1, False)}." + (f" Бета к индексу {fmt(beta, 2)}." if beta else "")]
+    if news:
+        facts.append("Новости недели: " + "; ".join(cut(clean_tx(n['first'].get('tx')), 120) for n in news[:3]))
+    lead = None
+    try:
+        import ai
+        st_ = load_json("ai.json", {})
+        lead = ai.lead("\n".join(facts), st_)
+        save_json("ai.json", st_)
+    except Exception as e:  # noqa: BLE001
+        log("ИИ-резюме обзора:", e)
+    Bk = [("p", f"<i>Обзор собран в {now.strftime('%H:%M')} МСК по данным Мосбиржи, новостям из ленты бота и истории реакций бумаги 2017–2026. Не является индивидуальной инвестиционной рекомендацией.</i>")]
+    if lead:
+        Bk += [("h3", "Коротко"), ("p", esc(lead))]
+    Bk += [("h3", "📊 Цена и тренд"), ("ul", [esc(f) for f in facts[:2]])]
+    lv = []
+    if up:
+        lv.append(f"Вверх: ближайшее сопротивление <b>{fmt(up['tgt'], dec_of(last))}</b> ({pc(up['move'], 1)}) — {esc(up['why'])}")
+    if dn:
+        lv.append(f"Вниз: ближайшая поддержка <b>{fmt(dn['tgt'], dec_of(last))}</b> ({pc(dn['move'], 1)}) — {esc(dn['why'])}")
+    if lv:
+        Bk += [("h3", "📐 Уровни"), ("ul", lv)]
+    vol = []
+    if x_today:
+        vol.append(f"Оборот сегодня {bln(by[t].get('VALTODAY') or 0)} — {fmt(x_today, 1)}× к обычному на это время (среднее за 20 дней {bln(avg.get(t) or 0)}).")
+    fl = load_json("flows_last.json", {})
+    for lab, v in (fl.get("buyers") or []) + (fl.get("sellers") or []):
+        if lab == t:
+            vol.append(f"Последний замер потоков: перевес {'покупок' if v > 0 else 'продаж'} {pc(v, 0)} за 30 минут.")
+    oi = stock_oi().get(t) if not DEMO else None
+    bh = behavior((by.get(t, {}).get("LASTTOPREVPRICE") or 0) / 100, x=x_today, oi=oi)
+    if oi:
+        vol.append(f"Открытый интерес по фьючерсу на акцию за день: {pc(oi[0], 1)}.")
+    if bh:
+        vol.append("Что может стоять за движением: " + esc("; ".join(bh)) + ".")
+    if cr:
+        vol.append(f"Психология толпы: за 3 дня {pc(cr['e3'], 1)} к индексу, оборот {fmt(cr['vx'], 1)}× к норме, новостей о компании {'нет' if not cr['news'] else cr['news']}" +
+                   (" — движение держится на настроении участников." if cr["crowd"] else "."))
+    if vol:
+        Bk += [("h3", "💸 Деньги и поведение участников"), ("ul", vol)]
+    if news:
+        Bk += [("h3", "📰 Новости за неделю"), ("ul", [news_line(n) for n in news[:6]])]
+    if reac:
+        Bk += [("h3", "🧾 Как бумага реагировала на новости (2017–2026)"),
+               ("ul", [f"{TYPE_RU.get(k, k)}: {pc(v['a5'], 1)} к индексу за 5 дней, обгоняла индекс в {round(v['up5'] * 100)}% случаев (выборка {v['n']})" for k, v in reac])]
+    dv = []
+    for r in upc:
+        dv.append(f"Объявлено: {fmt(r['amount'], 2)} ₽ ({pc(r['yld'], 1, False)}), последний день покупки {ddmm(r.get('last_buy'))}.")
+    if dh:
+        dv.append("Последние выплаты: " + ", ".join(f"{d_[0]} — {fmt(d_[1], 2)} ₽" for d_ in dh))
+    if dv:
+        Bk += [("h3", "💰 Дивиденды"), ("ul", dv)]
+    if peers:
+        Bk += [("h3", f"🏭 Сектор «{SEC_RU2.get(sec, sec)}» сегодня"), ("ul", [f"${u}: {pc((by[u].get('LASTTOPREVPRICE') or 0) / 100, 1)}" for u in peers])]
+    sc = []
+    if up and dn:
+        sc.append(f"Позитивный: закрепление выше {fmt(c[-1] + a14, dec_of(last))} открывает путь к {fmt(up['tgt'], dec_of(last))}.")
+        sc.append(f"Негативный: уход ниже {fmt(dn['stop'] if dn.get('stop') else c[-1] - a14, dec_of(last))} — риск движения к {fmt(dn['tgt'], dec_of(last))}.")
+    sc.append("Риски: общий фон рынка (бета " + (fmt(beta, 2) if beta else "—") + "), решения ЦБ, новости компании; уровни — ориентиры, а не прогноз.")
+    Bk += [("h3", "🧭 Сценарии"), ("ul", sc)]
+    imgs = []
+    try:
+        lines = []
+        if up:
+            lines.append((up["tgt"], UP, "Сопротивление", "--"))
+        if dn:
+            lines.append((dn["tgt"], DN, "Поддержка", "--"))
+        p = candle_chart(B, os.path.join(OUT, f"rev_{t}.png"), f"${t} · {name} · дневные свечи", lines=lines, emas=((20, BLUE, "EMA 20"), (50, ORANGE, "EMA 50")), n=140, dec=dec_of(last))
+        if p:
+            imgs.append((p, f"${t}: дневные свечи и уровни"))
+    except Exception as e:  # noqa: BLE001
+        log("график обзора", e)
+    teaser = [f"🔬 <b>Обзор дня: {esc(name)} (${t})</b>", "",
+              f"<blockquote>Цена <b>{fmt(last, dec_of(last))} ₽</b> · день {pc(r_(1), 1)} · месяц {pc(r_(21), 1)} · с начала года {pc(last / ytd - 1, 1)}\nТренд {trend}"
+              + (f" · сопротивление {fmt(up['tgt'], dec_of(last))}" if up else "") + (f" · поддержка {fmt(dn['tgt'], dec_of(last))}" if dn else "") + "</blockquote>"]
+    if lead:
+        teaser += ["", f"🧠 <i>{esc(lead)}</i>"]
+    teaser += ["", "Внутри: тренд и уровни, деньги и поведение участников, новости недели, реакция бумаги на новости за 2017–2026, дивиденды, сектор и сценарии.", "", "{LINK}", f"#обзор_дня #{t}"]
+    article.publish(PUB, title, Bk, "\n".join(teaser), imgs, fname=f"review_{t}")
+    st = load_json("reviews.json", {"done": {}})
+    st["done"][t] = time.time()
+    save_json("reviews.json", st)
+
+
 def main():
     mode = next((a for a in sys.argv[1:] if not a.startswith("--")), None) or os.environ.get("MODE") or SCHED.get(os.environ.get("SCHED", "").strip())
     if not mode:
@@ -2744,7 +3236,7 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "anom_next": anom_next, "telegraph_check": telegraph_check,
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "anom_next": anom_next, "telegraph_check": telegraph_check,
      "trader_prep": lambda: trader_mod().prep(PUB), "trader_open": lambda: trader_mod().open_(PUB), "trader_week": lambda: trader_mod().week(PUB)}[mode]()
 
 
