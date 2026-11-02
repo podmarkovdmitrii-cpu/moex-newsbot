@@ -135,5 +135,22 @@ async function withLead(html, S, esc) {
   return i < 0 ? html + `\n\n🧠 <i>Коротко: ${esc(ld)}</i>` : html.slice(0, i) + `\n\n🧠 <i>Коротко: ${esc(ld)}</i>\n\n` + html.slice(i).replace(/^\n+/, '');
 }
 
+// ИИ-ревизор (второе мнение для агента-ревизора postaudit.js): верно ли определены компания, событие и направление вывода
+const REVIEW_SYSTEM = 'Ты строгий выпускающий редактор паблика о рынке акций Мосбиржи. Проверь вывод бота по новости. ' +
+  'Верни строго JSON без пояснений: {"ticker_ok": true|false, "event_ok": true|false, "direction_ok": true|false, "why": "..."}. ' +
+  'ticker_ok — новость действительно о компании с этим тикером (компания — участник события), а не о тёзке/обычном слове ' +
+  '(самолёт как техника ≠ девелопер «Самолёт», «на Мосбирже» как место торгов ≠ компания Мосбиржа, «Газпром нефть» ≠ «Газпром»). ' +
+  'event_ok — тип события соответствует тексту. direction_ok — вывод (позитив/негатив, лонг/шорт) не противоречит смыслу новости для акционеров ' +
+  '(рост прибыли — позитив; снижение прибыли, отказ от дивидендов, санкции — негатив). why — коротко по-русски, только если что-то false.';
+async function review(S, { src, tk, name, ty, conclusion }) {
+  const txt = await ask(S, `Тикер: $${tk} (${name})\nСобытие по разметке бота: ${ty}\nВывод бота: ${conclusion}\n\nТекст новости:\n${src}`, REVIEW_SYSTEM, 250);
+  if (!txt) return null;
+  let js;
+  try { js = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1)); } catch (e) { log('ревизор: ответ не JSON'); return null; }
+  const verdict = js.ticker_ok !== false && js.event_ok !== false && js.direction_ok !== false;
+  log('ревизор:', verdict ? 'вывод верный' : 'ОШИБКА — ' + (js.why || ''));
+  return { verdict, why: String(js.why || '').slice(0, 200), raw: js };
+}
+
 function newCycle() { RUN_N = 0; DOWN = false; }
-module.exports = { withLead, newsPack, check, ON, newCycle };
+module.exports = { withLead, newsPack, review, check, ON, newCycle };

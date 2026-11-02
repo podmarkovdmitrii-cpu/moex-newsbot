@@ -9,6 +9,8 @@ const path = require('path');
 const N = require('./nlp.js');
 const AI = require('./ai.js');
 const NC = require('./newscheck.js');
+const PA = require('./postaudit.js');   // агент-ревизор: ошибки вывода по бумаге (тикер-омоним, полярность, направление)
+const QA = require('./quality.js');     // агент качества: адекватность, оперативность, достоверность, надёжность
 
 const IMPACT = JSON.parse(fs.readFileSync(path.join(__dirname, 'impact.json'), 'utf8'));
 const RELIAB = fs.existsSync(path.join(__dirname, 'reliability.json')) ? JSON.parse(fs.readFileSync(path.join(__dirname, 'reliability.json'), 'utf8')) : {};
@@ -261,10 +263,16 @@ async function publish(S, html, reply, useAi, photo, more) {
 }
 // Пост новости: в подписи — заголовок, суть, сигнал, вес, источники; подробности — разворачиваемой цитатой
 // (в подписи, если влезают в 1024 знака, иначе ответом на пост). Цитата новости укорачивается до конца предложения.
-async function postNews(S, { head, nb, extra = [], src = '', weight = '', more = [], tg = '', checked = '' }) {
+async function postNews(S, { head, nb, extra = [], src = '', weight = '', more = [], tg = '', checked = '', aud = null }) {
   const det = details([checked, ...(nb.sig ? nb.sig.more : []), ...more]);
   const issues = NC.lintPost([head, nb.body, nb.sig ? nb.sig.main : '', src, det].join('\n'), { tickers: nb.tks || [] });
   if (issues.length) { log('пост не прошёл проверку текста:', issues.join('; ')); return null; }
+  // агент-ревизор: независимая проверка вывода по бумаге на готовом посте
+  if (aud) {
+    const draft = [head, nb.body, ...extra, nb.sig ? nb.sig.main : ''].filter(Boolean).join('\n');
+    const a = await PA.audit({ html: draft, src: aud.src || nb.full || '', tk: aud.tk, ty: aud.ty, tyRu: aud.tyRu, tks: nb.tks, link: nb.link, AI, S });
+    if (!a.ok) { log('агент-ревизор остановил пост:', aud.tk, '—', a.fails.join('; ')); return null; }
+  }
   const LIM = nb.photo ? 1024 - DISCLAIMER.length - 6 : 3900;
   const build = (lim, withDet) => [head + '\n' + boldLead(bodyFit(nb, lim)), extra.filter(Boolean).join('\n'), nb.sig ? nb.sig.main : '', weight, withDet ? det : '', src + tg].filter(Boolean).join('\n\n');
   let lim = 360, html = build(lim, !!det);
@@ -525,7 +533,7 @@ async function run(S, clusters, items) {
     const nb = await newsBody(S, pseudo, buy ? 'Покупка инсайдера' : 'Продажа инсайдера', it.tks[0], buy ? 1 : -1);
     if (nb.skip) { log('пропуск:', nb.skip); continue; }
     await postNews(S, { head: `💼 <b>${buy ? 'Покупка' : 'Продажа'} инсайдера / крупного акционера</b> · ${it.tks.map(t => '$' + t).join(' ')}`, nb: Object.assign(nb, { sig: null }),
-      src: `🔗 <a href="${it.link}">${esc(src(it.ch))}</a>`, tg: tags(it.tks),
+      src: `🔗 <a href="${it.link}">${esc(src(it.ch))}</a>`, tg: tags(it.tks), aud: { tk: it.tks[0], ty: null, src: it.tx },
       more: [`Как читать: ${buy ? 'покупки' : 'продажи'} менеджмента и крупных акционеров — публичная информация о том, как «свои» оценивают бумагу. Это не инсайдерская информация в смысле закона (224-ФЗ): сделка уже раскрыта.`] });
   }
 
@@ -568,15 +576,26 @@ async function run(S, clusters, items) {
       if (!(c.rumorOnly && chk.fails.every(f => f.startsWith('не достоверно')))) continue;
     }
     if (chk.notes.length) c.tks = (c.tks || []).filter(t => !chk.notes.some(x => x.drop === t));
-    const ageM = Math.max(1, Math.round((now - c.ts) / 60));
-    const checked = `✅ <b>Автопроверка пройдена:</b> новость свежая (${ageM} мин), ${trustedFact ? 'надёжный источник' : indepFacts >= 2 ? 'подтверждена двумя источниками' : 'источник с историей подтверждений'}, событие и ${tk === 'РЫНОК' ? 'связь с российским рынком' : 'тикер $' + tk} сверены с текстом.`;
+    // агент качества информации: адекватность, оперативность, достоверность, надёжность
+    const qctx = { text, tk, ty, ageMin: (now - c.ts) / 60, rumor: c.rumorOnly, S,
+      sources: chs.map(ch => ({ ch, kind: (SRC[ch] || [])[1] || 'канал', trusted: TRUSTED.has(ch), official: POLIT.has(ch), rumor: !!c.srcs[ch].rumor })) };
+    const q = QA.assess(qctx);
+    if (!q.ok) {
+      if (w.pct >= th - 0.2) { log('агент качества не пропустил:', c.key, '—', q.fails.join(' | ')); QA.record(S, Object.assign(qctx, { fails: q.fails }), false, false); }
+      if (q.fails.some(f => /^(адекватность|оперативность)/.test(f))) { c.pub.done = true; mark(firstLink); }
+      continue;
+    }
+    const checked = QA.line(q) + `\n✅ <b>Автопроверка:</b> событие и ${tk === 'РЫНОК' ? 'связь с российским рынком' : 'тикер $' + tk} сверены с текстом; вывод проверен агентом-ревизором.`;
+    const aud = { tk, ty, tyRu: TYPE_RU[ty] || ty, src: text };
+    const done_ = id => { if (id) QA.record(S, qctx, true, true); return id; };
     // 2) заявления официальных лиц и ведомств — сразу, если по истории такие заявления двигали рынок
     if (polit && tk === 'РЫНОК' && MACRO.test(ty) && w.pct >= th - 0.2) {
       c.pub.done = true; mark(firstLink); n++;
       const nb = await newsBody(S, c, TYPE_RU[ty] || ty, tk, s, ty);
       if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
       c.pub.msg = await postNews(S, { head: `🏛 <b>Заявление</b> · ${esc(TYPE_RU[ty] || ty)}`, nb, src: sourcesLine(c), weight: weightLine(w, ty), checked,
-        more: [weightMore(w), ...(nb.react.length ? ['<b>Как реагировал рынок на такие заявления:</b>', ...nb.react] : [])], tg: '\n#заявление' });
+        more: [weightMore(w), ...(nb.react.length ? ['<b>Как реагировал рынок на такие заявления:</b>', ...nb.react] : [])], tg: '\n#заявление', aud });
+      done_(c.pub.msg);
       continue;
     }
     // 3) ранний сигнал (данные «источников») — сразу, если весомый; с вероятностью подтверждения
@@ -587,7 +606,8 @@ async function run(S, clusters, items) {
       if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
       c.pub.msg = await postNews(S, { head: `🕵️ <b>Слух, не подтверждён</b> · ${nb.tks.map(t => '$' + t).join(' ')} · ${esc(TYPE_RU[ty] || ty)}`, nb,
         extra: [`❓ Вероятность подтверждения: <b>~${Math.round(w.p * 100)}%</b> <i>(как часто подтверждались прошлые сообщения этих источников)</i>`],
-        src: sourcesLine(c), weight: weightLine(w, ty), checked: checked.replace('Автопроверка пройдена', 'Автопроверка (слух)'), more: [weightMore(w), ...nb.react, pulseLine(nb.tks || [], w.dir)], tg: tags(nb.tks) });
+        src: sourcesLine(c), weight: weightLine(w, ty), checked: checked.replace('Проверка информации:', 'Проверка информации (слух):'), more: [weightMore(w), ...nb.react, pulseLine(nb.tks || [], w.dir)], tg: tags(nb.tks), aud });
+      done_(c.pub.msg);
       continue;
     }
     // 5) факт — публикуем сразу по первому источнику, если вес высокий; иначе ждём второго источника или надёжного СМИ
@@ -607,7 +627,8 @@ async function run(S, clusters, items) {
     const today = tk !== 'РЫНОК' && nb.chg != null ? ` · сегодня ${pc(nb.chg, 1)}` : '';
     c.pub.msg = await postNews(S, { head: `${emo} <b>${who} · ${esc(TYPE_RU[ty] || ty)}</b>${also}${today}`, nb,
       src: sourcesLine(c) + (single ? ' · <i>пока один источник</i>' : ''), weight: weightLine(w, ty), checked,
-      more: [weightMore(w), ...(nb.react.length ? ['<b>Реакция рынка на такие новости (2017–2026):</b>', ...nb.react] : []), pulseLine(nb.tks || [], w.dir)], tg: tags(nb.tks) });
+      more: [weightMore(w), ...(nb.react.length ? ['<b>Реакция рынка на такие новости (2017–2026):</b>', ...nb.react] : []), pulseLine(nb.tks || [], w.dir)], tg: tags(nb.tks), aud });
+    done_(c.pub.msg);
   }
   if (n) log('опубликовано', n, 'за день', S.pub.count);
 }
