@@ -482,6 +482,15 @@ class Publisher:
                 save_json("ai.json", st)
             except Exception as e:  # noqa: BLE001
                 log("ИИ-вступление пропущено:", e)
+        # агент-ревизор: ошибки вывода в готовом посте (несуществующие тикеры, пустые данные, сигнал против своей цели)
+        try:
+            import postcheck
+            text, _fixes, fatal = postcheck.audit(text)
+            if fatal:
+                log("агент-ревизор остановил пост:", fatal)
+                return None
+        except Exception as e:  # noqa: BLE001
+            log("агент-ревизор недоступен:", e)
         text = text.rstrip() + f"\n\n<i>{DISCLAIMER}</i>"
         photos = [p for p in (photos or []) if p and p[0] and os.path.exists(p[0])]
         if self.dry:

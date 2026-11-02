@@ -2844,10 +2844,19 @@ def dir_txt(s, h="5 дней", base="к индексу"):
     return f"движение откатывалось — в среднем на {pc(-m, 1, False)} {base} за {h}, в {round((1 - s['hit']) * 100)}% случаев (выборка {s['n']})"
 
 
+CROWD_DEF = {"win": 3, "thr": 0.06, "vx": 2.0, "liq": 30e6}
+
+
+def crowd_cfg(side):
+    """Параметры «толпы» для стороны: подтверждённое правило обучения на разных промежутках 2008–2026 или стандарт (для справки)."""
+    R = (research().get("crowd") or {}).get("up" if side > 0 else "down") or {}
+    p = R.get("params") if R.get("verified") and R.get("params") else None
+    return dict(p or research().get("crowd_params") or CROWD_DEF), R
+
+
 def crowd_check(t, cls=None, frac=1.0):
-    """Психология толпы по бумаге сейчас: движение за 3 дня к индексу, оборот к норме, есть ли новости о компании."""
-    prm = research().get("crowd_params") or {"win": 3, "thr": 0.06, "vx": 2.0, "liq": 30e6}
-    w = prm["win"]
+    """Психология толпы по бумаге сейчас: движение к индексу за окно правила, оборот к норме, есть ли новости о компании.
+    Окно, порог и оборот — из правила, выбранного обучением на истории с 2008 г. (своё для роста и для падения)."""
     try:
         B = share_candles(t, 60)
         I = {b["t"]: b["c"] for b in index_candles("IMOEX", 60)}
@@ -2855,45 +2864,63 @@ def crowd_check(t, cls=None, frac=1.0):
         log("толпа: свечи", t, e)
         return None
     B = [b for b in B if dt.date.fromisoformat(b["t"][:10]).weekday() < 5]
-    if len(B) < 28 or B[-1]["t"] not in I or B[-1 - w]["t"] not in I:
+    if len(B) < 30 or B[-1]["t"] not in I:
         return None
-    e3 = (B[-1]["c"] / B[-1 - w]["c"] - 1) - (I[B[-1]["t"]] / I[B[-1 - w]["t"]] - 1)
     today = B[-1]["t"][:10] == now_msk().date().isoformat()
-    vols = [b["v"] for b in B[-w:]]
-    if today and frac < 1:
-        vols[-1] = vols[-1] / max(frac, 0.1)
-    base = sorted(b["v"] for b in B[-w - 20:-w])
-    vx = (sum(vols) / w) / base[len(base) // 2] if base and base[len(base) // 2] else 0
-    since = dt.datetime.fromisoformat(B[-w]["t"][:10]).replace(hour=0, tzinfo=MSKTZ).timestamp() - 6 * 3600  # с вечера дня перед окном
-    news = [c for c in company_news(t, since, cls) if (c.get("key") or "").split("|")[-1] != "tone"]
-    return dict(t=t, e3=e3, vx=vx, news=len(news), dir=1 if e3 > 0 else -1, crowd=abs(e3) >= prm["thr"] and vx >= prm["vx"] and not news, last=B[-1]["c"])
+    best = None
+    for side in (1, -1):
+        prm, R = crowd_cfg(side)
+        w = int(prm["win"])
+        if B[-1 - w]["t"] not in I or len(B) < w + 22:
+            continue
+        e = (B[-1]["c"] / B[-1 - w]["c"] - 1) - (I[B[-1]["t"]] / I[B[-1 - w]["t"]] - 1)
+        if (1 if e > 0 else -1) != side:
+            continue
+        vols = [b["v"] for b in B[-w:]]
+        if today and frac < 1:
+            vols[-1] = vols[-1] / max(frac, 0.1)
+        base = sorted(b["v"] for b in B[-w - 20:-w])
+        vx = (sum(vols) / w) / base[len(base) // 2] if base and base[len(base) // 2] else 0
+        since = dt.datetime.fromisoformat(B[-w]["t"][:10]).replace(hour=0, tzinfo=MSKTZ).timestamp() - 6 * 3600  # с вечера дня перед окном
+        news = [c for c in company_news(t, since, cls) if (c.get("key") or "").split("|")[-1] != "tone"]
+        best = dict(t=t, e3=e, win=w, vx=vx, news=len(news), dir=side, crowd=abs(e) >= prm["thr"] and vx >= prm["vx"] and not news, last=B[-1]["c"],
+                    rule=bool(R.get("verified")))
+    return best
 
 
 def crowd_line(x, with_signal=True):
-    """Текст про толпу и (если правило подтверждено проверкой) сигнал."""
+    """Текст про толпу и (если правило подтверждено обучением на разных промежутках и проверяющим агентом) сигнал."""
     R = (research().get("crowd") or {}).get("up" if x["dir"] > 0 else "down") or {}
-    s_all = R.get("all", {}).get("f5")
-    s_news = R.get("with_news", {}).get("f5")
-    head = f"🧠 <b>${x['t']}</b> {pc(x['e3'], 1)} к индексу за 3 дня, оборот {fmt(x['vx'], 1)}× к норме — <b>новостей о компании нет</b>"
+    h = int(R.get("h") or 5)
+    s_all = R.get("stat") or (R.get("all") or {}).get("f5")
+    s_news = (R.get("with_news") or {}).get("f5")
+    w = x.get("win", 3)
+    head = f"🧠 <b>${x['t']}</b> {pc(x['e3'], 1)} к индексу за {w} {'дня' if w < 5 else 'дней'}, оборот {fmt(x['vx'], 1)}× к норме — <b>новостей о компании нет</b>"
     if not R:
         return head + ". Движение держится на настроении участников; статистика по таким случаям ещё считается.", None
     mode, ok = R.get("mode"), R.get("verified")
+    o = R.get("oos") or {}
+    oos = (f" Проверка на разных промежутках истории 2008–2026 (правило подбиралось на прошлом, проверялось на следующем годе): "
+           f"после издержек {pc(o['mean'], 1)} на сделку, плюс в {round(o.get('pos_years', 0) * 100)}% лет") if o.get("n") else ""
+    kind = "рывков" if x["dir"] > 0 else "падений"
     if ok and mode == "continue":
-        why = f"Толпа сильнее здравого смысла: на истории после таких {'рывков' if x['dir'] > 0 else 'падений'} без новостей {dir_txt(s_all)}"
+        why = f"Толпа сильнее здравого смысла: на истории после таких {kind} без новостей {dir_txt(s_all, h=f'{h} дн.')}." + oos
         side = x["dir"]
     elif ok and mode == "reverse":
-        why = f"На истории после таких {'рывков' if x['dir'] > 0 else 'падений'} без новостей {dir_txt(s_all)}"
+        why = f"На истории после таких {kind} без новостей {dir_txt(s_all, h=f'{h} дн.')} — эмоции выдыхались." + oos
         side = -x["dir"]
     else:
-        why = f"На истории после таких {'рывков' if x['dir'] > 0 else 'падений'} без новостей {dir_txt(s_all)}, но независимая проверка не подтвердила устойчивость — сигнала нет"
+        why = (f"На истории после таких {kind} без новостей {dir_txt(s_all)}, но обучение на разных промежутках 2008–2026 и независимая проверка "
+               f"не нашли устойчивого преимущества — сигнала нет")
         side = 0
     cmp_ = f" Для сравнения, когда были новости: {dir_txt(s_news)}." if s_news and s_news.get("n") else ""
-    line = head + ". " + why + "." + cmp_
+    line = head + ". " + why.rstrip(".") + "." + cmp_
     sig = None
     if with_signal and side:
         lt = level_target(x["t"], side, ndir=0, chg=0)
         if lt:
-            sig = f"   🎯 {'ЛОНГ' if side > 0 else 'ШОРТ'} по {'импульсу' if side == x['dir'] else 'откату'}: цель <code>{fmt(lt['tgt'], dec_of(lt['last']))}</code> ({pc(lt['move'], 1)}), отмена за <code>{fmt(lt['stop'], dec_of(lt['last']))}</code>"
+            sig = (f"   🎯 {'ЛОНГ' if side > 0 else 'ШОРТ'} по {'импульсу' if side == x['dir'] else 'откату'}: цель <code>{fmt(lt['tgt'], dec_of(lt['last']))}</code> ({pc(lt['move'], 1)}), "
+                   f"отмена за <code>{fmt(lt['stop'], dec_of(lt['last']))}</code>, горизонт до {h} дн.")
     return line, sig
 
 
@@ -2916,46 +2943,64 @@ def crowd_scan(md_all, avg, frac, cls, limit=10):
 
 
 def spill_scan(md_all, avg, frac, ix_chg):
-    """Смежные бумаги: лидер сегодня резко обогнал индекс на большом обороте — какие соседи (тот же или смежный сектор) ещё не отреагировали."""
-    pairs = (research().get("spill") or [])
-    prm = research().get("spill_params") or {"thr": 0.04, "vx": 2.5, "liq": 50e6, "lag": 0.3}
-    if not pairs:
-        return []
+    """Смежные бумаги: лидер сегодня резко обогнал индекс на большом обороте — какие соседи ещё не отреагировали.
+    Давать ли сигнал — решает обучение на разных промежутках 2008–2026 (research/walkforward.py) и проверяющий агент:
+    отдельно для рывков вверх и вниз. Если лучший вариант на истории — «не давать», бот пишет только справку."""
+    live = research().get("spill_live") or {}
+    pairs_info = research().get("spill") or []
     by = {r["SECID"]: r for r in md_all}
     chg = lambda t: (by[t].get("LASTTOPREVPRICE") or 0) / 100 - ix_chg if t in by else None
-    leaders = []
-    for r in md_all:
-        t, a = r["SECID"], avg.get(r["SECID"]) or 0
-        e = chg(t)
-        if a >= prm["liq"] and e is not None and abs(e) >= prm["thr"] and (r.get("VALTODAY") or 0) / (a * frac) >= prm["vx"] and sector(t):
-            leaders.append((t, e))
-    if len(leaders) > 6:  # всё растёт или падает — это рынок, а не цепочка
-        return []
     out, used = [], set()
-    for t, e in sorted(leaders, key=lambda z: -abs(z[1]))[:3]:
-        d = 1 if e > 0 else -1
-        ps = sorted([p for p in pairs if p["s1"] == sector(t) and p["dir"] == d], key=lambda p: (not p.get("verified"), -(p["train"].get("mean") or 0)))
-        for p in ps[:2]:
-            prio = [q[0] for q in p.get("top_peers") or []]
-            peers = [u for u in by if u != t and u not in used and sector(u) == p["s2"] and (avg.get(u) or 0) >= prm["liq"] and chg(u) is not None and chg(u) * d < prm["lag"] * abs(e)]
-            peers.sort(key=lambda u: (prio.index(u) if u in prio else 99, -(avg.get(u) or 0)))
-            peers = peers[:3]
-            if not peers:
-                continue
-            used.update(peers)
-            s = p["train"]
-            same = p["s2"] == sector(t)
-            line = (f"🔗 За <b>${t}</b> ({pc(e, 1)} к индексу) обычно {'подтягиваются' if d > 0 else 'проседают'} {'бумаги того же сектора' if same else 'бумаги смежного сектора «' + SEC_RU2.get(p['s2'], p['s2']) + '»'}, "
-                    f"отставшие в день рывка: " + ", ".join(f"${u} ({pc(chg(u), 1)})" for u in peers) +
-                    f". На истории такие догоняли: {pc(s['mean'] * d, 1)} к индексу за 3 дня, в {round(s['hit'] * 100)}% случаев (выборка {s['n']})")
-            sig = None
-            if p.get("verified"):
+    for d, dn in ((1, "up"), (-1, "down")):
+        L = live.get(dn) or {}
+        on = bool(L.get("on"))
+        prm = (L.get("params") if on else None) or research().get("spill_params") or {"thr": 0.04, "vx": 2.5, "liq": 50e6, "lag": 0.3}
+        leaders, n_all = [], 0
+        for r in md_all:
+            t, a = r["SECID"], avg.get(r["SECID"]) or 0
+            e = chg(t)
+            if a >= prm["liq"] and e is not None and e * d >= prm["thr"] and (r.get("VALTODAY") or 0) / (a * frac) >= prm["vx"]:
+                n_all += 1
+                if sector(t):
+                    leaders.append((t, e))
+        if not leaders or n_all > 6:  # 7+ бумаг сразу — движение всего рынка, а не цепочка
+            continue
+        for t, e in sorted(leaders, key=lambda z: -abs(z[1]))[:2]:
+            s1 = sector(t)
+            lag = prm.get("lag", 0.3)
+            lagging = lambda u: chg(u) is not None and (chg(u) * d < lag * abs(e) if lag > 0 else chg(u) * d <= 0)
+            if on:
+                scope = L.get("scope")
+                okp = {tuple(p) for p in (L.get("pairs") or [])}
+                fit = (lambda u: sector(u) == s1) if scope == "same" else (lambda u: (s1, sector(u)) in okp) if scope == "pairs" else (lambda u: bool(sector(u)))
+                prio = [q[1] for q in (L.get("top_peers") or []) if q[0] == s1]
+                peers = [u for u in by if u != t and u not in used and fit(u) and (avg.get(u) or 0) >= 30e6 and lagging(u)]
+                peers.sort(key=lambda u: (prio.index(u) if u in prio else 99, -(avg.get(u) or 0)))
+                peers = peers[:3]
+                if not peers:
+                    continue
+                used.update(peers)
+                st, o, h = L.get("stat") or {}, L.get("oos") or {}, int(L.get("h") or 3)
+                where = {"same": "бумаги того же сектора", "pairs": "бумаги связанных секторов", "all": "отставшие бумаги рынка"}.get(scope, "соседи")
+                line = (f"🔗 За <b>${t}</b> ({pc(e, 1)} к индексу) на истории {'подтягивались' if d > 0 else 'проседали'} {where}. Отстали сегодня: "
+                        + ", ".join(f"${u} ({pc(chg(u), 1)})" for u in peers)
+                        + (f". С 2008 г.: {pc(st['mean'], 1)} к индексу за {h} дн. в среднем, в {round(st['hit'] * 100)}% случаев (выборка {st['n']})" if st.get("n") else "")
+                        + (f"; проверка на разных промежутках — после издержек {pc(o['mean'], 1)} на сделку, плюс в {round(o.get('pos_years', 0) * 100)}% лет" if o.get("n") else ""))
+                sig = None
                 lt = level_target(peers[0], d, ndir=0, chg=chg(peers[0]) or 0)
                 if lt:
-                    sig = f"   🎯 {'ЛОНГ' if d > 0 else 'ШОРТ'} ${peers[0]} вслед за ${t}: цель <code>{fmt(lt['tgt'], dec_of(lt['last']))}</code> ({pc(lt['move'], 1)}), отмена за <code>{fmt(lt['stop'], dec_of(lt['last']))}</code>, горизонт 1–3 дня"
+                    sig = (f"   🎯 {'ЛОНГ' if d > 0 else 'ШОРТ'} ${peers[0]} вслед за ${t}: цель <code>{fmt(lt['tgt'], dec_of(lt['last']))}</code> ({pc(lt['move'], 1)}), "
+                           f"отмена за <code>{fmt(lt['stop'], dec_of(lt['last']))}</code>, горизонт до {h} дн.")
+                out.append((line + ".", sig))
             else:
-                line += " — правило не прошло независимую проверку, это справка, не сигнал"
-            out.append((line + ".", sig))
+                ps = sorted([p for p in pairs_info if p["s1"] == s1 and p["dir"] == d], key=lambda p: -(p["train"].get("mean") or 0))[:1]
+                peers = [u for u in by if u != t and u not in used and ps and sector(u) == ps[0]["s2"] and (avg.get(u) or 0) >= 30e6 and lagging(u)][:3]
+                if not peers:
+                    continue
+                used.update(peers)
+                out.append((f"🔗 За <b>${t}</b> ({pc(e, 1)} к индексу) отстали: " + ", ".join(f"${u} ({pc(chg(u), 1)})" for u in peers)
+                            + f". Справка, не сигнал: обучение на разных промежутках истории 2008–2026 не нашло устойчивого преимущества в том, чтобы "
+                            + f"покупать отставших соседей после {'рывка' if d > 0 else 'падения'} лидера — лучший вариант на истории «не входить».", None))
     return out
 
 
@@ -3178,7 +3223,7 @@ def stock_review(ticker=None):
     if bh:
         vol.append("Что может стоять за движением: " + esc("; ".join(bh)) + ".")
     if cr:
-        vol.append(f"Психология толпы: за 3 дня {pc(cr['e3'], 1)} к индексу, оборот {fmt(cr['vx'], 1)}× к норме, новостей о компании {'нет' if not cr['news'] else cr['news']}" +
+        vol.append(f"Психология толпы: за {cr.get('win', 3)} дн. {pc(cr['e3'], 1)} к индексу, оборот {fmt(cr['vx'], 1)}× к норме, новостей о компании {'нет' if not cr['news'] else cr['news']}" +
                    (" — движение держится на настроении участников." if cr["crowd"] else "."))
     if vol:
         Bk += [("h3", "💸 Деньги и поведение участников"), ("ul", vol)]
