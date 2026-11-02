@@ -41,14 +41,6 @@ jobs:
           path: newsbot-state
           key: newsbot-state-${{ github.run_id }}
           restore-keys: newsbot-state-
-      - name: Архив новостей Интерфакса с 2008 г. (заголовки) и разметка словарём бота
-        continue-on-error: true
-        env:
-          RESEARCH_DIR: ${{ github.workspace }}/research-stats
-          RESEARCH_HIST: ${{ github.workspace }}/research-hist
-        run: |
-          python newsbot/research/news_hist.py
-          node newsbot/research/ifx_events.js
       - name: Исследование (study.py)
         env:
           ANOM_DATA: ${{ github.workspace }}/anomaly-data
