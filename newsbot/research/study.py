@@ -193,22 +193,35 @@ def load_news(days):
     return out
 
 
-def ifx_events():
-    """События из архива Интерфакса (research/news_hist.py + ifx_events.js), если они скачаны."""
+IFX_REPO = os.path.join(HERE, "data", "ifx_events.json.gz")  # собран с российского IP (GitHub Actions архив отдаёт 404)
+
+
+def _ifx():
+    """Архив Интерфакса: {"meta": {месяц: заголовков}, "events": [[тикер, unix, тип, тон, слух, офиц.], ...]}.
+    Сначала — файл в репозитории (research/data), иначе — то, что скачал news_hist.py + ifx_events.js в RESEARCH_HIST."""
+    if os.path.exists(IFX_REPO):
+        with gzip.open(IFX_REPO, "rt") as f:
+            return json.load(f)
     p = os.path.join(HIST, "ifx_events.json.gz")
     if not os.path.exists(p):
-        return []
+        return {}
     with gzip.open(p, "rt") as f:
-        return [dict(tk=tk, ts=ts, ty=ty, s=s_, rum=rum, off=off, src="ifx") for tk, ts, ty, s_, rum, off in json.load(f)]
+        ev = json.load(f)
+    try:
+        meta = json.load(open(os.path.join(HIST, "ifx_meta.json")))
+    except Exception:  # noqa: BLE001
+        meta = {}
+    return {"meta": meta, "events": ev}
+
+
+def ifx_events():
+    js = _ifx()
+    return [dict(tk=tk, ts=ts, ty=ty, s=s_, rum=rum, off=off, src="ifx") for tk, ts, ty, s_, rum, off in js.get("events", [])]
 
 
 def ifx_from(min_month=250):
     """С какого месяца архив Интерфакса достаточно полный (≥ min_month заголовков в месяц), чтобы судить «новостей не было»."""
-    try:
-        cover = json.load(open(os.path.join(HIST, "ifx_meta.json")))
-    except Exception:  # noqa: BLE001
-        return None
-    ok = sorted(k for k, v in cover.items() if v >= min_month)
+    ok = sorted(k for k, v in (_ifx().get("meta") or {}).items() if v >= min_month)
     return ok[0] + "-01" if ok else None
 
 
