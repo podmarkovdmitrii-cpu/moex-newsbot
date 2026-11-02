@@ -1,4 +1,4 @@
-name: Паблик (план дня, потоки, ОФЗ, итоги, статья недели)
+name: Паблик (план дня, потоки, ОФЗ, итоги, обзор бумаги, выходные)
 
 on:
   schedule:
@@ -13,6 +13,8 @@ on:
     - cron: '20 4 * * 1-5'       # 07:20 МСК — «Трейдер»: сигнал после открытия утренней сессии
     - cron: '20 7 * * 1-5'       # 10:20 МСК — «Трейдер»: сигнал после открытия основной сессии
     - cron: '45 16 * * 5'        # 19:45 МСК, пятница — «Трейдер»: итоги недели по закрытым сделкам
+    - cron: '15 9 * * 1-5'       # 12:15 МСК — статья дня: обзор одной бумаги (отдельно от торгового плана)
+    - cron: '30 16 * * 0'        # 19:30 МСК, воскресенье — итоги торгов выходного дня и прогноз на понедельник
   workflow_dispatch:
     inputs:
       mode:
@@ -20,7 +22,7 @@ on:
         required: true
         default: 'morning'
         type: choice
-        options: [tg_check, test_post, aitest, anom_test, anom_pre, morning_dry, evening_dry, trader_prep_dry, trader_open_dry, trader_week_dry, anomaly, commod, morning, flows, ofz, pulse_deals, evening, weekly, trader_prep, trader_open, trader_week]
+        options: [tg_check, test_post, aitest, anom_test, anom_pre, morning_dry, evening_dry, trader_prep_dry, trader_open_dry, trader_week_dry, anomaly, commod, morning, flows, ofz, pulse_deals, evening, weekly, trader_prep, trader_open, trader_week, stock_review, stock_review_dry, weekend_review, weekend_review_dry, flows_dry]
 
 concurrency:
   group: channel
@@ -62,8 +64,15 @@ jobs:
           path: channel-state
           key: channel-state-${{ github.run_id }}
           restore-keys: channel-state-
+      - name: Результаты исследований (толпа, смежные бумаги, выходные)
+        uses: actions/cache/restore@v4
+        with:
+          path: research-stats
+          key: research-stats-${{ github.run_id }}
+          restore-keys: research-stats-
       - name: Публикация
         env:
+          RESEARCH_STATS: ${{ github.workspace }}/research-stats
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_PUBLIC_TOKEN: ${{ secrets.TG_PUBLIC_TOKEN }}
           TG_PUBLIC_CHAT: ${{ vars.TG_PUBLIC_CHAT }}

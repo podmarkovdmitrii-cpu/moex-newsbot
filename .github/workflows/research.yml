@@ -1,0 +1,69 @@
+name: Исследования на истории (толпа, смежные бумаги, выходные) и независимая проверка
+
+on:
+  push:
+    paths:
+      - 'newsbot/research/**'
+  schedule:
+    - cron: '7 4 * * 6'   # суббота 07:07 МСК — пересчёт на свежих данных недели
+  workflow_dispatch:
+
+concurrency:
+  group: research
+  cancel-in-progress: false
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Библиотеки
+        run: pip install --quiet "scikit-learn==1.5.2" pandas numpy matplotlib
+      - name: Кэш исторических свечей (из обучения модели аномалий)
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
+          restore-keys: anomaly-data-
+      - name: Журнал новостей бота
+        uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - name: Исследование (study.py)
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          RESEARCH_DIR: ${{ github.workspace }}/research-stats
+        run: python newsbot/research/study.py
+      - name: Агент-проверяющий (verify.py)
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          RESEARCH_DIR: ${{ github.workspace }}/research-stats
+        run: python newsbot/research/verify.py
+      - name: Сохранить результаты для бота
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: research-stats
+          key: research-stats-${{ github.run_id }}
+      - name: Отчёт (файлы для скачивания)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-report
+          path: |
+            research-stats/study.json
+            research-stats/verify.json
+            research-stats/stats.json
+            research-stats/crowd_events.csv
+            research-stats/weekend_rows.csv
+          retention-days: 30
