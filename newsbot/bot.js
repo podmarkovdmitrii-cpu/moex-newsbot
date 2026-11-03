@@ -478,6 +478,68 @@ function writeSignals(S, res, data, today) {
 }
 
 // ---------- главный цикл ----------
+
+// ---------- расписание постов паблика (jobs.py) внутри постоянно работающего бота ----------
+// Расписание GitHub (cron) в последние дни запаздывает на часы и пропускает запуски — посты выходили с задержкой и пачкой.
+// Поэтому плановые посты запускает сам бот: он работает непрерывно (цепочка запусков news-bot.yml), раз в цикл сверяет время
+// по UTC со списком SCHED из channel/jobs.py и запускает пост, который пора опубликовать. Пропущенный слот публикуется,
+// только если опоздание небольшое (иначе пост устарел и не нужен — лучше пропустить, чем выдать пачку старых постов).
+let CH_CRONS = null;
+function chCrons() {
+  if (CH_CRONS) return CH_CRONS;
+  try {
+    const src = fs.readFileSync(path.join(HERE, 'channel', 'jobs.py'), 'utf8');
+    const body = src.match(/^SCHED = \{([\s\S]*?)\}/m)[1];
+    CH_CRONS = [...body.matchAll(/"([^"]+)":\s*"([^"]+)"/g)].map(m => ({ cron: m[1], mode: m[2] }));
+  } catch (e) { log('расписание паблика не прочитано:', e.message); CH_CRONS = []; }
+  return CH_CRONS;
+}
+function cronField(f, v, lo) {
+  return f.split(',').some(part => {
+    const [rng, step] = part.split('/');
+    let a = lo, b = 99;
+    if (rng !== '*') { const [x, y] = rng.split('-'); a = +x; b = y === undefined ? (step ? 99 : +x) : +y; }
+    return v >= a && v <= b && (v - a) % (+step || 1) === 0;
+  });
+}
+function cronMatch(cron, d) {
+  const [mi, h, dom, mon, dow] = cron.trim().split(/\s+/);
+  return cronField(mi, d.getUTCMinutes(), 0) && cronField(h, d.getUTCHours(), 0) && cronField(dom, d.getUTCDate(), 1) &&
+    cronField(mon, d.getUTCMonth() + 1, 1) && cronField(dow, d.getUTCDay(), 0);
+}
+const CH_GRACE = { morning: 70, trader_prep: 50, trader_open: 30, weekly: 120, flows: 20, ofz: 40, evening: 60, trader_week: 90, stock_review: 120, weekend_review: 120 };
+function channelTick(S) {
+  if (process.env.CHANNEL_SCHED !== '1') return;
+  const now = Math.floor(Date.now() / 60e3) * 60e3;
+  S.chDone = S.chDone || {};
+  for (const k of Object.keys(S.chDone)) if (now - S.chDone[k] > 3 * 86400e3) delete S.chDone[k];
+  const from = Math.max(S.chLast ? S.chLast + 60e3 : 0, now - 120 * 60e3);
+  const due = new Map(); // режим → самый поздний слот (из нескольких пропущенных «потоков» публикуем один, последний)
+  for (let t = from; t <= now; t += 60e3) {
+    const d = new Date(t);
+    for (const { cron, mode } of chCrons()) {
+      if (!cronMatch(cron, d)) continue;
+      const key = cron + '@' + d.toISOString().slice(0, 16);
+      if (S.chDone[key]) continue;
+      const late = (now - t) / 60e3;
+      if (late > (CH_GRACE[mode] || 30)) { S.chDone[key] = now; log('паблик: слот', mode, d.toISOString().slice(11, 16), 'UTC пропущен — опоздание', late, 'мин'); continue; }
+      const prev = due.get(mode);
+      if (prev) S.chDone[prev.key] = now;
+      due.set(mode, { cron, key, t });
+    }
+  }
+  S.chLast = now;
+  for (const [mode, x] of [...due.entries()].sort((a, b) => a[1].t - b[1].t)) {
+    S.chDone[x.key] = Date.now();
+    saveState(S);
+    log('паблик: по расписанию', mode, '(слот', new Date(x.t).toISOString().slice(11, 16), 'UTC, опоздание', Math.round((Date.now() - x.t) / 60e3), 'мин)');
+    try {
+      require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py')],
+        { timeout: 20 * 60e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: '', SCHED: x.cron, CHANNEL_STATE: process.env.CHANNEL_STATE_DIR || path.join(STATE_DIR, 'channel-pub'), NEWS_STATE: STATE_DIR }) });
+    } catch (e) { log('паблик', mode, ': ошибка', e.message.slice(0, 300)); }
+  }
+}
+
 (async () => {
   const S = loadState();
   const today = dayStrMsk();
@@ -511,7 +573,9 @@ function writeSignals(S, res, data, today) {
   const LOOP_MIN = +(process.env.NEWS_LOOP_MIN || 0), LOOP_SEC = +(process.env.NEWS_LOOP_SEC || 75);
   const t0 = Date.now();
   let lastAn = 0, lastPulse = 0;
+  channelTick(S);
   while (LOOP_MIN && Date.now() - t0 < LOOP_MIN * 60e3) {
+    channelTick(S);
     // аномалии цен/объёмов — каждые ~5 минут
     if (process.env.ANOMALY_EVERY_MIN && Date.now() - lastAn >= +process.env.ANOMALY_EVERY_MIN * 60e3) {
       lastAn = Date.now();
