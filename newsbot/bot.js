@@ -593,7 +593,7 @@ async function channelWait() { // перед завершением запуск
   //    чтобы весомые новости уходили в паблик сразу, а не раз в 5–30 минут (расписание GitHub часто запаздывает)
   const LOOP_MIN = +(process.env.NEWS_LOOP_MIN || 0), LOOP_SEC = +(process.env.NEWS_LOOP_SEC || 75);
   const t0 = Date.now();
-  let lastAn = 0, lastPulse = 0;
+  let lastAn = 0, lastPulse = 0, lastShake = 0;
   channelTick(S);
   while (LOOP_MIN && Date.now() - t0 < LOOP_MIN * 60e3) {
     channelTick(S);
@@ -622,6 +622,14 @@ async function channelWait() { // перед завершением запуск
         require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py'), 'anom_next'],
           { timeout: 600e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: 'anom_next', CHANNEL_STATE: path.join(STATE_DIR, 'channel'), NEWS_STATE: STATE_DIR }) });
       } catch (e) { log('прогноз на завтра: ошибка', e.message); }
+    }
+    // агент «вынос стопов»: все акции Мосбиржи (доступны в Т-Инвестициях), идеи — только по подтверждённым на истории правилам
+    if (process.env.SHAKE_EVERY_MIN && Date.now() - lastShake >= +process.env.SHAKE_EVERY_MIN * 60e3) {
+      lastShake = Date.now();
+      try {
+        require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py'), 'shakeout_scan'],
+          { timeout: 300e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: 'shakeout_scan', CHANNEL_STATE: path.join(STATE_DIR, 'channel'), NEWS_STATE: STATE_DIR }) });
+      } catch (e) { log('вынос стопов: ошибка', e.message.slice(0, 200)); }
     }
     // Пульс: сделки сильных трейдеров + лента постов для подтверждения новостей
     if (process.env.PULSE_EVERY_MIN && Date.now() - lastPulse >= +process.env.PULSE_EVERY_MIN * 60e3) {
