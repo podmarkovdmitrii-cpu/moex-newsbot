@@ -74,6 +74,24 @@ jobs:
           RESEARCH_HIST: ${{ github.workspace }}/research-hist
           PYTHONWARNINGS: ignore
         run: python newsbot/research/verify.py
+      - name: Вынос стопов — обучение на разных промежутках и таймфреймах (shakeout.py)
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          RESEARCH_DIR: ${{ github.workspace }}/research-stats
+          RESEARCH_HIST: ${{ github.workspace }}/research-hist
+          PYTHONWARNINGS: ignore
+        run: python newsbot/research/shakeout.py
+      - name: Агент-проверяющий выносов (shake_verify.py)
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          RESEARCH_DIR: ${{ github.workspace }}/research-stats
+          RESEARCH_HIST: ${{ github.workspace }}/research-hist
+          PYTHONWARNINGS: ignore
+        run: python newsbot/research/shake_verify.py
       - name: Отчёт (файлы для скачивания)
         if: always()
         uses: actions/upload-artifact@v4
@@ -84,6 +102,8 @@ jobs:
             research-stats/verify.json
             research-stats/stats.json
             research-stats/wf.json
+            research-stats/shakeout.json
+            research-stats/shake_verify.json
             research-stats/crowd_events.csv
             research-stats/weekend_rows.csv
           retention-days: 30

@@ -89,6 +89,7 @@ jobs:
           NEWS_LOOP_SEC: '75'
           ANOMALY_EVERY_MIN: '5'
           PULSE_EVERY_MIN: '15'
+          SHAKE_EVERY_MIN: '10'
           RU_CA: ${{ runner.temp }}/ru_ca.pem
           LLM_NEWS_PER_DAY: '45'
         run: |
