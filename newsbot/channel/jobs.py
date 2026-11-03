@@ -38,7 +38,7 @@ SEC_RU = {"bank": "банки", "oil": "нефтегаз", "metal": "метал�
 SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "weekly", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
          "45 10 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening",
          "20 3 * * 1-5": "trader_prep", "20 4 * * 1-5": "trader_open", "20 7 * * 1-5": "trader_open", "45 16 * * 5": "trader_week",
-         "15 9 * * 1-5": "stock_review", "30 16 * * 0": "weekend_review"}
+         "15 9 * * 1-5": "stock_review", "30 16 * * 0": "weekend_review", "55 15 * * 1-5": "strong_moves"}
 PUB = Publisher()
 DISCLAIMER_TXT = DISCLAIMER
 
@@ -256,7 +256,8 @@ def flows():
     news_cls = all_clusters()
 
     def why(t, chg, x_=None):
-        b = behavior(chg, flow=flow_by.get(t), x=x_, oi=oi_map.get(t), r5=ret5(t) if (chg or 0) >= 0.03 else None, ndir=news_dir(t, cls=news_cls))
+        need_r5 = (chg or 0) >= 0.03 or (flow_by.get(t) or 0) < 0  # для продавцов — всегда: фиксация прибыли / продолжение распродажи
+        b = behavior(chg, flow=flow_by.get(t), x=x_, oi=oi_map.get(t), r5=ret5(t) if need_r5 else None, ndir=news_dir(t, cls=news_cls))
         return ("\n   ↳ <i>" + esc("; ".join(b)) + "</i>") if b else ""
 
     def row(x):
@@ -407,13 +408,34 @@ def behavior(chg, flow=None, x=None, oi=None, r5=None, ndir=0):
             out.append("продажи по рынку не роняют цену — кто-то крупный выкупает предложение лимитками")
     if not out and r5 is not None and r5 <= -0.05 and chg >= 0.03 and (flow is None or flow > 0):
         out.append(f"резкий отскок после падения ({pc(r5, 0)} за 5 дней) — часть покупок может быть закрытием шортов")
+    # продавцы — те же объяснения зеркально (раньше у строк с перевесом продаж пояснений почти не было)
+    if not out and r5 is not None and r5 >= 0.05 and chg <= 0 and (flow is not None and flow < 0):
+        out.append(f"фиксация прибыли после роста ({pc(r5, 0)} за 5 дней) — продают те, кто покупал раньше")
+    if not out and r5 is not None and r5 <= -0.07 and chg <= -0.01 and (flow is not None and flow < 0):
+        out.append(f"продажи продолжаются после падения ({pc(r5, 0)} за 5 дней) — держатели выходят из бумаги, разворота по потоку пока нет")
+    if ndir and flow is not None and abs(flow) >= 0.15 and len(out) < 2:
+        if flow < 0 and ndir < 0:
+            out.append("продают вслед за негативной новостью о компании")
+        elif flow > 0 and ndir > 0:
+            out.append("покупают вслед за позитивной новостью о компании")
+        elif flow < 0 and ndir > 0:
+            out.append("продают несмотря на позитивную новость — «продажа на факте» или крупный держатель выходит")
+        elif flow > 0 and ndir < 0:
+            out.append("покупают несмотря на негативную новость — рынок считает её учтённой в цене")
     if x and x >= 2.5:
         if chg <= -0.04 and (flow is None or flow < 0):
             out.append("обвал на большом объёме — возможны вынужденные продажи (маржин-коллы)")
+        elif -0.04 < chg <= -0.015 and (flow is not None and flow < 0) and len(out) < 2:
+            out.append("продажи на объёме выше обычного — крупный участник сокращает позицию")
         elif abs(chg) < 0.01 and len(out) < 2:
             out.append("большой оборот почти без движения цены — похоже на перекладку крупного пакета или борьбу за уровень")
         elif chg >= 0.05 and ndir <= 0 and len(out) < 2:
             out.append("сильный импульс на большом объёме без новости в ту же сторону — такие движения часто частично откатываются")
+    if not out and flow is not None and abs(flow) >= 0.2:
+        if flow < 0:
+            out.append("продажи по рынку без заметной новости" + (" и цена уступает — давление продавцов реальное" if chg <= -0.005 else " — пока цену держат покупатели лимитными заявками"))
+        else:
+            out.append("покупки по рынку без заметной новости" + (" и цена растёт — спрос реальный" if chg >= 0.005 else " — пока цену держат продавцы лимитными заявками"))
     return out[:2]
 
 
@@ -3297,7 +3319,7 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "anom_next": anom_next, "telegraph_check": telegraph_check, "shakeout_scan": shakeout_scan, "pattern_scan": shakeout_scan,
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "anom_next": anom_next, "telegraph_check": telegraph_check, "shakeout_scan": shakeout_scan, "pattern_scan": shakeout_scan, "strong_moves": strong_moves,
      "trader_prep": lambda: trader_mod().prep(PUB), "trader_open": lambda: trader_mod().open_(PUB), "trader_week": lambda: trader_mod().week(PUB)}[mode]()
 
 
@@ -3398,6 +3420,78 @@ def shakeout_scan():
                "Правило подтверждено агентом-проверяющим: результат лучше случайного входа с тем же риском. Стоп обязателен, размер позиции — небольшой."]
         PUB.post("\n".join(txt), ai_lead=False)
         log("паттерн", R["fam"], ": идея", tf, t, "рост" if side > 0 else "снижение")
+
+def strong_moves():
+    """Вечер (18:55 МСК): очень резкие движения дня (≥ 4,5 обычного дневного хода за 1–3 дня) — пост-наблюдение с честной
+    статистикой из research/reversal.py: что бывало дальше на истории 2008–2026. Не сигнал: как стратегия это не прошло проверку."""
+    import patterns as PT
+    obs = research().get("reversal_obs") or {}
+    if not obs:
+        log("резкие движения: статистики ещё нет")
+        return
+    now = now_msk()
+    seen = load_json("strong_seen.json", {})
+    if seen.get("day") == now.date().isoformat():
+        return
+    cls = all_clusters()
+    found = []
+    for r in liquid_shares(2000):
+        t = r["SECID"]
+        if (r.get("VALTODAY") or 0) < 30e6:
+            continue
+        try:
+            B = share_candles(t, 90)
+        except Exception as e:  # noqa: BLE001
+            log("резкие движения: свечи", t, e)
+            continue
+        bars = [dict(o=b["o"], h=b["h"], l=b["l"], c=b["c"], v=b["v"]) for b in B]
+        if len(bars) < 40 or B[-1]["t"][:10] != now.date().isoformat():
+            continue
+        j = len(bars) - 1
+        a = PT.atr_at(bars, j)
+        if not a:
+            continue
+        for W in (1, 2, 3):
+            m = PT.med_vol(bars, j - W + 1)
+            if not m or m < 30e6:
+                continue
+            mv = (bars[j]["c"] - bars[j - W]["c"]) / a
+            vr = sum(x["v"] for x in bars[j - W + 1:j + 1]) / (W * m)
+            if abs(mv) >= 4.5 and vr >= 1.0:
+                d = "up" if mv > 0 else "down"
+                st = (obs.get(f"W{W}_vx{2 if vr >= 2 else 1}_{d}") or {}).get("f5")
+                if st and st.get("n", 0) >= 30:
+                    since = time.time() - 30 * 3600
+                    n_news = len([c for c in company_news(t, since, cls) if (c.get("key") or "").split("|")[-1] != "tone"])
+                    found.append(dict(t=t, W=W, mv=mv, vr=vr, chg=bars[j]["c"] / bars[j - W]["c"] - 1, d=d, st=st, news=n_news))
+                break
+        time.sleep(0.03)
+    seen = {"day": now.date().isoformat()}
+    save_json("strong_seen.json", seen)
+    if not found:
+        log("резкие движения: сегодня движений ≥ 4,5 ATR нет")
+        return
+    found.sort(key=lambda z: -abs(z["mv"]))
+    txt = [f"📣 <b>Очень резкие движения дня</b> · {now.strftime('%d.%m')} <i>(наблюдение, не сигнал)</i>",
+           "Бумаги, которые за 1–3 дня прошли больше 4,5 обычных дневных ходов. Что бывало дальше в таких случаях на истории Мосбиржи 2008–2026:", ""]
+    for z in found[:6]:
+        s_ = z["st"]
+        kind = "роста" if z["d"] == "up" else "падения"
+        sg = 1 if z["d"] == "up" else -1
+        cont = s_.get("cont") or 0
+        nw = s_.get("with_news") if z["news"] else s_.get("no_news")
+        nw_txt = (f"; когда {'были' if z['news'] else 'не было'} новостей о компании — {pc(nw['mean'] * sg, 1)} в {round((nw.get('cont') or 0) * 100)}% случаев (выборка {nw['n']})"
+                  if nw and nw.get("n", 0) >= 30 else "")
+        txt.append(f"{'🟢' if z['d'] == 'up' else '🔴'} <b>${z['t']}</b> {pc(z['chg'], 1)} за {z['W']} {'день' if z['W'] == 1 else 'дня'} "
+                   f"({fmt(abs(z['mv']), 1)} обычного хода), оборот {fmt(z['vr'], 1)}× к норме · новостей о компании за сутки: {z['news'] or 'нет'}")
+        txt.append(f"   ↳ <i>после такого {kind} в {round(cont * 100)}% случаев движение продолжалось ещё 5 торговых дней: в среднем "
+                   f"{pc(s_['mean'] * sg, 1)} (медиана {pc((s_.get('median') or 0) * sg, 1)}), выборка {s_['n']}, "
+                   f"продолжение перевешивало в {round((s_.get('pos_years') or 0) * 100)}% лет{nw_txt}</i>")
+    txt += ["", "<i>Почему это не идея на вход: как торговая стратегия (со стопом и издержками) продолжение после резких движений на истории "
+                "не дало устойчивой прибыли на годах, которые не участвовали в подборе. В остальных случаях движение разворачивалось.</i>"]
+    PUB.post("\n".join(txt), ai_lead=False)
+    log("резкие движения: опубликовано", len(found[:6]))
+
 
 def trader_mod():
     import trader  # рубрика «Трейдер» (channel/trader.py)
