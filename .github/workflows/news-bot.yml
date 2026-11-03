@@ -92,10 +92,23 @@ jobs:
           SHAKE_EVERY_MIN: '10'
           RU_CA: ${{ runner.temp }}/ru_ca.pem
           LLM_NEWS_PER_DAY: '45'
+          # закрытые идеи с оплатой доступа (newsbot/channel/paywall.py)
+          IDEA_ADMINS: ${{ vars.IDEA_ADMINS }}
+          IDEA_SITE_URL: ${{ vars.IDEA_SITE_URL }}
+          PAY_PROVIDER_TOKEN: ${{ secrets.PAY_PROVIDER_TOKEN }}
+          PAY_CURRENCY: ${{ vars.PAY_CURRENCY || 'RUB' }}
+          PAY_PRICE: ${{ vars.PAY_PRICE || '500' }}
+          PAY_DAYS: ${{ vars.PAY_DAYS || '30' }}
+          PAY_RECEIPT: ${{ vars.PAY_RECEIPT || '1' }}
+          PAY_VAT_CODE: ${{ vars.PAY_VAT_CODE || '1' }}
         run: |
           BOT=$(find . -name bot.js -path '*newsbot*' | head -1)
           if [ -z "$BOT" ]; then echo "Не найден newsbot/bot.js — загрузите папку newsbot в репозиторий"; exit 1; fi
-          node "$BOT"
+          PW=$(find . -name paywall.py -path '*newsbot/channel*' | head -1)
+          if [ -n "$PW" ] && [ "${{ vars.IDEAS }}" != "off" ]; then python "$PW" & PWPID=$!; fi
+          rc=0; node "$BOT" || rc=$?
+          if [ -n "$PWPID" ]; then kill -TERM "$PWPID" 2>/dev/null; wait "$PWPID" 2>/dev/null || true; fi
+          exit $rc
       - name: Сохранить состояние бота
         if: always()
         uses: actions/cache/save@v4
