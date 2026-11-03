@@ -79,7 +79,10 @@ def fetch_trades(secid, market, last=None, max_pages=150):
             p.update(tradeno=last, next_trade=1)
         else:
             p["start"] = start
+        t0 = time.time()
         rows = table(iss(f"engines/stock/markets/{market}/securities/{secid}/trades.json", **p), "trades")
+        if time.time() - t0 > 15:
+            log(f"сделки {secid}: страница {len(rows)} строк за {time.time() - t0:.0f} с — Мосбиржа отвечает медленно")
         out += rows
         if len(rows) < 5000:
             break
