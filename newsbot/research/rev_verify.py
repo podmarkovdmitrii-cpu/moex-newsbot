@@ -87,6 +87,8 @@ def main():
     except Exception:  # noqa: BLE001
         st = {}
     st["reversal"] = {tf: {k: v for k, v in d.items() if k in ("up", "down")} for tf, d in res.items()}
+    # статистика очень резких движений (≥ 4,5 ATR) — для постов-наблюдений (не сигналы)
+    st["reversal_obs"] = ((rv.get("d") or {}).get("patterns") or {}).get("strong")
     json.dump(st, open(sp, "w"), ensure_ascii=False, default=float)
     n_ok = sum(1 for tf in res for k in ("up", "down") if (res[tf].get(k) or {}).get("verified"))
     log("ИТОГ: подтверждённых стратегий", n_ok, "— живой агент публикует идеи только по ним")

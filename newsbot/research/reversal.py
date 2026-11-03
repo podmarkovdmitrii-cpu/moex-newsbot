@@ -196,6 +196,32 @@ def patterns(tf, P, B, news, day_idx, news_ok_from):
         for W in GRID[tf]["W"]:
             r[f"окно {W}"] = st(X[X.W == W].f)
         out[f"f{h}"] = r
+    # очень резкие движения (≥ 4,5 ATR) — для постов-наблюдений: отдельно по окну, направлению, обороту и новостям
+    strong = {}
+    for W in GRID[tf]["W"]:
+        for vxmin in (1.0, 2.0):
+            for dname, dv in (("up", 1), ("down", -1)):
+                X0 = D[(D.W == W) & (D.mag >= 4.5) & (D.vr >= vxmin) & (D.d == dv)]
+                r = {}
+                for h in (1, 3, 5, 10):
+                    X = X0[X0.h == h]
+                    if not len(X):
+                        continue
+                    s_ = st(X.f)
+                    by = X.groupby("year").f.mean()
+                    cnt = X.groupby("year").f.size()
+                    by = by[cnt >= 3]
+                    s_.update(pos_years=round(float((by > 0).mean()), 2) if len(by) else None, years=int(len(by)),
+                              first_half=st(X[X.year <= 2016].f), second_half=st(X[X.year >= 2017].f),
+                              with_news=st(X[X.news == 1].f), no_news=st(X[X.news == 0].f), median=round(float(X.f.median()), 4))
+                    r[f"f{h}"] = s_
+                strong[f"W{W}_vx{vxmin:g}_{dname}"] = r
+    out["strong"] = strong
+    for k, v in strong.items():
+        if "f5" in v and k.endswith(("_up", "_down")) and "_vx2_" in k:
+            f = v["f5"]
+            log(f"   ≥4,5 ATR {k:15}: 5 баров {f['mean'] * 100:+.2f}% (продолжение в {f['cont']:.0%}, n={f['n']}, t={f['t']}, плюс в {(f['pos_years'] or 0):.0%} из {f['years']} лет; "
+                f"2008–16 {f['first_half'].get('mean', 0) * 100:+.2f}%, 2017–26 {f['second_half'].get('mean', 0) * 100:+.2f}%)")
     log(f"=== {tf}: что после резкого движения (+ продолжение, − разворот), события {int((D.h == 1).sum())} ===")
     for k, v in out["f5"].items():
         log(f"   5 баров | {k:13}: {v['mean'] * 100:+.2f}% (продолжение в {v['cont']:.0%}, n={v['n']}, t={v['t']})")
