@@ -529,15 +529,36 @@ function channelTick(S) {
     }
   }
   S.chLast = now;
-  for (const [mode, x] of [...due.entries()].sort((a, b) => a[1].t - b[1].t)) {
-    S.chDone[x.key] = Date.now();
-    saveState(S);
-    log('паблик: по расписанию', mode, '(слот', new Date(x.t).toISOString().slice(11, 16), 'UTC, опоздание', Math.round((Date.now() - x.t) / 60e3), 'мин)');
-    try {
-      require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py')],
-        { timeout: 20 * 60e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: '', SCHED: x.cron, CHANNEL_STATE: process.env.CHANNEL_STATE_DIR || path.join(STATE_DIR, 'channel-pub'), NEWS_STATE: STATE_DIR }) });
-    } catch (e) { log('паблик', mode, ': ошибка', e.message.slice(0, 300)); }
+  // пост запускается отдельным процессом, чтобы цикл новостей не ждал (сбор потоков с Мосбиржи иногда идёт 5–10 минут);
+  // одновременно — только один пост, следующий из очереди стартует, когда предыдущий закончится
+  S.chQueue = (S.chQueue || []).concat([...due.entries()].sort((a, b) => a[1].t - b[1].t).map(([mode, x]) => Object.assign({ mode }, x)));
+  for (const x of S.chQueue) S.chDone[x.key] = S.chDone[x.key] || now;
+  channelRun(S);
+}
+let CH_PROC = null;
+function channelRun(S) {
+  if (CH_PROC) {
+    if (Date.now() - CH_PROC.t0 > 20 * 60e3) { log('паблик:', CH_PROC.mode, 'идёт дольше 20 мин — остановлен'); try { CH_PROC.p.kill('SIGKILL'); } catch (e) { /* уже завершился */ } CH_PROC = null; }
+    else return;
   }
+  while ((S.chQueue || []).length) {
+    const x = S.chQueue.shift();
+    const late = (Date.now() - x.t) / 60e3;
+    if (late > (CH_GRACE[x.mode] || 30) + 10) { log('паблик: слот', x.mode, 'устарел в очереди — пропущен'); continue; }
+    log('паблик: по расписанию', x.mode, '(слот', new Date(x.t).toISOString().slice(11, 16), 'UTC, опоздание', Math.round(late), 'мин)');
+    const p = require('child_process').spawn(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py')],
+      { stdio: 'inherit', env: Object.assign({}, process.env, { MODE: '', SCHED: x.cron, CHANNEL_STATE: process.env.CHANNEL_STATE_DIR || path.join(STATE_DIR, 'channel-pub'), NEWS_STATE: STATE_DIR }) });
+    const rec = { p, mode: x.mode, t0: Date.now() };
+    CH_PROC = rec;
+    p.on('exit', code => { log('паблик:', x.mode, 'готово за', Math.round((Date.now() - rec.t0) / 1000), 'с', code ? '(код ' + code + ')' : ''); if (CH_PROC === rec) { CH_PROC = null; channelRun(S); } });
+    p.on('error', e => { log('паблик:', x.mode, 'не запустился:', e.message); if (CH_PROC === rec) CH_PROC = null; });
+    break;
+  }
+  saveState(S);
+}
+async function channelWait() { // перед завершением запуска дождаться поста, который ещё публикуется
+  const t = Date.now();
+  while (CH_PROC && Date.now() - t < 20 * 60e3) await sleep(5000);
 }
 
 (async () => {
@@ -623,4 +644,6 @@ function channelTick(S) {
       saveState(S);
     } catch (e) { log('цикл новостей: ошибка', e.message); }
   }
+  await channelWait();
+  saveState(S);
 })();
