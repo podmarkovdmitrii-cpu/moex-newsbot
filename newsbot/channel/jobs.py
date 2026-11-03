@@ -168,8 +168,14 @@ def flows():
         log("фьючерсы", e)
         fut = {}
     items = [("share", r["SECID"], r) for r in md] + [("fut", f["secid"], f) for f in fut.values()]
-    n_ok, n_fail = 0, 0
+    n_ok, n_fail, t_start = 0, 0, time.time()
+    budget = float(os.environ.get("FLOWS_BUDGET_S", 420))
     for kind, t, r in items:
+        if time.time() - t_start > budget:
+            # лента сделок отдаётся слишком медленно: пост с опозданием в 10+ минут уже не «текущий» — пропускаем слот
+            log(f"ленты сделок грузятся дольше {budget / 60:.0f} мин (готово {n_ok} из {len(items)}) — пост потоков пропущен")
+            save_json("flows.json", stt)  # загруженное сохраняем: следующий слот догрузит остальное быстрее
+            return
         if n_fail >= 3 and not n_ok:
             # Мосбиржа не отдаёт ленту сделок этому серверу (каждая бумага — ~100 с тайм-аутов): не ждём час, пост пропускаем
             log("ленты сделок недоступны (3 бумаги подряд) — пост потоков пропущен, следующий слот через 30 минут")
