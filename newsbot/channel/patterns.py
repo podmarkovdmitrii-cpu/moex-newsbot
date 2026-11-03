@@ -10,7 +10,7 @@ ATR(j) — среднее истинного диапазона баров j−1
 Семейства:
   stop    — вынос стопов (без предшествующего движения): прокол экстремума N баров и закрытие обратно (research/shakeout.py);
   fade    — после резкого движения за W баров (|ΔC| ≥ thr·ATR, оборот ≥ vx×) — вход против движения, стоп за экстремумом окна;
-  follow  — то же движение, вход по движению, стоп 1,5·ATR;
+  follow  — то же движение, вход по движению, стоп 1,5·ATR (follow_wide — 3·ATR);
   confirm — резкое движение за W баров до j, бар j закрылся против движения (≥ 0,5·ATR) → вход против движения («рост, затем падение»);
   shake   — резкое движение за W баров до j, бар j — вынос стопов против движения (прокол экстремума окна и закрытие обратно) → вход против
             движения: связка резкого движения и выноса стопов.
@@ -96,10 +96,10 @@ def detect(bars, fam, prm, side, j=None, check_risk=True):
                 if a_j is None or (b["c"] - bars[j - 1]["c"]) * d > -0.5 * a_j:
                     return None
             stop = max(x["h"] for x in win) * 1.001 if side < 0 else min(x["l"] for x in win) * 0.999
-        elif fam == "follow":
+        elif fam in ("follow", "follow_wide"):
             if side != d:
                 return None
-            stop = entry - side * 1.5 * a_e
+            stop = entry - side * (1.5 if fam == "follow" else 3.0) * a_e
         elif fam == "shake":
             if side != -d:
                 return None
