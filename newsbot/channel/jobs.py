@@ -25,7 +25,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (plural, DISCLAIMER, MSK as MSKTZ, BG, BLUE, DEMO, DN, FG, GRID, NEWS_STATE, ORANGE, OUT, UP, VIOLET, Publisher, bln, candle_chart, currency_candles, ema, esc, fmt, hbars,  # noqa: E402
-                    http_get, index_candles, iss, load_json, log, now_msk, pc, plt, save_json, share_candles, style, table,
+                    http_get, index_candles, candles, iss, load_json, log, now_msk, pc, plt, save_json, share_candles, style, table,
                     FUT, FX, FUT_CODE, fut_continuous, fut_fronts, fut_candles, tf_bars, atr, TF_RU)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -3297,9 +3297,124 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "anom_next": anom_next, "telegraph_check": telegraph_check,
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "anom_next": anom_next, "telegraph_check": telegraph_check, "shakeout_scan": shakeout_scan,
      "trader_prep": lambda: trader_mod().prep(PUB), "trader_open": lambda: trader_mod().open_(PUB), "trader_week": lambda: trader_mod().week(PUB)}[mode]()
 
+
+# =============================================================================================
+# Агент «вынос стопов»: сканирует все акции Мосбиржи (TQBR — все они доступны в Т-Инвестициях) на дневных и часовых барах.
+# Правила и вероятность исполнения — из research/shakeout.py (обучение на разных промежутках 2008–2026 с новостями) и
+# research/shake_verify.py (агент-проверяющий). Идею на вход бот пишет ТОЛЬКО по подтверждённым правилам.
+# =============================================================================================
+def _shake_hit(bars, prm, side):
+    """Последний завершённый бар bars[-1] — вынос по правилу? bars: [{o,h,l,c,v}], история — до него."""
+    N = int(prm["N"])
+    if len(bars) < max(N, 25) + 2:
+        return None
+    b = bars[-1]
+    prev = bars[-1 - N:-1]
+    trs = []
+    for k in range(len(bars) - 15, len(bars) - 1):
+        x, p = bars[k], bars[k - 1]
+        trs.append(max(x["h"] - x["l"], abs(x["h"] - p["c"]), abs(x["l"] - p["c"])))
+    atr = sum(trs) / len(trs)
+    vv = sorted(x["v"] for x in bars[-21:-1])
+    med = vv[len(vv) // 2]
+    rg = b["h"] - b["l"]
+    if not (rg > 0 and rg >= prm["rng"] * atr and b["v"] >= prm["vx"] * med and med >= prm["liq"]):
+        return None
+    if side > 0:
+        ext = min(x["l"] for x in prev)
+        ok = b["l"] < ext * (1 - prm["pen"]) and b["c"] >= b["l"] + prm["pos"] * rg and b["c"] > ext
+        stop = b["l"] * 0.999
+    else:
+        ext = max(x["h"] for x in prev)
+        ok = b["h"] > ext * (1 + prm["pen"]) and b["c"] <= b["h"] - prm["pos"] * rg and b["c"] < ext
+        stop = b["h"] * 1.001
+    if not ok:
+        return None
+    entry = b["c"]
+    risk = (entry - stop) * side
+    if not (entry > 0 and risk > 0 and 0.003 <= risk / entry <= 0.15):
+        return None
+    return dict(entry=entry, stop=stop, tgt=entry + side * prm["R"] * risk, risk=risk / entry, ext=ext, rg=rg / atr, vx=b["v"] / med if med else 0)
+
+
+def shakeout_scan():
+    """Каждые ~10 минут (из bot.js): часовые бары — после закрытия часа; дневные — один раз вечером (18:45–19:30 МСК)."""
+    rules = research().get("shakeout") or {}
+    live = [(tf, side_name, r) for tf in ("d", "h") for side_name, r in (rules.get(tf) or {}).items() if r.get("verified")]
+    if not live:
+        log("вынос стопов: подтверждённых правил нет — идей не публикуем")
+        return
+    now = now_msk()
+    if now.weekday() >= 5 and not os.environ.get("SHAKE_WEEKEND"):
+        return
+    seen = load_json("shake_seen.json", {})
+    seen = {k: v for k, v in seen.items() if v >= (now - dt.timedelta(days=3)).isoformat()}
+    md = liquid_shares(2000)
+    cls = all_clusters()
+    posts = []
+    for tf, side_name, R in live:
+        side = 1 if side_name == "up" else -1
+        prm = R["params"]
+        if tf == "d" and not (now.hour == 18 and now.minute >= 45 or now.hour == 19 and now.minute <= 30):
+            continue
+        for r in md:
+            t = r["SECID"]
+            if (r.get("VALTODAY") or 0) < (prm["liq"] if tf == "d" else prm["liq"] * 5):
+                continue
+            try:
+                if tf == "d":
+                    B = share_candles(t, 150)
+                    bars = [dict(o=b["o"], h=b["h"], l=b["l"], c=b["c"], v=b["v"], t=b["t"]) for b in B]
+                    if not bars or bars[-1]["t"][:10] != now.date().isoformat():
+                        continue
+                else:
+                    B = candles(f"engines/stock/markets/shares/boards/TQBR/securities/{t}/candles.json", 12, 60)
+                    bars = [dict(o=b["o"], h=b["h"], l=b["l"], c=b["c"], v=b["v"], t=b["t"]) for b in B]
+                    if bars and bars[-1]["t"][:13] >= now.strftime("%Y-%m-%d %H"):
+                        bars = bars[:-1]  # текущий час ещё не закрыт
+                    if not bars or bars[-1]["t"][:10] != now.date().isoformat():
+                        continue
+            except Exception as e:  # noqa: BLE001
+                log("вынос: свечи", t, e)
+                continue
+            key = f"{tf}|{side_name}|{t}|{bars[-1]['t'][:13]}"
+            if key in seen:
+                continue
+            x = _shake_hit(bars, prm, side)
+            if not x:
+                continue
+            since = time.time() - 30 * 3600
+            nws = [c for c in company_news(t, since, cls) if (c.get("key") or "").split("|")[-1] != "tone"]
+            if R.get("news") == "no" and nws or R.get("news") == "with" and not nws:
+                continue
+            seen[key] = now.isoformat()
+            posts.append((tf, side, t, x, R, len(nws)))
+            time.sleep(0.05)
+    save_json("shake_seen.json", seen)
+    for tf, side, t, x, R, n_news in posts[:3]:
+        prm, o = R["params"], R.get("oos") or {}
+        d = dec_of(x["entry"])
+        what = "лонгистов (стопы покупателей)" if side > 0 else "шортистов (стопы продавцов)"
+        bar = "день" if tf == "d" else "час"
+        hz = f"{prm['Hb']} {'торговых дней' if tf == 'd' else 'часовых баров'}"
+        prob = R.get("prob") or (R.get("hist") or {}).get("prob")
+        txt = [f"🪤 <b>Вынос {what}: ${t}</b> · {'🟢 идея на рост' if side > 0 else '🔴 идея на снижение'}",
+               f"За {bar} цена {'проколола минимум' if side > 0 else 'проколола максимум'} последних {prm['N']} {'дней' if tf == 'd' else 'часов'} "
+               f"(<code>{fmt(x['ext'], d)}</code>), сработали стопы, но к закрытию бара вернулась {'вверх' if side > 0 else 'вниз'}. "
+               f"Размах бара {fmt(x['rg'], 1)}× обычного, оборот {fmt(x['vx'], 1)}× к норме"
+               + (f"; новостей о компании за сутки: {n_news}" if n_news else "; новостей о компании за сутки нет") + ".",
+               "",
+               f"<blockquote>🎯 <b>{'ЛОНГ' if side > 0 else 'ШОРТ'} ${t}</b>\nВход ≈ <code>{fmt(x['entry'], d)}</code> · стоп <code>{fmt(x['stop'], d)}</code> ({pc(-x['risk'], 1)}) · "
+               f"цель <code>{fmt(x['tgt'], d)}</code> ({pc(prm['R'] * x['risk'], 1)})\nГоризонт: {hz}</blockquote>",
+               f"📊 <b>Вероятность исполнения цели раньше стопа: ~{round((prob or 0) * 100)}%</b> "
+               f"<i>(доля таких сделок на истории вне выборки: правило подбиралось на прошлых годах и проверялось на следующих; "
+               f"{o.get('n', 0)} сделок, в среднем {pc(o.get('mean', 0), 2)} на сделку после издержек, плюс в {round((o.get('pos_years') or 0) * 100)}% лет)</i>",
+               "Правило подтверждено агентом-проверяющим: результат лучше случайного входа с тем же риском. Не забывайте про размер позиции: стоп обязателен."]
+        PUB.post("\n".join(txt), ai_lead=False)
+        log("вынос стопов: идея", tf, t, "рост" if side > 0 else "снижение")
 
 def trader_mod():
     import trader  # рубрика «Трейдер» (channel/trader.py)
