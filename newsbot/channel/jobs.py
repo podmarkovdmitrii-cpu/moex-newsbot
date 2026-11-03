@@ -168,7 +168,12 @@ def flows():
         log("фьючерсы", e)
         fut = {}
     items = [("share", r["SECID"], r) for r in md] + [("fut", f["secid"], f) for f in fut.values()]
+    n_ok, n_fail = 0, 0
     for kind, t, r in items:
+        if n_fail >= 3 and not n_ok:
+            # Мосбиржа не отдаёт ленту сделок этому серверу (каждая бумага — ~100 с тайм-аутов): не ждём час, пост пропускаем
+            log("ленты сделок недоступны (3 бумаги подряд) — пост потоков пропущен, следующий слот через 30 минут")
+            return
         s = stt["tk"].setdefault(t, {"last": None, "vb": 0.0, "vs": 0.0, "big": [], "pb": 0.0, "ps": 0.0})
         s["pb"], s["ps"] = s["vb"], s["vs"]  # на момент прошлого поста — для перевеса за последние 30 минут
         if kind == "share":
@@ -185,7 +190,9 @@ def flows():
                 rows = fetch_fut_trades(t, s["last"])
         except Exception as e:  # noqa: BLE001
             log("сделки", t, e)
+            n_fail += 1
             continue
+        n_ok += 1
         k = (r["step"] / r["minstep"]) if kind == "fut" and r.get("minstep") else 1
         for x in rows:
             if kind == "share" and x.get("BOARDID") not in (None, "TQBR"):
