@@ -6,7 +6,7 @@
    (1/3/5/10 баров, по направлению движения: «+» продолжение, «−» разворот). Разрезы: сила движения, были ли новости о компании,
    оборот, движение по тренду или против (цена относительно средней за 50 баров), рост или падение, дневные и часовые бары.
 2) Стратегии (сделка: вход по открытию следующего бара, стоп, цель R·риск или выход по времени; издержки 0,3%):
-   fade — против резкого движения; follow — по движению; confirm — после разворотного бара («рост, затем падение»);
+   fade — против резкого движения; follow / follow_wide — по движению (стоп 1,5 или 3 ATR); confirm — после разворотного бара («рост, затем падение»);
    shake — резкое движение, затем вынос стопов против него (связка с прошлым исследованием); stop — сам вынос стопов (shakeout.py).
 3) Обучение на разных промежутках (расширяющееся окно, скользящие 5 и 3 года) по каждому семейству и по всем вместе; лучшая
    стратегия = прошедшая порог вне выборки с наибольшей t. Её перепроверяет research/rev_verify.py (в т.ч. живым кодом channel/patterns.py).
@@ -29,7 +29,7 @@ import study as S  # noqa: E402
 
 OUT = S.OUT
 COST = SH.COST
-FAMS = ("fade", "follow", "confirm", "shake")
+FAMS = ("fade", "follow", "follow_wide", "confirm", "shake")
 GRID = {
     "d": dict(W=(1, 2, 3), thr=(2.0, 3.0, 4.5), vx=(1.0, 2.0), R=(1.5, 2.0, 3.0, 99.0), Hb=(3, 5, 10)),
     "h": dict(W=(1, 3, 6), thr=(2.0, 3.0, 4.5), vx=(1.0, 2.0), R=(1.5, 2.0, 3.0, 99.0), Hb=(4, 8, 24)),
@@ -73,10 +73,10 @@ def family_events(B, fam, W, thr, vx, liq):
                 m = big & (d == -side)
                 stop = np.where(side > 0, lowW * 0.999, highW * 1.001)
                 out[side] = (m, stop)
-        elif fam == "follow":
+        elif fam in ("follow", "follow_wide"):
             for side in (1, -1):
                 m = big & (d == side)
-                out[side] = (m, None)  # стоп 1,5·ATR от входа
+                out[side] = (m, 1.5 if fam == "follow" else 3.0)  # стоп 1,5·ATR (или 3·ATR — «широкий») от входа
         elif fam == "confirm":
             dc = C - shift1(C)
             for side in (1, -1):
@@ -106,7 +106,7 @@ def trades2(B, js, is_, side, stop_arr, R, Hb):
     ok = js + Hb < n
     js, is_, idx = js[ok], is_[ok], idx[ok]
     entry = O[js + 1, is_]
-    stop = (entry - side * 1.5 * B["atr"][js, is_]) if stop_arr is None else stop_arr[js, is_]
+    stop = (entry - side * float(stop_arr) * B["atr"][js, is_]) if np.isscalar(stop_arr) else stop_arr[js, is_]
     risk = (entry - stop) * side
     with np.errstate(invalid="ignore", divide="ignore"):
         good = (entry > 0) & (risk > 0) & (risk / entry >= 0.003) & (risk / entry <= 0.15)
