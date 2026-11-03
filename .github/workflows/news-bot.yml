@@ -1,19 +1,29 @@
 name: Новостной бот (почти в реальном времени)
 
 on:
+  # Бот работает непрерывно: каждый запуск держится ~110 минут (новости каждые 75 с, посты паблика по расписанию из
+  # channel/jobs.py), в конце сохраняет состояние и сам запускает следующий (workflow_dispatch). Расписание GitHub ниже —
+  # только «сторож»: если цепочка оборвалась, ближайший срабатывающий cron её перезапустит. Остановить цепочку —
+  # переменная репозитория BOT_CHAIN = off.
   schedule:
-    - cron: '4,34 * * * 1-5'      # будни круглосуточно (минуты 04 и 34 — GitHub реже пропускает запуски не в начале часа) (и ночью — для утреннего плана): каждый запуск держится ~26 минут и проверяет каналы каждые 75 секунд
-    - cron: '17 */2 * * 0,6'       # выходные: новости раз в 2 часа (попадут в план понедельника)
+    - cron: '4,34 * * * *'
+  push:
+    paths:
+      - '.github/workflows/news-bot.yml'   # после изменения этого файла цепочка стартует сразу
   workflow_dispatch:
 
 concurrency:
   group: newsbot
   cancel-in-progress: false
 
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 135
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,7 +33,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Библиотека для картинок к новостям
-        run: pip install --quiet matplotlib "scikit-learn==1.5.2" pandas numpy
+        run: pip install --quiet matplotlib reportlab "scikit-learn==1.5.2" pandas numpy
       - name: Сертификаты НУЦ Минцифры (нужны для API Т-Пульса)
         continue-on-error: true
         run: |
@@ -42,7 +52,19 @@ jobs:
           path: newsbot-state
           key: newsbot-state-${{ github.run_id }}
           restore-keys: newsbot-state-
-      - name: Новости и сделки
+      - name: Состояние паблика
+        uses: actions/cache/restore@v4
+        with:
+          path: channel-state
+          key: channel-state-${{ github.run_id }}
+          restore-keys: channel-state-
+      - name: Результаты исследований (толпа, смежные бумаги, выходные)
+        uses: actions/cache/restore@v4
+        with:
+          path: research-stats
+          key: research-stats-${{ github.run_id }}
+          restore-keys: research-stats-
+      - name: Новости, сделки и посты паблика по расписанию
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_PUBLIC_TOKEN: ${{ secrets.TG_PUBLIC_TOKEN }}
@@ -59,7 +81,11 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           ANOM_MODELS: ${{ github.workspace }}/anomaly-models
           PYTHON: python
-          NEWS_LOOP_MIN: ${{ github.event.schedule == '17 */2 * * 0,6' && '0' || '26' }}
+          NEWS_LOOP_MIN: '110'
+          CHANNEL_SCHED: '1'
+          CHANNEL_STATE_DIR: ${{ github.workspace }}/channel-state
+          RESEARCH_STATS: ${{ github.workspace }}/research-stats
+          TELEGRAPH_TOKEN: ${{ secrets.TELEGRAPH_TOKEN }}
           NEWS_LOOP_SEC: '75'
           ANOMALY_EVERY_MIN: '5'
           PULSE_EVERY_MIN: '15'
@@ -75,3 +101,14 @@ jobs:
         with:
           path: newsbot-state
           key: newsbot-state-${{ github.run_id }}
+      - name: Сохранить состояние паблика
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: channel-state
+          key: channel-state-${{ github.run_id }}
+      - name: Запустить следующий цикл (бот работает без перерывов)
+        if: ${{ !cancelled() && vars.BOT_CHAIN != 'off' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run news-bot.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}"
