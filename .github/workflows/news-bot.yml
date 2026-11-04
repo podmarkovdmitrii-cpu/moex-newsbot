@@ -104,6 +104,8 @@ jobs:
           BONUS_DAYS: ${{ vars.BONUS_DAYS || secrets.BONUS_DAYS || '7' }}
           SUPPORT_CONTACT: ${{ vars.SUPPORT_CONTACT || secrets.SUPPORT_CONTACT }}
           FAQ_TEXT: ${{ vars.FAQ_TEXT || secrets.FAQ_TEXT }}
+          OZON_TIPS_URL: ${{ vars.OZON_TIPS_URL || secrets.OZON_TIPS_URL }}
+          PAY_METHOD: ${{ vars.PAY_METHOD || secrets.PAY_METHOD }}
         run: |
           BOT=$(find . -name bot.js -path '*newsbot*' | head -1)
           if [ -z "$BOT" ]; then echo "Не найден newsbot/bot.js — загрузите папку newsbot в репозиторий"; exit 1; fi
