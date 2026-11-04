@@ -498,6 +498,55 @@ function sourcesLine(c) {
 }
 function tags(tks) { return tks.length ? '\n' + tks.slice(0, 6).map(t => '#' + t).join(' ') : ''; }
 
+// ---------- «Главное за день»: один пост-лента, пополняется в течение дня ----------
+// Отдельными постами — только самые весомые новости (вес ≥ NEWS_SOLO_PCT, не больше NEWS_SOLO_PER_DAY в день);
+// остальные прошедшие проверку новости — строкой в ленте дня.
+const SOLO_PER_DAY = +(process.env.NEWS_SOLO_PER_DAY || 8), SOLO_PCT = +(process.env.NEWS_SOLO_PCT || 0.9);
+const soloOk = (S, pct) => (S.pub.solo || 0) < SOLO_PER_DAY && pct >= SOLO_PCT;
+function firstSentence(t, n = 130) {
+  t = String(t || '').trim();
+  const m = t.match(/^(.{20,}?[.!?])(\s|$)/);
+  t = m && m[1].length <= n ? m[1] : t;
+  return t.length > n ? t.slice(0, t.lastIndexOf(' ', n - 1) > 40 ? t.lastIndexOf(' ', n - 1) : n - 1) + '…' : t;
+}
+function feedAdd(S, c, { tk, ty, dir, pct = 0, mark: mk = '' }) {
+  S.pub.feed = S.pub.feed || { day: S.pub.day, id: null, items: [] };
+  const hm = new Date(Date.now() + 3 * 3600e3).toISOString().slice(11, 16);
+  const who = tk === 'РЫНОК' ? 'Рынок' : '$' + tk;
+  const emo = mk || ((pct >= 0.9 ? '⚡️' : '') + (dir > 0 ? '🟢' : dir < 0 ? '🔴' : '⚪️'));
+  const p = srcPick(c);
+  const ch = p ? p[0] : Object.keys(c.srcs || {})[0];
+  const link = (p && p[1].link) || (c.first && c.first.link) || '';
+  const tyRu = { insider_buy: 'покупка инсайдера', insider_sell: 'продажа инсайдера' }[ty] || TYPE_RU[ty] || ty;
+  const line = `${hm} ${emo} <b>${esc(who)} · ${esc(tyRu)}</b> — ${esc(firstSentence(srcFull(c)))}` + (link ? ` <a href="${link}">${esc(src(ch))}</a>` : '');
+  S.pub.feed.items.unshift(line);
+  S.pub.feed.items = S.pub.feed.items.slice(0, 80);
+  S.pub.feedDirty = true;
+}
+async function tgEdit(id, text) {
+  if (DRY || !TG_CHAT) { console.log('\n===== ПАБЛИК TG (правка ленты) =====\n' + text.replace(/<[^>]+>/g, '')); return true; }
+  const r = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/editMessageText`, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ chat_id: TG_CHAT, message_id: id, text, parse_mode: 'HTML', disable_web_page_preview: true }) });
+  const js = await r.json().catch(() => ({}));
+  if (js.ok || /not modified/.test(js.description || '')) return true;
+  log('лента дня: правка не прошла:', js.description || r.status);
+  return false;
+}
+async function feedFlush(S) {
+  const f = S.pub.feed;
+  if (!f || !S.pub.feedDirty || !f.items.length) return;
+  S.pub.feedDirty = false;
+  const d = new Date(Date.now() + 3 * 3600e3).toISOString();
+  const head = `🗞 <b>Главное за день</b> · ${d.slice(8, 10)}.${d.slice(5, 7)}, обновлено в ${d.slice(11, 16)} МСК #главное\n` +
+    '<i>🔄 Лента пополняется в течение дня; самые весомые новости — отдельными постами #новости</i>';
+  const lines = [];
+  for (const x of f.items) { if (vis([head, ...lines, x].join('\n\n')).length > 3700) break; lines.push(x); }
+  const text = head + '\n\n' + lines.join('\n\n') + `\n\n<i>${DISCLAIMER}</i>`;
+  if (f.id && await tgEdit(f.id, text)) return;
+  f.id = await tgSend(text);
+  log('лента дня: опубликована', f.id);
+}
+
 // ---------- основной отбор ----------
 async function run(S, clusters, items) {
   // вес каждой новости сохраняется в кластере — по нему утренний план ранжирует ночные новости, вечерний — новости дня
@@ -511,7 +560,7 @@ async function run(S, clusters, items) {
   await NC.refreshTickers(process.env.STATE_DIR || path.join(__dirname, 'state'));
   S.pub = S.pub || { day: '', count: 0, links: [], msg: {} };
   const today = new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10);
-  if (S.pub.day !== today) { S.pub.day = today; S.pub.count = 0; }
+  if (S.pub.day !== today) { S.pub.day = today; S.pub.count = 0; S.pub.solo = 0; S.pub.feed = { day: today, id: null, items: [] }; }
   const done = new Set(S.pub.links);
   const now = Date.now() / 1000;
   let n = 0;
@@ -527,14 +576,20 @@ async function run(S, clusters, items) {
     it.tks = it.tks.filter(t => NC.tickerInContext(t, it.tx, null).ok);
     if (!it.tks.length) continue;
     const buy = /купил|приобр|увеличил|нарастил/i.test(it.tx);
-    mark(it.link); n++;
+    mark(it.link);
+    if ((S.pub.solo || 0) >= SOLO_PER_DAY) {  // лимит отдельных постов исчерпан — строкой в ленту дня
+      feedAdd(S, { srcs: { [it.ch]: { tx: it.tx, link: it.link, ts: it.ts } }, first: { tx: it.tx, link: it.link }, tks: it.tks },
+        { tk: it.tks[0], ty: buy ? 'insider_buy' : 'insider_sell', mark: '💼' });
+      continue;
+    }
+    n++;
     try { fs.appendFileSync(path.join(process.env.STATE_DIR || path.join(__dirname, 'state'), 'news_log.jsonl'), JSON.stringify({ tk: '@INS', ts: it.ts, tks: it.tks, buy: buy ? 1 : 0, tx: it.tx.slice(0, 200) }) + '\n'); } catch (e) { /* не критично */ }
     const pseudo = { srcs: { [it.ch]: { tx: it.tx, link: it.link, ts: it.ts } }, first: { tx: it.tx, link: it.link }, tks: it.tks };
     const nb = await newsBody(S, pseudo, buy ? 'Покупка инсайдера' : 'Продажа инсайдера', it.tks[0], buy ? 1 : -1);
     if (nb.skip) { log('пропуск:', nb.skip); continue; }
-    await postNews(S, { head: `💼 <b>${buy ? 'Покупка' : 'Продажа'} инсайдера / крупного акционера</b> · ${it.tks.map(t => '$' + t).join(' ')}`, nb: Object.assign(nb, { sig: null }),
-      src: `🔗 <a href="${it.link}">${esc(src(it.ch))}</a>`, tg: tags(it.tks), aud: { tk: it.tks[0], ty: null, src: it.tx },
-      more: [`Как читать: ${buy ? 'покупки' : 'продажи'} менеджмента и крупных акционеров — публичная информация о том, как «свои» оценивают бумагу. Это не инсайдерская информация в смысле закона (224-ФЗ): сделка уже раскрыта.`] });
+    const im = await postNews(S, { head: `💼 <b>${buy ? 'Покупка' : 'Продажа'} инсайдера / крупного акционера</b> · ${it.tks.map(t => '$' + t).join(' ')} #инсайдеры`, nb: Object.assign(nb, { sig: null }),
+      src: `🔗 <a href="${it.link}">${esc(src(it.ch))}</a>`, tg: tags(it.tks), aud: { tk: it.tks[0], ty: null, src: it.tx } });
+    if (im) S.pub.solo = (S.pub.solo || 0) + 1;
   }
 
   const lastTs = c => Math.max(...Object.values(c.srcs).map(x => x.ts));
@@ -559,9 +614,11 @@ async function run(S, clusters, items) {
 
     // 4) подтверждение раннего сигнала
     if (c.pub.rumor && !c.pub.confirm && !c.rumorOnly) {
-      c.pub.confirm = true; n++;
+      c.pub.confirm = true;
       const off = Object.entries(c.srcs).find(([, x]) => !x.rumor);
-      await publish(S, `✅ <b>Подтвердилось</b> · ${c.tks.map(t => '$' + t).join(' ')} · ${esc(TYPE_RU[ty] || ty)}\n🔗 <a href="${off[1].link}">${esc(src(off[0]))}</a> · через ${Math.round((off[1].ts - c.ts) / 60)} мин после первого сообщения`, c.pub.msg);
+      if (!c.pub.msg) { feedAdd(S, c, { tk, ty, mark: '✅ подтвердилось:' }); continue; }  // слух был строкой в ленте
+      n++;
+      await publish(S, `✅ <b>Подтвердилось</b> · ${c.tks.map(t => '$' + t).join(' ')} · ${esc(TYPE_RU[ty] || ty)} #подтвердилось\n🔗 <a href="${off[1].link}">${esc(src(off[0]))}</a> · через ${Math.round((off[1].ts - c.ts) / 60)} мин после первого сообщения`, c.pub.msg);
       continue;
     }
     if (c.pub.done || c.pub.rumor || done.has(firstLink)) continue;
@@ -590,23 +647,29 @@ async function run(S, clusters, items) {
     const done_ = id => { if (id) QA.record(S, qctx, true, true); return id; };
     // 2) заявления официальных лиц и ведомств — сразу, если по истории такие заявления двигали рынок
     if (polit && tk === 'РЫНОК' && MACRO.test(ty) && w.pct >= th - 0.2) {
-      c.pub.done = true; mark(firstLink); n++;
+      c.pub.done = true; mark(firstLink);
+      if (!soloOk(S, w.pct)) { feedAdd(S, c, { tk, ty, dir: BASE_DIR[ty] || w.dir, pct: w.pct, mark: '🏛' }); QA.record(S, qctx, true, true); continue; }
+      n++;
       const nb = await newsBody(S, c, TYPE_RU[ty] || ty, tk, s, ty);
       if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
-      c.pub.msg = await postNews(S, { head: `🏛 <b>Заявление</b> · ${esc(TYPE_RU[ty] || ty)}`, nb, src: sourcesLine(c), weight: weightLine(w, ty), checked,
-        more: [weightMore(w), ...(nb.react.length ? ['<b>Как реагировал рынок на такие заявления:</b>', ...nb.react] : [])], tg: '\n#заявление', aud });
+      c.pub.msg = await postNews(S, { head: `🏛 <b>Заявление</b> · ${esc(TYPE_RU[ty] || ty)} #заявление`, nb, src: sourcesLine(c), weight: weightLine(w, ty), checked,
+        more: [weightMore(w), ...(nb.react.length ? ['<b>Как реагировал рынок на такие заявления:</b>', ...nb.react] : [])], aud });
+      if (c.pub.msg) S.pub.solo = (S.pub.solo || 0) + 1;
       done_(c.pub.msg);
       continue;
     }
     // 3) ранний сигнал (данные «источников») — сразу, если весомый; с вероятностью подтверждения
     if (c.rumorOnly) {
       if (tk === 'РЫНОК' || ty === 'tone' || !STRONG_RUMOR.test(c.first.tx || '') || w.p < 0.1 || w.pct < th) continue;
-      c.pub.rumor = true; mark(firstLink); n++;
+      c.pub.rumor = true; mark(firstLink);
+      if ((S.pub.solo || 0) >= SOLO_PER_DAY) { feedAdd(S, c, { tk, ty, mark: '🕵️ слух:' }); continue; }
+      n++;
       const nb = await newsBody(S, c, (TYPE_RU[ty] || ty) + ' (слух)', tk, s, ty, true);
       if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
-      c.pub.msg = await postNews(S, { head: `🕵️ <b>Слух, не подтверждён</b> · ${nb.tks.map(t => '$' + t).join(' ')} · ${esc(TYPE_RU[ty] || ty)}`, nb,
+      c.pub.msg = await postNews(S, { head: `🕵️ <b>Слух, не подтверждён</b> · ${nb.tks.map(t => '$' + t).join(' ')} · ${esc(TYPE_RU[ty] || ty)} #слух`, nb,
         extra: [`❓ Вероятность подтверждения: <b>~${Math.round(w.p * 100)}%</b> <i>(как часто подтверждались прошлые сообщения этих источников)</i>`],
         src: sourcesLine(c), weight: weightLine(w, ty), checked: checked.replace('Проверка информации:', 'Проверка информации (слух):'), more: [weightMore(w), ...nb.react, pulseLine(nb.tks || [], w.dir)], tg: tags(nb.tks), aud });
+      if (c.pub.msg) S.pub.solo = (S.pub.solo || 0) + 1;
       done_(c.pub.msg);
       continue;
     }
@@ -617,7 +680,9 @@ async function run(S, clusters, items) {
     const single = !(trustedFact || indepFacts >= 2);
     if (single && !chs.some(ch => (SRC[ch] || [])[1] && (SRC[ch] || [])[1] !== 'автор' && !c.srcs[ch].rumor)) continue; // авторские каналы в одиночку — не источник
     if (tk === 'РЫНОК' && !(c.official || trustedFact || w.pct >= 0.9)) continue;
-    c.pub.done = true; mark(firstLink); n++;
+    c.pub.done = true; mark(firstLink);
+    if (!soloOk(S, w.pct)) { feedAdd(S, c, { tk, ty, dir: BASE_DIR[ty] || w.dir, pct: w.pct }); QA.record(S, qctx, true, true); continue; }
+    n++;
     const nb = await newsBody(S, c, TYPE_RU[ty] || ty, tk, s, ty);
     if (nb.skip) { log('пропуск:', nb.skip); n--; continue; }
     const who = tk === 'РЫНОК' ? 'Рынок' : '$' + nb.main;
@@ -625,12 +690,14 @@ async function run(S, clusters, items) {
     const ed = BASE_DIR[ty] || w.dir; // цвет — по смыслу события, а не по статистике реакции
     const emo = (w.pct >= 0.9 ? '⚡️' : '') + (ed > 0 ? '🟢' : ed < 0 ? '🔴' : '⚪️');
     const today = tk !== 'РЫНОК' && nb.chg != null ? ` · сегодня ${pc(nb.chg, 1)}` : '';
-    c.pub.msg = await postNews(S, { head: `${emo} <b>${who} · ${esc(TYPE_RU[ty] || ty)}</b>${also}${today}`, nb,
+    c.pub.msg = await postNews(S, { head: `${emo} <b>${who} · ${esc(TYPE_RU[ty] || ty)}</b>${also}${today} #новости`, nb,
       src: sourcesLine(c) + (single ? ' · <i>пока один источник</i>' : ''), weight: weightLine(w, ty), checked,
       more: [weightMore(w), ...(nb.react.length ? ['<b>Реакция рынка на такие новости (2017–2026):</b>', ...nb.react] : []), pulseLine(nb.tks || [], w.dir)], tg: tags(nb.tks), aud });
+    if (c.pub.msg) S.pub.solo = (S.pub.solo || 0) + 1;
     done_(c.pub.msg);
   }
-  if (n) log('опубликовано', n, 'за день', S.pub.count);
+  try { await feedFlush(S); } catch (e) { log('лента дня:', e.message); }
+  if (n) log('опубликовано', n, 'за день', S.pub.count, '| отдельных', S.pub.solo || 0);
 }
 
 // ---------- сделки модельного портфеля (прозрачный трек-рекорд) ----------
