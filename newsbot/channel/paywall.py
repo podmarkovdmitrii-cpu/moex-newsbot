@@ -10,6 +10,8 @@
        «Купить в Т-Инвестиции»   — подписчику бот присылает ссылку на бумагу в Т-Инвестициях; остальным — «оплатите доступ»;
        «Оплатить доступ»         — открывает бота, тот выставляет счёт (ЮKassa/Robokassa в рублях или Telegram Stars).
   3. После оплаты доступ продлевается на PAY_DAYS дней; за 3 дня до конца бот напоминает о продлении.
+  4. Перед публикацией бот строго разбирает идею (idea_judge.py): вероятность цели по истории бумаги, план частичных
+     тейков с переносом стопа в безубыток, уровни подтверждения. /check ТИКЕР … — только разбор, без публикации.
 
 Работает внутри непрерывной цепочки news-bot.yml (фоновым процессом рядом с bot.js), опрашивает getUpdates.
 Состояние: CHANNEL_STATE_DIR/paywall.json (кэш GitHub) + резервная копия подписчиков документом, закреплённым в личке
@@ -27,6 +29,7 @@ import os
 import re
 import signal
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -47,6 +50,7 @@ STATE = os.path.join(STATE_DIR, "paywall.json")
 RUN_MIN = float(os.environ.get("PAYWALL_MIN") or (float(os.environ.get("NEWS_LOOP_MIN") or 110) + 8))
 DISCLAIMER = "Не является индивидуальной инвестиционной рекомендацией."
 DAY = 86400
+LOCK = threading.RLock()  # разбор идеи идёт в отдельном потоке
 
 LONG = {"лонг", "long", "покупка", "купить", "buy", "l", "л", "вверх"}
 SHORT = {"шорт", "short", "продажа", "продать", "sell", "s", "ш", "вниз"}
@@ -217,7 +221,7 @@ def moex_quote(ticker):
 
 def parse_idea(text):
     """«/idea SBER шорт 300 310 280/270 комментарий» → dict или строка с ошибкой."""
-    body = re.sub(r"^/idea(@\w+)?", "", text.strip(), flags=re.I).strip()
+    body = re.sub(r"^/(idea|check|разбор)(@\w+)?", "", text.strip(), flags=re.I).strip()
     m = re.match(rf"^([A-Za-zА-Яа-я0-9._-]+)\s+(\S+)\s+({NUM})\s+({NUM})\s+({NUM}(?:\s*[/;]\s*{NUM})*)\s*(.*)$", body, re.S)
     if not m:
         return ("Формат: /idea ТИКЕР лонг|шорт ВХОД СТОП ТЕЙК [комментарий]\n"
@@ -260,11 +264,40 @@ def alert_text(idea):
     side = "ЛОНГ" if idea["side"] > 0 else "ШОРТ"
     tk = " / ".join(fmt(x) for x in idea["takes"])
     t = f"{idea['ticker']} — {side}\nВход: {fmt(idea['entry'])}\nСтоп: {fmt(idea['stop'])}\nТейк: {tk}\nРиск {fmt(idea['risk_pct'])}%, прибыль/риск {fmt(idea['rr'])}"
-    if idea.get("comment"):
-        t += "\n" + idea["comment"]
+    pl = idea.get("plan") or {}
+    if pl.get("p") is not None:
+        t += f"\nВероятность цели ~{pl['p']:.0%}"
     if idea.get("result"):
         t += "\n" + idea["result"]
+    if idea.get("comment") and len(t) + len(idea["comment"]) < 199:
+        t += "\n" + idea["comment"]
     return t[:200]
+
+
+def plan_text(idea):
+    """Полный план для подписчика (в личку): тейки с долями, перенос стопа, уровень подтверждения, вероятность."""
+    side = "ЛОНГ" if idea["side"] > 0 else "ШОРТ"
+    L = [f"<b>{idea['ticker']} — {side}</b>", f"Вход {fmt(idea['entry'])} · стоп {fmt(idea['stop'])}"]
+    pl = idea.get("plan") or {}
+    tk = pl.get("takes") or [{"px": x, "share": 1 / len(idea["takes"])} for x in idea["takes"]]
+    for i, t in enumerate(tk, 1):
+        pr = f" — вероятность дойти ~{t['p']:.0%}" if t.get("p") is not None else ""
+        L.append(f"Т{i} {fmt(t['px'])}: закрыть {t['share']:.0%}{pr}")
+    for r in pl.get("rules") or []:
+        L.append("• " + r)
+    if pl.get("confirm"):
+        c = pl["confirm"]
+        word = "ниже" if idea["side"] < 0 else "выше"
+        L.append(f"Подтверждение: закрепление {word} {fmt(c['px'])} — вероятность цели растёт до ~{c['p']:.0%}.")
+    if pl.get("p") is not None:
+        L.append(f"Вероятность дойти до цели раньше стопа (по истории бумаги): ~{pl['p']:.0%}.")
+    if idea.get("comment"):
+        L.append(html.escape(idea["comment"]))
+    if idea.get("result"):
+        L.append(html.escape(idea["result"]))
+    L.append(f"\nВ Т-Инвестициях: {tinvest_url(idea['ticker'])}")
+    L.append(f"<i>{DISCLAIMER}</i>")
+    return "\n".join(L)
 
 
 def bot_username():
@@ -277,6 +310,7 @@ def keyboard(iid):
     rows = [[{"text": "Смотреть идею", "callback_data": f"see:{iid}"}]]
     if SITE:
         rows.append([{"text": "Смотреть идею на сайте", "url": SITE}])
+    rows.append([{"text": "План сделки: тейки и уровни", "callback_data": f"plan:{iid}"}])
     rows.append([{"text": "Купить в Т-Инвестиции", "callback_data": f"buy:{iid}"}])
     rows.append([{"text": "Оплатить доступ", "url": f"https://t.me/{bot_username()}?start=pay"}])
     return {"inline_keyboard": rows}
@@ -340,7 +374,8 @@ def say(chat_id, text, **kw):
 
 
 HELP_ADMIN = ("Команды администратора:\n"
-              "/idea ТИКЕР лонг|шорт ВХОД СТОП ТЕЙК [комментарий] — новая закрытая идея (тейки через «/»)\n"
+              "/idea ТИКЕР лонг|шорт ВХОД СТОП ЦЕЛЬ [комментарий] — разбор и публикация закрытой идеи\n"
+              "/check ТИКЕР лонг|шорт ВХОД СТОП ЦЕЛЬ — только разбор: вероятность цели, тейки, уровни (можно без /check)\n"
               "/ideas — последние идеи\n"
               "/result НОМЕР текст — дописать итог в пост (например: /result 3 ✅ Тейк взят +6,7%)\n"
               "/subs — подписчики\n"
@@ -367,6 +402,12 @@ def on_message(msg):
         arg = text.split()[1] if len(text.split()) > 1 else ""
         if arg == "pay":
             send_invoice(uid)
+        elif arg.startswith("plan_"):
+            idea = S["ideas"].get(arg[5:])
+            if idea and has_access(uid):
+                say(uid, plan_text(idea))
+            else:
+                say(uid, "План доступен подписчикам закрытых идей.", reply_markup={"inline_keyboard": [[{"text": "Оплатить доступ", "callback_data": "pay"}]]})
         elif arg.startswith("buy_"):
             idea = S["ideas"].get(arg[4:])
             if idea and has_access(uid):
@@ -384,7 +425,7 @@ def on_message(msg):
     elif cmd in ("/status", "/статус"):
         u = sub_until(uid)
         say(uid, f"Доступ открыт до {dstr(u)}." if u > now() else "Доступа нет. /start — оплатить.")
-    elif cmd == "/idea":
+    elif cmd in ("/idea", "/check", "/разбор") or (admin and re.match(r"^[A-Za-z0-9]{1,6}\s+(лонг|шорт|long|short|buy|sell)\s+\d", text, re.I)):
         if not admin:
             say(uid, "Публиковать идеи может только администратор." + ("" if ADMINS else " Переменная IDEA_ADMINS не задана — узнайте свой id командой /myid."))
             return
@@ -405,13 +446,10 @@ def on_message(msg):
                 warn = f"Сейчас {fmt(q['last'])} ₽ ({q['name']}); вход {'выше' if d > 0 else 'ниже'} текущей цены на {fmt(round(abs(d), 2))}%.\n"
                 if abs(d) > 7:
                     warn = "⚠️ " + warn
-        S["seq"] += 1
-        did = str(S["seq"])
-        S["drafts"][did] = idea
-        save()
-        say(uid, f"Превью поста в канале:\n\n{channel_text(idea)}\n\n— — —\nЧто увидит подписчик по кнопке «Смотреть идею»:\n"
-                 f"<code>{html.escape(alert_text(idea))}</code>\n\n{html.escape(warn)}",
-            reply_markup={"inline_keyboard": [[{"text": "✅ Опубликовать", "callback_data": f"pub:{did}"}, {"text": "✖ Отмена", "callback_data": f"del:{did}"}]]})
+        if warn:
+            say(uid, html.escape(warn))
+        say(uid, "⏳ Разбираю идею по истории бумаги (до минуты)…")
+        judge_async(uid, idea, publish=(cmd == "/idea"))
     elif cmd == "/ideas" and admin:
         last = sorted(S["ideas"].items(), key=lambda kv: -int(kv[0]))[:15]
         say(uid, "\n".join(f"#{k} {v['ticker']} {'лонг' if v['side'] > 0 else 'шорт'} {fmt(v['entry'])}/{fmt(v['stop'])}/{'/'.join(fmt(x) for x in v['takes'])}"
@@ -451,12 +489,59 @@ def on_message(msg):
         say(uid, HELP_ADMIN)
 
 
+def judge_async(uid, idea, publish):
+    """Строгий разбор в отдельном потоке (ISS бывает медленным) — кнопки других пользователей не ждут."""
+    def run():
+        r, rep = None, ""
+        try:
+            import idea_judge as J
+            r = J.analyze(idea["ticker"], idea["side"], idea["entry"], idea["stop"], idea["takes"][-1])
+            rep = J.report(r)
+        except Exception as e:  # noqa: BLE001
+            log("разбор не удался:", e)
+            rep = f"⚠️ Разбор не удался ({html.escape(str(e))[:200]}). Идею можно опубликовать и без него."
+        try:
+            say(uid, rep)
+        except Exception as e:  # noqa: BLE001
+            log("отчёт не отправлен:", e)
+        if not publish:
+            return
+        if r and not r.get("error"):
+            cf = r.get("confirm")
+            idea["plan"] = {"takes": [{"px": float(t["px"]), "share": float(t["share"]), "p": float(t["p"])} for t in r["takes"]],
+                            "rules": list(r["rules"]), "p": float(r["p"]), "verdict": r["verdict"],
+                            "confirm": {"px": float(cf["px"]), "p": float(cf["p"]), "strong": bool(cf.get("strong"))} if cf else None}
+        with LOCK:
+            S["seq"] += 1
+            did = str(S["seq"])
+            S["drafts"][did] = idea
+            save()
+        btns = [[{"text": "✅ Опубликовать с планом тейков", "callback_data": f"pubp:{did}"}]] if idea.get("plan") else []
+        btns.append([{"text": "Опубликовать как есть" if idea.get("plan") else "✅ Опубликовать", "callback_data": f"pub:{did}"},
+                     {"text": "✖ Отмена", "callback_data": f"del:{did}"}])
+        try:
+            say(uid, f"Превью поста в канале:\n\n{channel_text(idea)}\n\n— — —\nЧто увидит подписчик по кнопке «Смотреть идею»:\n"
+                     f"<code>{html.escape(alert_text(idea))}</code>\n\nКнопка «План сделки» пришлёт подписчику в личку тейки с долями, "
+                     "перенос стопа и уровень подтверждения.", reply_markup={"inline_keyboard": btns})
+        except Exception as e:  # noqa: BLE001
+            log("превью не отправлено:", e)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def on_callback(cq):
     global DIRTY_SUBS
     uid = cq["from"]["id"]
     data = cq.get("data") or ""
     kind, _, iid = data.partition(":")
     ans = {"callback_query_id": cq["id"]}
+    if kind == "plan":
+        idea = S["ideas"].get(iid)
+        if idea and has_access(uid):
+            ans["url"] = f"https://t.me/{bot_username()}?start=plan_{iid}"
+        else:
+            ans.update(text="Здесь закрытые идеи. Чтобы их видеть, необходимо оплатить доступ через бота по кнопке «Оплатить доступ» ниже.", show_alert=True)
+        tg("answerCallbackQuery", ans)
+        return
     if kind in ("see", "buy"):
         idea = S["ideas"].get(iid)
         if not idea:
@@ -474,8 +559,9 @@ def on_callback(cq):
         tg("answerCallbackQuery", ans)
         send_invoice(uid)
         return
-    if kind in ("pub", "del") and uid in ADMINS:
-        idea = S["drafts"].pop(iid, None)
+    if kind in ("pub", "pubp", "del") and uid in ADMINS:
+        with LOCK:
+            idea = S["drafts"].pop(iid, None)
         msg = cq.get("message") or {}
         if not idea:
             tg("answerCallbackQuery", {**ans, "text": "Черновик уже обработан."})
@@ -488,6 +574,9 @@ def on_callback(cq):
         if not CHAT:
             tg("answerCallbackQuery", {**ans, "text": "Не задан TG_PUBLIC_CHAT — некуда публиковать.", "show_alert": True})
             return
+        if kind == "pubp" and idea.get("plan"):
+            idea["takes"] = [t["px"] for t in idea["plan"]["takes"]]
+            idea["rr"] = round(abs(idea["takes"][-1] - idea["entry"]) / abs(idea["entry"] - idea["stop"]), 2)
         idea["t"] = now()
         m = tg("sendMessage", {"chat_id": CHAT, "text": channel_text(idea), "parse_mode": "HTML", "reply_markup": keyboard(iid)})
         idea["chat"], idea["msg"] = m["chat"]["id"], m["message_id"]
