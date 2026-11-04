@@ -330,11 +330,23 @@ def tinvest_url(ticker):
 
 
 # ---------------- оплата ----------------
+OZON_URL = os.environ.get("OZON_TIPS_URL", "").strip()
+PAY_METHOD = (os.environ.get("PAY_METHOD") or "").strip().lower()
+
+
+def use_ozon():
+    """Оплата переводом через «Чаевые» Ozon Банка с ручным подтверждением администратором (у Ozon нет API уведомлений)."""
+    return bool(OZON_URL) and (PAY_METHOD == "ozon" or not (CURRENCY == "XTR" or PROVIDER))
+
+
 def pay_ready():
-    return CURRENCY == "XTR" or bool(PROVIDER)
+    return CURRENCY == "XTR" or bool(PROVIDER) or bool(OZON_URL)
 
 
 def send_invoice(chat_id):
+    if use_ozon():
+        MENU.ozon_offer(chat_id)
+        return
     if not pay_ready():
         tg("sendMessage", {"chat_id": chat_id, "text": "Оплата ещё не подключена. Напишите администратору канала."})
         log("счёт не выставлен: нет PAY_PROVIDER_TOKEN")
@@ -409,6 +421,8 @@ def on_message(msg):
     cmd = text.split()[0].lower().split("@")[0] if text else ""
     admin = uid in ADMINS
 
+    if MENU.on_proof(uid, msg):
+        return
     if text and not text.startswith("/") and MENU.on_text(uid, text, msg):
         return
     if cmd == "/myid":
@@ -651,7 +665,7 @@ def main():
     restore()
     MENU.init(sys.modules[__name__])
     log("старт: канал", CHAT or "—", "| админы", sorted(ADMINS) or "НЕ ЗАДАНЫ (IDEA_ADMINS)", "| оплата",
-        f"{PRICE} {CURRENCY}/{DAYS} дн." if pay_ready() else "НЕ ПОДКЛЮЧЕНА (PAY_PROVIDER_TOKEN)")
+        ("Ozon «Чаевые», подтверждение вручную" if use_ozon() else f"{PRICE} {CURRENCY}/{DAYS} дн.") if pay_ready() else "НЕ ПОДКЛЮЧЕНА (PAY_PROVIDER_TOKEN или OZON_TIPS_URL)")
     try:
         tg("setMyCommands", {"commands": [{"command": "start", "description": "Меню и доступ к закрытым идеям"},
                                           {"command": "status", "description": "До какого числа открыт доступ"}]})

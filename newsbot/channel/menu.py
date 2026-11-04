@@ -26,7 +26,7 @@ NUM = r"\d+(?:[.,]\d+)?"
 def init(pw):
     global PW
     PW = pw
-    for k in ("wiz", "refs", "bonus", "refpaid"):
+    for k in ("wiz", "refs", "bonus", "refpaid", "ozpend"):
         PW.S.setdefault(k, {})
 
 
@@ -91,7 +91,7 @@ def show_faq(uid):
         "❓ <b>FAQ</b>\n\n"
         "<b>Что внутри?</b> Закрытые торговые идеи по акциям Мосбиржи: тикер, вход, стоп, тейки, план фиксации прибыли "
         "и уровень подтверждения. Каждую идею бот проверяет по истории бумаги и показывает вероятность дойти до цели.\n\n"
-        f"<b>Сколько стоит?</b> {price} за {PW.DAYS} дней. Доступ открывается сразу после оплаты.\n\n"
+        f"<b>Сколько стоит?</b> {price} за {PW.DAYS} дней. " + ("Оплата переводом через Ozon Банк (картой любого банка или по СБП); доступ открывается после проверки перевода администратором.\n\n" if PW.use_ozon() else "Доступ открывается сразу после оплаты.\n\n") +
         "<b>Как смотреть идеи?</b> Под постом в канале нажмите «Смотреть идею» или «План сделки».\n\n"
         "<b>Как продлить?</b> Кнопка «💳 Оплатить» — дни добавятся к текущему сроку. За 3 дня до конца бот напомнит.\n\n"
         f"<b>Бонусы.</b> Пригласите друга по своей ссылке из «⬇️ Мой бонусный счёт»: когда он оплатит, вы получите {BONUS_DAYS} дней доступа.\n\n"
@@ -140,6 +140,97 @@ def on_first_payment(uid):
         PW.say(int(ref), f"🎁 Приглашённый вами пользователь оплатил доступ — начислено +{BONUS_DAYS} дней. Доступ открыт до {PW.dstr(until)}.")
     except Exception:  # noqa: BLE001
         pass
+
+
+# ---------------- оплата через «Чаевые» Ozon Банка ----------------
+def ozon_amount(uid):
+    """Сумма с «копейками-меткой» из id — по ней администратор быстро находит перевод в выписке Ozon Банка."""
+    return f"{PW.PRICE},{int(uid) % 89 + 10:02d}"
+
+
+def ozon_offer(uid):
+    amt = ozon_amount(uid)
+    PW.say(uid, f"💳 <b>Оплата доступа — {PW.PRICE} ₽ за {PW.DAYS} дней</b>\n\n"
+                f"1. Нажмите «Оплатить в Ozon Банке» и переведите ровно <b>{amt} ₽</b> — копейки нужны, чтобы мы узнали ваш платёж.\n"
+                "   Платить можно с карты любого банка или по СБП.\n"
+                "2. Вернитесь сюда и нажмите «✅ Я оплатил» — пришлите скриншот или чек перевода.\n"
+                "3. Администратор сверит перевод и откроет доступ (обычно в течение нескольких часов, в рабочее время быстрее).\n\n"
+                f"Если уже есть доступ — дни добавятся к текущему сроку.\n<i>{PW.DISCLAIMER}</i>",
+           reply_markup={"inline_keyboard": [[{"text": "Оплатить в Ozon Банке", "url": PW.OZON_URL}],
+                                             [{"text": "✅ Я оплатил", "callback_data": "ozpaid"}]]})
+
+
+def on_proof(uid, msg):
+    """Скриншот/чек после «Я оплатил» — администраторам с кнопками подтверждения. True — сообщение обработано."""
+    w = wiz_get(uid)
+    if not w or w.get("k") != "ozproof":
+        return False
+    text = (msg.get("text") or "").strip()
+    if text == BTN_CANCEL:
+        return False
+    if text.startswith("/"):
+        return False
+    if not (msg.get("photo") or msg.get("document") or text):
+        return False
+    wiz_end(uid)
+    u = msg.get("from") or {}
+    who = html.escape((u.get("first_name") or "") + (" @" + u["username"] if u.get("username") else ""))
+    PW.S.setdefault("ozpend", {})[str(uid)] = {"t": PW.now(), "who": who, "amt": ozon_amount(uid)}
+    for a in PW.ADMINS:
+        try:
+            PW.tg("copyMessage", {"chat_id": a, "from_chat_id": uid, "message_id": msg["message_id"]})
+            PW.say(a, f"💳 <b>Оплата через Ozon «Чаевые»</b> от {who} (id {uid}).\nОжидаемая сумма: <b>{ozon_amount(uid)} ₽</b>. "
+                      "Проверьте поступление в приложении Ozon Банка.",
+                   reply_markup={"inline_keyboard": [[{"text": f"✅ Подтвердить ({PW.DAYS} дн.)", "callback_data": f"ozok:{uid}"},
+                                                      {"text": "❌ Не нашёл", "callback_data": f"ozno:{uid}"}]]})
+        except Exception as e:  # noqa: BLE001
+            PW.log("заявка на оплату не отправлена администратору:", e)
+    menu(uid, "Спасибо! Заявка на проверку оплаты отправлена. Как только администратор подтвердит перевод, доступ откроется и придёт сообщение.")
+    return True
+
+
+def ozon_cb(uid, kind, arg, cq):
+    if kind == "ozpaid":
+        wiz_set(uid, k="ozproof")
+        PW.say(uid, f"Пришлите скриншот или чек перевода на {ozon_amount(uid)} ₽ одним сообщением (можно фото).", reply_markup=cancel_kb())
+        return ""
+    if uid not in PW.ADMINS:
+        return None
+    pend = PW.S.setdefault("ozpend", {})
+    rec = pend.pop(arg, None)
+    msg = cq.get("message") or {}
+    if kind == "ozok":
+        until = PW.extend(int(arg), PW.DAYS, (rec or {}).get("who"))
+        PW.S["payments"].append({"uid": int(arg), "t": PW.now(), "amount": PW.PRICE * 100, "cur": "RUB", "charge": "ozon-tips", "by": uid})
+        PW.S["payments"] = PW.S["payments"][-2000:]
+        try:
+            on_first_payment(int(arg))
+        except Exception as e:  # noqa: BLE001
+            PW.log("бонус пригласившему не начислен:", e)
+        try:
+            PW.say(int(arg), f"✅ Оплата подтверждена, спасибо! Доступ к закрытым идеям открыт до {PW.dstr(until)}.\n"
+                             "Нажимайте «Смотреть идею» и «План сделки» под постами в канале.")
+        except Exception:  # noqa: BLE001
+            pass
+        note = f"✅ Подтверждено: доступ id {arg} до {PW.dstr(until)}"
+    else:
+        try:
+            PW.say(int(arg), "Перевод пока не найден. Проверьте сумму и получателя или напишите в «🔨 Техническая поддержка» — приложите чек.")
+        except Exception:  # noqa: BLE001
+            pass
+        note = f"❌ Отклонено: id {arg}"
+    try:
+        PW.tg("editMessageReplyMarkup", {"chat_id": msg["chat"]["id"], "message_id": msg["message_id"], "reply_markup": {"inline_keyboard": []}})
+    except Exception:  # noqa: BLE001
+        pass
+    for a in PW.ADMINS:
+        if a != uid:
+            try:
+                PW.say(a, note + " (решение другого администратора).")
+            except Exception:  # noqa: BLE001
+                pass
+    PW.DIRTY_SUBS = True
+    return note
 
 
 # ---------------- администратор: новая идея ----------------
@@ -425,6 +516,10 @@ def on_text(uid, text, msg):
 def on_callback(uid, data, cq):
     """Кнопки меню под сообщениями. None — не наше; иначе текст ответа на нажатие."""
     kind, _, arg = data.partition(":")
+    if kind in ("ozpaid", "ozok", "ozno"):
+        r = ozon_cb(uid, kind, arg, cq)
+        if r is not None:
+            return r
     if kind == "rep" and uid in PW.ADMINS:
         wiz_set(uid, k="reply", to=arg)
         PW.say(uid, f"Напишите ответ пользователю {arg}:", reply_markup=cancel_kb())
