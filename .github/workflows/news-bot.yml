@@ -101,6 +101,9 @@ jobs:
           PAY_DAYS: ${{ vars.PAY_DAYS || secrets.PAY_DAYS || '30' }}
           PAY_RECEIPT: ${{ vars.PAY_RECEIPT || secrets.PAY_RECEIPT || '1' }}
           PAY_VAT_CODE: ${{ vars.PAY_VAT_CODE || secrets.PAY_VAT_CODE || '1' }}
+          BONUS_DAYS: ${{ vars.BONUS_DAYS || secrets.BONUS_DAYS || '7' }}
+          SUPPORT_CONTACT: ${{ vars.SUPPORT_CONTACT || secrets.SUPPORT_CONTACT }}
+          FAQ_TEXT: ${{ vars.FAQ_TEXT || secrets.FAQ_TEXT }}
         run: |
           BOT=$(find . -name bot.js -path '*newsbot*' | head -1)
           if [ -z "$BOT" ]; then echo "Не найден newsbot/bot.js — загрузите папку newsbot в репозиторий"; exit 1; fi
