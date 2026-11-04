@@ -51,6 +51,8 @@ RUN_MIN = float(os.environ.get("PAYWALL_MIN") or (float(os.environ.get("NEWS_LOO
 DISCLAIMER = "Не является индивидуальной инвестиционной рекомендацией."
 DAY = 86400
 LOCK = threading.RLock()  # разбор идеи идёт в отдельном потоке
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import menu as MENU  # noqa: E402  (кнопки меню и пошаговые сценарии)
 
 LONG = {"лонг", "long", "покупка", "купить", "buy", "l", "л", "вверх"}
 SHORT = {"шорт", "short", "продажа", "продать", "sell", "s", "ш", "вниз"}
@@ -106,7 +108,7 @@ def tg_upload_doc(chat_id, name, content, caption=""):
 
 
 # ---------------- состояние ----------------
-S = {"subs": {}, "ideas": {}, "drafts": {}, "offset": 0, "payments": [], "seq": 0, "me": None}
+S = {"subs": {}, "ideas": {}, "drafts": {}, "offset": 0, "payments": [], "seq": 0, "me": None, "wiz": {}, "refs": {}, "bonus": {}, "refpaid": {}}
 DIRTY_SUBS = False
 
 
@@ -125,7 +127,7 @@ def backup():
     if not ADMINS:
         return
     admin = sorted(ADMINS)[0]
-    data = {k: S[k] for k in ("subs", "ideas", "payments", "seq")}
+    data = {k: S[k] for k in ("subs", "ideas", "payments", "seq", "refs", "bonus", "refpaid") if k in S}
     try:
         m = tg_upload_doc(admin, "paywall_backup.json", json.dumps(data, ensure_ascii=False).encode(),
                           f"Резервная копия подписчиков ({len(active_subs())} активных). Не удаляйте закреплённое сообщение.")
@@ -255,6 +257,13 @@ def risk_label(risk_pct):
 def channel_text(idea):
     side = "ЛОНГ 🟢" if idea["side"] > 0 else "ШОРТ 🔴"
     t = f"🔒 <b>#Идея {side}</b> 🇷🇺\n\n{risk_label(idea['risk_pct'])}"
+    marks = []  # статус без цен — уровни видят только подписчики
+    if idea.get("hit"):
+        marks.append(f"✅ Взято тейков: {len(idea['hit'])} из {len(idea['takes'])}")
+    if idea.get("be") and not idea.get("closed"):
+        marks.append("🛡 Стоп в безубытке")
+    if marks:
+        t += "\n" + "\n".join(marks)
     if idea.get("result"):
         t += f"\n\n{html.escape(idea['result'])}"
     return t + f"\n\n<i>{DISCLAIMER}</i>"
@@ -357,6 +366,10 @@ def on_paid(msg):
     S["payments"].append({"uid": u["id"], "t": now(), "amount": sp.get("total_amount"), "cur": sp.get("currency"),
                           "charge": sp.get("provider_payment_charge_id") or sp.get("telegram_payment_charge_id")})
     S["payments"] = S["payments"][-2000:]
+    try:
+        MENU.on_first_payment(u["id"])
+    except Exception as e:  # noqa: BLE001
+        log("бонус пригласившему не начислен:", e)
     tg("sendMessage", {"chat_id": u["id"], "text": f"Оплата получена, спасибо! Доступ к закрытым идеям открыт до {dstr(until)}.\n"
                                                    "Нажимайте «Смотреть идею» под постами в канале."})
     for a in ADMINS:
@@ -396,10 +409,16 @@ def on_message(msg):
     cmd = text.split()[0].lower().split("@")[0] if text else ""
     admin = uid in ADMINS
 
+    if text and not text.startswith("/") and MENU.on_text(uid, text, msg):
+        return
     if cmd == "/myid":
         say(uid, f"Ваш Telegram id: <code>{uid}</code>\nДобавьте его в переменную IDEA_ADMINS, чтобы публиковать идеи.")
     elif cmd == "/start":
         arg = text.split()[1] if len(text.split()) > 1 else ""
+        MENU.wiz_end(uid)
+        if arg.startswith("ref_"):
+            MENU.on_ref(uid, arg[4:])
+            arg = ""
         if arg == "pay":
             send_invoice(uid)
         elif arg.startswith("plan_"):
@@ -420,8 +439,7 @@ def on_message(msg):
             price = f"{PRICE} ⭐" if CURRENCY == "XTR" else f"{PRICE} ₽"
             say(uid, f"Здесь оплачивается доступ к закрытым идеям канала: тикер, вход, стоп и тейк.\n{st}\n\nСтоимость: {price} за {DAYS} дней.",
                 reply_markup={"inline_keyboard": [[{"text": "Оплатить доступ", "callback_data": "pay"}]]})
-            if admin:
-                say(uid, HELP_ADMIN)
+            MENU.menu(uid, "Кнопки меню — внизу 👇" + ("\nДля вас есть кнопки «🟢 Новый лонг», «🔴 Новый шорт» и «📋 Мои идеи: стопы и тейки»." if admin else ""))
     elif cmd in ("/status", "/статус"):
         u = sub_until(uid)
         say(uid, f"Доступ открыт до {dstr(u)}." if u > now() else "Доступа нет. /start — оплатить.")
@@ -534,6 +552,11 @@ def on_callback(cq):
     data = cq.get("data") or ""
     kind, _, iid = data.partition(":")
     ans = {"callback_query_id": cq["id"]}
+    r = MENU.on_callback(uid, data, cq)
+    if r is not None:
+        tg("answerCallbackQuery", {**ans, **({"text": r[:190]} if r else {})})
+        save()
+        return
     if kind == "plan":
         idea = S["ideas"].get(iid)
         if idea and has_access(uid):
@@ -626,10 +649,11 @@ def main():
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     restore()
+    MENU.init(sys.modules[__name__])
     log("старт: канал", CHAT or "—", "| админы", sorted(ADMINS) or "НЕ ЗАДАНЫ (IDEA_ADMINS)", "| оплата",
         f"{PRICE} {CURRENCY}/{DAYS} дн." if pay_ready() else "НЕ ПОДКЛЮЧЕНА (PAY_PROVIDER_TOKEN)")
     try:
-        tg("setMyCommands", {"commands": [{"command": "start", "description": "Доступ к закрытым идеям"},
+        tg("setMyCommands", {"commands": [{"command": "start", "description": "Меню и доступ к закрытым идеям"},
                                           {"command": "status", "description": "До какого числа открыт доступ"}]})
     except Exception as e:  # noqa: BLE001
         log("setMyCommands:", e)
