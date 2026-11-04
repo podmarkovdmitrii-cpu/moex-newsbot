@@ -320,6 +320,8 @@ def idea_card(iid):
     hits = [{"text": f"✅ Т{i + 1} взят", "callback_data": f"mh:{iid}:{i}"} for i in range(len(v["takes"])) if i not in hit]
     for j in range(0, len(hits), 3):
         rows.append(hits[j:j + 3])
+    if not v.get("open"):
+        rows.append([{"text": "🔓 Открыть всем (витрина)", "callback_data": f"mop:{iid}"}])
     rows.append([{"text": "🏁 Закрыть идею", "callback_data": f"mcl:{iid}"}])
     return txt, {"inline_keyboard": rows}
 
@@ -384,6 +386,7 @@ def on_manage_cb(uid, kind, arg, cq):
         note = f"Т{i + 1} {PW.fmt(v['takes'][i])} взят{share}"
         if len(hit) == len(v["takes"]):
             v["closed"] = True
+            v["closed_t"] = PW.now()
             v["result"] = v.get("result") or "✅ Все тейки взяты"
             note += ". Идея закрыта: все тейки взяты"
         elif i == 0 and not v.get("be"):
@@ -397,6 +400,11 @@ def on_manage_cb(uid, kind, arg, cq):
         n = refresh(iid, note)
         _recard(uid, iid, msg)
         return f"Отмечено, уведомлено подписчиков: {n}"
+    if kind == "mop":
+        v["open"] = True
+        n = refresh(iid, "идея открыта для всех читателей канала")
+        _recard(uid, iid, msg)
+        return "Идея открыта: уровни показаны в посте."
     if kind == "mcl":
         wiz_set(uid, k="close", iid=iid)
         PW.say(uid, f"Итог по #{iid} {v['ticker']} одной строкой (например «✅ Тейк взят +6,7%» или «❌ Стоп −3,1%»):", reply_markup=cancel_kb())
@@ -445,6 +453,7 @@ def manage_step(uid, w, text):
     elif w["k"] == "close":
         v["result"] = text.strip()[:120]
         v["closed"] = True
+        v["closed_t"] = PW.now()
         wiz_end(uid)
         cnt = refresh(iid, "идея закрыта: " + v["result"])
         menu(uid, f"Идея #{iid} закрыта, уведомлено подписчиков: {cnt}.")
@@ -534,6 +543,6 @@ def on_callback(uid, data, cq):
             w["d"]["comment"] = ""
             finish_new(uid, w)
         return ""
-    if kind in ("mi", "mbe", "mst", "mtk", "mh", "mcl") and uid in PW.ADMINS:
+    if kind in ("mi", "mbe", "mst", "mtk", "mh", "mcl", "mop") and uid in PW.ADMINS:
         return on_manage_cb(uid, kind, arg, cq)
     return None

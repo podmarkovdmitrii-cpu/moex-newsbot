@@ -35,7 +35,7 @@ SEC_OF = json.load(open(os.path.join(HERE, "..", "impact.json"), encoding="utf-8
 CBR_DAYS = ["2026-10-23", "2026-12-18", "2027-02-12", "2027-03-20", "2027-04-24", "2027-06-11", "2027-07-23", "2027-09-10", "2027-10-22", "2027-12-17"]
 FAM_RU = {"mom": "импульс", "pull": "откат к EMA 20", "sbrk": "шорт пробоя"}
 SEC_RU = {"bank": "банки", "oil": "нефтегаз", "metal": "металлурги", "retail": "ритейл", "tech": "IT и связь", "power": "энергетика", "chem": "химия", "devel": "девелоперы", "transport": "транспорт"}
-SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "weekly", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
+SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "calendar_week", "35 16 * * 5": "weekly", "5 16 * * 5": "poll", "50 4 * * *": "nav", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
          "45 7-15 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening",
          "20 3 * * 1-5": "trader_prep", "20 4 * * 1-5": "trader_open", "20 7 * * 1-5": "trader_open", "45 16 * * 5": "trader_week",
          "15 9 * * 1-5": "stock_review", "30 16 * * 0": "weekend_review", "55 15 * * 1-5": "strong_moves"}
@@ -350,10 +350,7 @@ def flows():
         wl = [f"{'$' + t if k_ == 'share' else esc(FUT[t][0])} {tm} — {'🟢 покупка' if side == 'B' else '🔴 продажа'} <b>{bln(v)}</b> по {fmt(p_, 2)}" + (f" ({n_} сделки)" if n_ > 1 else "")
               for (t, k_, tm, side), (v, n_, p_) in top]
         txt += ["", "<blockquote expandable>🐋 <b>Киты за 30 минут</b> — крупнейшие сделки\n" + "\n".join(wl) + "</blockquote>"]
-    txt += ["", "<blockquote expandable>ℹ️ <b>Как читать</b>\nПеревес — доля оборота, где инициатором была покупка или продажа по рынку; +40% значит, что покупок по рынку было на 40% больше, чем продаж. "
-            "↳ — что может стоять за движением: цена против открытого интереса фьючерса (рост цены при падении интереса — закрытие шортов, при росте — новые покупки; падение цены при росте интереса — новые шорты, при падении — выход из лонгов), перевес сделок против цены — поглощение крупным игроком. Это интерпретация, а не факт. "
-            "Цель — ближайший значимый уровень графика в сторону потока (не ближе 0,5 и не дальше 4 дневных ATR); уверенность растёт, если совпадают поток, оборот, тренд и смысл свежих новостей. Это оценка, не прогноз и не рекомендация. "
-            "«Кит» — сделка от 50 млн ₽ в голубых фишках, от 5% среднего дневного оборота во 2–3 эшелоне, от 30 млн ₽ во фьючерсах. Данные Мосбиржи с задержкой до 15 минут; перевес — не прогноз.</blockquote>", "#потоки"]
+    txt += ["", how_to_read(), "#потоки"]
     rows = [(x["lab"], key(x), None) for x in sorted(buyers + sellers[::-1], key=lambda x: -key(x))]
     img = hbars(rows, os.path.join(OUT, "flows.png"), f"Перевес покупок (+) и продаж (−), {now.strftime('%d.%m')} {hm} МСК", fmt_v=lambda v: pc(v, 0))
     PUB.post("\n".join(txt), [(img, f"Перевес покупателей и продавцов на {hm} МСК")], live="flows")
@@ -710,8 +707,7 @@ def ofz():
         dy = f" · доходность {fmt(x['y'] * 100, 2)}%" + (f" ({'+' if x['dy'] >= 0 else '−'}{fmt(abs(x['dy']) * 1e4, 0)} б.п. за неделю)" if x["dy"] is not None else "") if x["y"] else ""
         flow = "без перекоса" if abs(x["net"]) < 0.01 * x["val"] else f"{'🟢 покупки' if x['net'] > 0 else '🔴 продажи'} <b>{bln(abs(x['net']))}</b>"
         txt.append(f"<b>{x['lab']}</b>: {flow} из {bln(x['val'])}{dy}")
-    txt += ["", "<blockquote expandable>ℹ️ <b>Как читать</b>\nЧистый поток — покупки минус продажи по рынку (кто был инициатором сделки), данные Мосбиржи. "
-            "Деньги в длинные ОФЗ при падении доходностей — рынок ждёт снижения ставки; продажи длинных при росте доходностей — ждёт более жёсткого ЦБ. Аукционы Минфина по средам — в ленте официальных новостей.</blockquote>", "#ОФЗ"]
+    txt += ["", how_to_read(), "#ОФЗ"]
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.8), dpi=110, facecolor=BG)
     for a in (a1, a2):
         style(a)
@@ -873,6 +869,10 @@ def pulse_deals():
     save_json("pulse_deals.json", st_)
     log("Пульс: постов в ленте", len(feed), "| новых сделок сильных трейдеров", len(new_deals), "| к публикации", len(posted))
     if not posted:
+        return
+    if os.environ.get("PULSE_POSTS", "0") != "1":
+        # Пульс — только подтверждение новостей (строка «👥 Пульс за 12 ч» в посте новости), отдельных постов нет
+        log("Пульс: отдельные посты выключены (PULSE_POSTS=0) — сделки идут в ленту подтверждения новостей")
         return
     st_["n"] += 1
     save_json("pulse_deals.json", st_)
@@ -1595,6 +1595,14 @@ def evening():
         for t, why in sorted(focus.items(), key=lambda x: -len(x[1]))[:10]:
             txt.append(f"• <b>${t}</b> — " + "; ".join(dict.fromkeys(why)))
         txt += notes
+    try:
+        sm = load_json("strong_today.json", {})
+        if sm.get("day") == now.date().isoformat() and sm.get("lines"):
+            ln = list(sm["lines"])
+            ln[0] = ln[0].replace("📣 <b>Очень резкие движения дня</b>", "📣 <b>Очень резкие движения дня</b>")
+            txt += [""] + ln
+    except Exception as e:  # noqa: BLE001
+        log("резкие движения в итогах:", e)
     txt.append("#итоги_дня")
     img = hbars([(n, v / 100, None) for n, v in sorted(secs, key=lambda x: -x[1])], os.path.join(OUT, "evening.png"), f"Отраслевые индексы МосБиржи за {now.strftime('%d.%m')}", fmt_v=lambda v: pc(v, 2)) if secs else None
     PUB.post("\n".join(txt), [(img, "Отраслевые индексы за день")] if img else None)
@@ -2280,6 +2288,8 @@ def anom_intraday(stt, md, ixc, now):
     if not ("11:00" <= hm <= "18:45") or time.time() - stt.get("ai_ts", 0) < int(os.environ.get("ANOM_CHECK_MIN", "15")) * 60 - 30:
         return
     stt["ai_ts"] = time.time()
+    if stt.get("wn", 0) >= int(os.environ.get("ANOM_EARLY_PER_DAY", "2")):
+        return
     today = anom_today_any()
     if not today or not today.get("rows"):
         return
@@ -2689,7 +2699,7 @@ def anomaly():
     found.sort(key=lambda x: -x["lvl"])
     posted = 0
     for x in found:
-        if posted >= 3 or stt["n"] >= int(os.environ.get("ANOMALY_PER_DAY", "15")):
+        if posted >= 3 or stt["n"] >= int(os.environ.get("ANOMALY_PER_DAY", "3")):
             break
         try:
             anomaly_post(x, md, by_sec, ixc)
@@ -3319,7 +3329,7 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "anom_next": anom_next, "telegraph_check": telegraph_check, "shakeout_scan": shakeout_scan, "pattern_scan": shakeout_scan, "strong_moves": strong_moves,
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "anom_next": anom_next, "telegraph_check": telegraph_check, "shakeout_scan": shakeout_scan, "pattern_scan": shakeout_scan, "strong_moves": strong_moves, "nav": nav, "calendar_week": calendar_week, "poll": poll,
      "trader_prep": lambda: trader_mod().prep(PUB), "trader_open": lambda: trader_mod().open_(PUB), "trader_week": lambda: trader_mod().week(PUB)}[mode]()
 
 
@@ -3489,13 +3499,174 @@ def strong_moves():
                    f"продолжение перевешивало в {round((s_.get('pos_years') or 0) * 100)}% лет{nw_txt}</i>")
     txt += ["", "<i>Почему это не идея на вход: как торговая стратегия (со стопом и издержками) продолжение после резких движений на истории "
                 "не дало устойчивой прибыли на годах, которые не участвовали в подборе. В остальных случаях движение разворачивалось.</i>"]
-    PUB.post("\n".join(txt), ai_lead=False)
-    log("резкие движения: опубликовано", len(found[:6]))
+    # отдельного поста нет: блок войдёт в «Итоги дня» (evening, 19:25 МСК)
+    save_json("strong_today.json", {"day": now.date().isoformat(), "lines": txt})
+    log("резкие движения: найдено", len(found[:6]), "— войдут в итоги дня")
 
 
 def trader_mod():
     import trader  # рубрика «Трейдер» (channel/trader.py)
     return trader
+
+
+# =============================================================================================
+# Навигация, календарь недели, опрос
+# =============================================================================================
+NAV_VERSION = "2026-11-04"
+SITE_TITLE = os.environ.get("CHANNEL_TITLE", "На пути к успеху | Куда идут деньги на Мосбирже")
+SITE_DESC = os.environ.get("CHANNEL_DESC", "Куда идут деньги на Мосбирже: потоки покупателей и продавцов, ОФЗ, аномалии, план и итоги дня. "
+                                           "Закрытые идеи с вероятностью цели — в боте. Не является индивидуальной инвестиционной рекомендацией.")
+
+
+def how_to_read():
+    nav = load_json("nav.json", {})
+    if nav.get("link"):
+        return f"ℹ️ <a href=\"{nav['link']}\">Как читать посты канала</a> — в закреплённом сообщении"
+    return "ℹ️ Как читать посты — в закреплённом сообщении канала"
+
+
+def nav_text():
+    bot = ""
+    try:
+        me = PUB._tg("getMe") if not PUB.dry else {}
+        bot = me.get("username") or ""
+    except Exception as e:  # noqa: BLE001
+        log("навигация: getMe", e)
+    t = [f"📌 <b>{esc(SITE_TITLE)}</b>",
+         "Куда идут деньги на Мосбирже — кто покупает, кто продаёт и что из этого следует. Только публичные данные Мосбиржи и открытые источники.", "",
+         "🗓 <b>Расписание (МСК)</b>",
+         "06:20–10:20 · 📋 #план_дня — подготовка, план торгового дня и открытие",
+         "10:00–18:50 · ⚖️ #потоки — покупатели и продавцы (один пост, обновляется каждые 30 минут)",
+         "10:45–19:10 · 🏦 #ОФЗ — потоки в госбондах (один пост, обновляется каждый час)",
+         "12:15 · 🔍 #разбор — разбор одной бумаги",
+         "по событию, до 3 в день · ⚡ #аномалия — резкие движения с причинами и вероятностями",
+         "в течение дня · 🗞 #главное — лента важных новостей (один пост) и отдельно самые весомые #новости",
+         "19:25 · 🏁 #итоги_дня — итоги, резкие движения, что ждать завтра",
+         "понедельник 08:30 · 📅 #календарь_недели · пятница 19:05 · 📊 опрос · пятница 19:35 · 📚 #неделя",
+         "",
+         "📖 <b>Как читать</b>",
+         "<b>Перевес покупок/продаж</b> — доля оборота, где инициатором сделки была покупка или продажа по рынку. ↳ — что может стоять за движением.",
+         "<b>Кит</b> — сделка от 50 млн ₽ в голубых фишках или от 5% среднего дневного оборота в остальных бумагах.",
+         "<b>Чистый поток в ОФЗ</b> — покупки минус продажи по рынку. Деньги в длинные ОФЗ при падении доходностей — рынок ждёт снижения ставки.",
+         "<b>Аномалия</b> — движение к индексу сильнее порога эшелона или оборот в 4–6 раз выше обычного; вероятности — модель на истории 2013–2026.",
+         "<b>Вес новости</b> — насколько сильно рынок исторически реагировал на такие новости (2017–2026).",
+         "<b>Сделки инсайдеров</b> — уже раскрытые покупки и продажи менеджмента и крупных акционеров (публичная информация, 224-ФЗ).",
+         "",
+         "🔒 <b>Закрытые идеи</b> — #идея: тикер, вход, стоп, тейки, план фиксации и вероятность цели по истории бумаги. "
+         "Раз в месяц — открытая статистика всех идей (#итоги_идей)." + (f" Доступ — в боте @{bot}." if bot else ""),
+         "",
+         f"<i>{DISCLAIMER}</i>"]
+    return "\n".join(t), bot
+
+
+def nav():
+    """Закреплённый пост-навигатор + описание канала. Обновляется, когда меняется NAV_VERSION или пропал пост."""
+    st = load_json("nav.json", {})
+    text, bot = nav_text()
+    if PUB.dry:
+        print(text)
+        return
+    chat = PUB.tg_chat
+    kb = {"inline_keyboard": [[{"text": "🔒 Закрытые идеи", "url": f"https://t.me/{bot}?start=pay"}]]} if bot else None
+    ok = False
+    if st.get("id"):
+        try:
+            PUB._tg("editMessageText", {"chat_id": chat, "message_id": st["id"], "text": text, "parse_mode": "HTML", "disable_web_page_preview": True,
+                                        **({"reply_markup": kb} if kb else {})})
+            ok = True
+        except Exception as e:  # noqa: BLE001
+            ok = "not modified" in str(e)
+            if not ok:
+                log("навигация: пост не отредактирован, публикую заново —", e)
+    if not ok:
+        m = PUB._tg("sendMessage", {"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True, **({"reply_markup": kb} if kb else {})})
+        st = {"id": m["message_id"], "link": PUB.tg_link(m)}
+        try:
+            PUB._tg("pinChatMessage", {"chat_id": chat, "message_id": m["message_id"], "disable_notification": True})
+        except Exception as e:  # noqa: BLE001
+            log("навигация: не удалось закрепить (нужно право бота «Закреплять сообщения» / «Изменять сообщения»):", e)
+    if st.get("ver") != NAV_VERSION:
+        for meth, data in (("setChatTitle", {"title": SITE_TITLE[:128]}), ("setChatDescription", {"description": SITE_DESC[:255]})):
+            try:
+                PUB._tg(meth, {"chat_id": chat, **data})
+            except Exception as e:  # noqa: BLE001
+                if "not modified" not in str(e):
+                    log(f"навигация: {meth} не прошёл (нужно право бота «Изменять профиль канала»):", e)
+    st["ver"] = NAV_VERSION
+    save_json("nav.json", st)
+    log("навигация: закреплённый пост актуален", st.get("link"))
+
+
+CBR_MEETINGS = ["2026-02-13", "2026-03-20", "2026-04-24", "2026-06-19", "2026-07-24", "2026-09-11", "2026-10-23", "2026-12-18",
+                "2027-02-12", "2027-03-19", "2027-04-30", "2027-06-11", "2027-07-30", "2027-09-10", "2027-10-22", "2027-12-17"]
+
+
+def calendar_week():
+    """Понедельник 08:30 МСК: календарь недели — дивидендные отсечки, заседание ЦБ, регулярные события."""
+    import divs
+    now = now_msk()
+    d0 = now.date() - dt.timedelta(days=now.weekday())
+    d1 = d0 + dt.timedelta(days=6)
+    days = [d0 + dt.timedelta(days=k) for k in range(5)]
+    wd = ["пн", "вт", "ср", "чт", "пт"]
+    ev = {d: [] for d in days}
+    try:
+        for r in divs.upcoming(14):
+            lb = dt.date.fromisoformat(r["last_buy"]) if r.get("last_buy") else None
+            if lb and d0 <= lb <= d1 and lb in ev:
+                y = f", доходность {pc(r['yld'], 1, False)}" if r.get("yld") else ""
+                ev[lb].append(f"💰 <b>${r['t']}</b> — последний день с дивидендом {fmt(r['amount'], 2)} ₽{y}" + ("" if r.get("declared") else " <i>(рекомендован)</i>"))
+    except Exception as e:  # noqa: BLE001
+        log("календарь: дивиденды", e)
+    for m in CBR_MEETINGS:
+        md_ = dt.date.fromisoformat(m)
+        if md_ in ev:
+            ev[md_].append("🏦 <b>Заседание Банка России по ключевой ставке</b> — решение в 13:30, пресс-конференция в 15:00")
+    nxt = [dt.date.fromisoformat(m) for m in CBR_MEETINGS if dt.date.fromisoformat(m) > d1]
+    for d in days:
+        if d.weekday() == 2:
+            ev[d] += ["🏛 Аукционы Минфина по ОФЗ (если объявлены накануне)", "📈 Недельная инфляция Росстата (вечером)"]
+        if d.weekday() == 3 and d.month in (3, 6, 9, 12) and 15 <= d.day <= 21:
+            ev[d].append("📆 Экспирация квартальных фьючерсов и опционов")
+    tax = dt.date(d0.year, d0.month, 28)
+    while tax.weekday() >= 5:
+        tax -= dt.timedelta(days=1)
+    if tax in ev:
+        ev[tax].append("🧾 Уплата налогов (28-е): экспортёры продают валюту — обычно поддержка рубля")
+    txt = [f"📅 <b>Календарь недели</b> · {d0.strftime('%d.%m')}–{(d0 + dt.timedelta(days=4)).strftime('%d.%m')}", ""]
+    for d, k in zip(days, wd):
+        if ev[d]:
+            txt.append(f"<b>{k}, {d.strftime('%d.%m')}</b>")
+            txt += ev[d]
+            txt.append("")
+    if len(txt) <= 2:
+        txt.append("Крупных запланированных событий нет.")
+    if nxt:
+        txt.append(f"Следующее заседание ЦБ по ставке — {nxt[0].strftime('%d.%m.%Y')}.")
+    txt += ["Отчёты компаний и советы директоров по дивидендам — в ленте #главное по мере выхода."]
+    PUB.post("\n".join(txt), ai_lead=False)
+
+
+def poll():
+    """Пятница 19:05 МСК: опрос — где будет индекс через неделю."""
+    try:
+        im = (index_markets().get("IMOEX") or {})
+        cur = im.get("CURRENTVALUE") or im.get("LASTVALUE")
+    except Exception as e:  # noqa: BLE001
+        log("опрос: нет индекса", e)
+        return
+    if not cur:
+        return
+    now = now_msk()
+    nx = (now + dt.timedelta(days=7)).strftime("%d.%m")
+    hi, lo = round(cur * 1.02 / 10) * 10, round(cur * 0.98 / 10) * 10
+    q = f"📊 Где будет индекс МосБиржи в пятницу {nx}? Сейчас {fmt(cur, 0)}"
+    opts = [f"Выше {fmt(hi, 0)} (рост больше 2%)", f"Между {fmt(lo, 0)} и {fmt(hi, 0)}", f"Ниже {fmt(lo, 0)} (падение больше 2%)"]
+    if PUB.dry:
+        print(q, opts)
+        return
+    PUB._tg("sendPoll", {"chat_id": PUB.tg_chat, "question": q, "options": [{"text": o} for o in opts], "is_anonymous": True})
+    log("опрос опубликован")
 
 
 if __name__ == "__main__":

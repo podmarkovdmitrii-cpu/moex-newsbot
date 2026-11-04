@@ -257,6 +257,18 @@ def risk_label(risk_pct):
 def channel_text(idea):
     side = "ЛОНГ 🟢" if idea["side"] > 0 else "ШОРТ 🔴"
     t = f"🔒 <b>#Идея {side}</b> 🇷🇺\n\n{risk_label(idea['risk_pct'])}"
+    pl = idea.get("plan") or {}
+    pot = abs(idea["takes"][-1] - idea["entry"]) / idea["entry"]
+    facts = []
+    if pl.get("term"):
+        facts.append(f"срок {pl['term'][0]}–{pl['term'][1]} дн.")
+    facts.append(f"потенциал ~{pot * 100:.1f}%".replace(".", ","))
+    facts.append(f"прибыль/риск {fmt(idea.get('rr'))}")
+    if pl.get("p") is not None:
+        facts.append(f"вероятность цели {pl['p']:.0%}")
+    t += "\n" + " · ".join(facts)
+    if idea.get("open"):
+        t += f"\n\n🔓 <b>Открытая идея:</b> {idea['ticker']} · вход {fmt(idea['entry'])} · стоп {fmt(idea['stop'])} · тейки {' / '.join(fmt(x) for x in idea['takes'])}"
     marks = []  # статус без цен — уровни видят только подписчики
     if idea.get("hit"):
         marks.append(f"✅ Взято тейков: {len(idea['hit'])} из {len(idea['takes'])}")
@@ -404,6 +416,7 @@ HELP_ADMIN = ("Команды администратора:\n"
               "/ideas — последние идеи\n"
               "/result НОМЕР текст — дописать итог в пост (например: /result 3 ✅ Тейк взят +6,7%)\n"
               "/subs — подписчики\n"
+              "/stats [ГГГГ-ММ] — итоги закрытых идей за месяц в канал (по умолчанию — прошлый месяц; 1-го числа публикуются сами)\n"
               "/grant ID ДНЕЙ — выдать доступ вручную, /revoke ID — забрать\n"
               "/myid — ваш Telegram id")
 
@@ -437,7 +450,7 @@ def on_message(msg):
             send_invoice(uid)
         elif arg.startswith("plan_"):
             idea = S["ideas"].get(arg[5:])
-            if idea and has_access(uid):
+            if idea and (has_access(uid) or idea.get("open")):
                 say(uid, plan_text(idea))
             else:
                 say(uid, "План доступен подписчикам закрытых идей.", reply_markup={"inline_keyboard": [[{"text": "Оплатить доступ", "callback_data": "pay"}]]})
@@ -517,6 +530,12 @@ def on_message(msg):
             S["subs"][p[1]]["until"] = now() - 1
             DIRTY_SUBS = True
             say(uid, "Доступ закрыт.")
+    elif admin and cmd == "/stats":
+        p = text.split()
+        mm = None
+        if len(p) > 1 and re.match(r"^\d{4}-\d{2}$", p[1]):
+            mm = (int(p[1][:4]), int(p[1][5:]))
+        say(uid, "Опубликовано." if stats_post(mm) else "За этот месяц закрытых идей нет.")
     elif admin and cmd == "/help":
         say(uid, HELP_ADMIN)
 
@@ -542,6 +561,7 @@ def judge_async(uid, idea, publish):
             cf = r.get("confirm")
             idea["plan"] = {"takes": [{"px": float(t["px"]), "share": float(t["share"]), "p": float(t["p"])} for t in r["takes"]],
                             "rules": list(r["rules"]), "p": float(r["p"]), "verdict": r["verdict"],
+                            "term": [int(x) for x in r["term"]] if r.get("term") else None, "potential": float(r.get("potential") or 0),
                             "confirm": {"px": float(cf["px"]), "p": float(cf["p"]), "strong": bool(cf.get("strong"))} if cf else None}
         with LOCK:
             S["seq"] += 1
@@ -573,7 +593,7 @@ def on_callback(cq):
         return
     if kind == "plan":
         idea = S["ideas"].get(iid)
-        if idea and has_access(uid):
+        if idea and (has_access(uid) or idea.get("open")):
             ans["url"] = f"https://t.me/{bot_username()}?start=plan_{iid}"
         else:
             ans.update(text="Здесь закрытые идеи. Чтобы их видеть, необходимо оплатить доступ через бота по кнопке «Оплатить доступ» ниже.", show_alert=True)
@@ -583,7 +603,7 @@ def on_callback(cq):
         idea = S["ideas"].get(iid)
         if not idea:
             ans.update(text="Идея не найдена.", show_alert=True)
-        elif not has_access(uid):
+        elif not (has_access(uid) or idea.get("open")):
             ans.update(text="Здесь закрытые идеи. Чтобы их видеть, необходимо оплатить доступ через бота по кнопке «Оплатить доступ» ниже.", show_alert=True)
         elif kind == "see":
             ans.update(text=alert_text(idea), show_alert=True)
@@ -630,6 +650,72 @@ def on_callback(cq):
 def on_precheckout(q):
     ok = (q.get("invoice_payload") or "").startswith("sub:")
     tg("answerPreCheckoutQuery", {"pre_checkout_query_id": q["id"], "ok": ok, **({} if ok else {"error_message": "Счёт устарел, запросите новый: /start"})})
+
+
+def idea_outcome(v):
+    """Итог закрытой идеи в R по уровням: доли тейков из плана, остаток — по стопу на момент закрытия."""
+    E, side = v["entry"], v["side"]
+    r0 = E * v.get("risk_pct", 0) / 100
+    if r0 <= 0:
+        return None, "?"
+    shares = [t.get("share") for t in ((v.get("plan") or {}).get("takes") or [])]
+    if len(shares) != len(v["takes"]) or any(x is None for x in shares):
+        shares = [1 / len(v["takes"])] * len(v["takes"])
+    hit = set(v.get("hit") or [])
+    R = sum(shares[i] * (v["takes"][i] - E) * side / r0 for i in hit if i < len(shares))
+    rest = 1 - sum(shares[i] for i in hit if i < len(shares))
+    if rest > 1e-6:
+        R += rest * (v["stop"] - E) * side / r0
+    kind = "тейк" if rest <= 1e-6 else ("безубыток" if abs(v["stop"] - E) < 1e-9 and not hit else
+                                       "частично" if hit else "стоп")
+    return R, kind
+
+
+def stats_post(month=None):
+    """Итоги закрытых идей за месяц — открытым постом в канал (прозрачность для подписчиков)."""
+    t = time.gmtime(now() + 3 * 3600)
+    if month is None:  # прошлый месяц
+        y, m = (t.tm_year, t.tm_mon - 1) if t.tm_mon > 1 else (t.tm_year - 1, 12)
+    else:
+        y, m = month
+    key = f"{y}-{m:02d}"
+    ideas = [v for v in S["ideas"].values() if v.get("closed") and time.strftime("%Y-%m", time.gmtime(int(v.get("closed_t") or v.get("t") or 0) + 3 * 3600)) == key]
+    if not ideas:
+        log("итоги идей:", key, "— закрытых идей нет")
+        return None
+    rs = [(idea_outcome(v), v) for v in ideas]
+    vals = [r for (r, k), v in rs if r is not None]
+    cnt = {}
+    for (r, k), v in rs:
+        cnt[k] = cnt.get(k, 0) + 1
+    tot = sum(vals)
+    win = sum(1 for x in vals if x > 0)
+    mn = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"][m - 1]
+    lines = [f"📊 <b>Итоги закрытых идей · {mn} {y}</b>", "",
+             f"Закрыто идей: <b>{len(ideas)}</b> · в плюсе {win} · " + " · ".join(f"{k} {n}" for k, n in cnt.items()),
+             f"Суммарный результат: <b>{'+' if tot >= 0 else '−'}{abs(tot):.1f}R</b>, в среднем {'+' if tot >= 0 else '−'}{abs(tot) / max(1, len(vals)):.2f}R на идею".replace(".", ","),
+             "<i>R — риск идеи (расстояние от входа до стопа). Результат посчитан по уровням: доли тейков из плана, остаток — по стопу на момент закрытия.</i>", ""]
+    for (r, k), v in sorted(rs, key=lambda z: -(z[0][0] or -99)):
+        sd = "лонг" if v["side"] > 0 else "шорт"
+        lines.append(f"{'🟢' if (r or 0) > 0 else '🔴' if (r or 0) < 0 else '⚪️'} {v['ticker']} {sd} — {k}, {'+' if (r or 0) >= 0 else '−'}{abs(r or 0):.2f}R".replace(".", ",")
+                     + (f" · {html.escape(v['result'])}" if v.get("result") else ""))
+    lines += ["", "🔒 Новые идеи — по кнопке «Смотреть идею» под постами #идея после оплаты доступа в боте.", f"<i>{DISCLAIMER}</i>"]
+    txt = "\n".join(lines)
+    m_ = tg("sendMessage", {"chat_id": CHAT, "text": txt[:4000], "parse_mode": "HTML", "disable_web_page_preview": True,
+                            "reply_markup": {"inline_keyboard": [[{"text": "🔒 Доступ к идеям", "url": f"https://t.me/{bot_username()}?start=pay"}]]}})
+    log("итоги идей опубликованы:", key)
+    return m_
+
+
+def monthly():
+    t = time.gmtime(now() + 3 * 3600)
+    key = time.strftime("%Y-%m", t)
+    if t.tm_mday == 1 and t.tm_hour >= 12 and S.get("stats_m") != key and CHAT:
+        S["stats_m"] = key
+        try:
+            stats_post()
+        except Exception as e:  # noqa: BLE001
+            log("итоги идей:", e)
 
 
 def remind():
@@ -705,6 +791,7 @@ def main():
         if DIRTY_SUBS:
             backup()
         if time.time() - last_remind > 3600:
+            monthly()
             remind()
             last_remind = time.time()
     save()

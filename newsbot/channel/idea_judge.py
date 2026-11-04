@@ -95,8 +95,12 @@ def state(a):
 
 
 # ---------------- вероятность ----------------
+LAST_WIN_BARS = []  # сколько баров шли до цели в выигрышных случаях последнего расчёта (для оценки срока идеи)
+
+
 def first_touch(a, atr, side, a_s, a_t, H, idx):
     """Для каждого бара i из idx: вход по закрытию, стоп a_s·ATR_i, цель a_t·ATR_i. Возвращает (цель, стоп, не дошло)."""
+    LAST_WIN_BARS.clear()
     h, l, c = a["h"], a["l"], a["c"]
     n = len(c)
     win = loss = tout = 0
@@ -114,6 +118,7 @@ def first_touch(a, atr, side, a_s, a_t, H, idx):
                 break
             if (side > 0 and h[k] >= T) or (side < 0 and l[k] <= T):
                 res = 1
+                LAST_WIN_BARS.append(k - i)
                 break
         if res > 0:
             win += 1
@@ -131,7 +136,9 @@ def prob(a, side, a_s, a_t, H, step=1, similar=None):
     w, lo, to = first_touch(a, atr, side, a_s, a_t, H, idx_all)
     tot = w + lo + to
     p_all = w / tot if tot else float("nan")
-    res = dict(p_all=p_all, n_all=tot, p_timeout=to / tot if tot else float("nan"))
+    res = dict(p_all=p_all, n_all=tot, p_timeout=to / tot if tot else float("nan"),
+               bars_med=float(np.median(LAST_WIN_BARS)) if LAST_WIN_BARS else None,
+               bars_q=(float(np.percentile(LAST_WIN_BARS, 25)), float(np.percentile(LAST_WIN_BARS, 75))) if len(LAST_WIN_BARS) >= 8 else None)
     if similar is not None:
         idx_s = [i for i in idx_all if similar[i]]
         w2, lo2, to2 = first_touch(a, atr, side, a_s, a_t, H, idx_s)
@@ -281,6 +288,11 @@ def analyze(ticker, side, E, S, T, data=None, last=None):
     P = prob(base, side, g_s, g_t, Hz, step=1 if len(base["c"]) < 4000 else 2, similar=sim_mask)
     p = P["p"]
     be = risk / (risk + path)
+    per_day = 1.0 if not use_h else max(1.0, len(hh["c"]) / max(1, len({x[:10] for x in hh["t"]})))
+    term = None
+    if P.get("bars_q"):
+        lo_d, hi_d = (max(1, round(x / per_day)) for x in P["bars_q"])
+        term = (lo_d, max(lo_d, hi_d))
 
     lv = levels(d, hh, A)
     lo_, hi_ = min(E, T), max(E, T)
@@ -368,7 +380,7 @@ def analyze(ticker, side, E, S, T, data=None, last=None):
         score -= 1
     verdict = ("Сильная идея" if score >= 3 else "Приемлемая идея" if score >= 1 else
                "Слабая идея" if score >= -1 else "Не рекомендую публиковать")
-    return dict(ticker=ticker, side=side, E=E, S=S, T=T, last=last, atr=A, rr=rr, a_s=a_s, a_t=a_t, p=p, be=be, P=P, tf=tf, H=Hz,
+    return dict(term=term, potential=path / E, ticker=ticker, side=side, E=E, S=S, T=T, last=last, atr=A, rr=rr, a_s=a_s, a_t=a_t, p=p, be=be, P=P, tf=tf, H=Hz,
                 takes=takes, rules=rules, confirm=confirm, between=between[:6], obstacles=obstacles, flags=flags, score=score,
                 verdict=verdict, levels=lv)
 
@@ -388,6 +400,7 @@ def report(r):
          "",
          f"<b>Вердикт: {r['verdict']}</b>",
          f"Вероятность дойти до цели раньше стопа: <b>{r['p']:.0%}</b> (горизонт ~{r['H']} баров по {r['tf']}).",
+         (f"Срок идеи: обычно {r['term'][0]}–{r['term'][1]} торг. дн. (когда цель достигалась) · потенциал {fmtp(round(r['potential'] * 100, 1))}%" if r.get("term") else f"Потенциал {fmtp(round(r['potential'] * 100, 1))}%"),
          f"  все дни истории: {P['p_all']:.0%} из {P['n_all']}" + (f"; похожие на сейчас: {P['p_sim']:.0%} из {P['n_sim']}" if P.get('n_sim') else "")]
     L.append("")
     for ic, t in r["flags"]:

@@ -417,6 +417,29 @@ def vk_text(s):
     return html.unescape(s)
 
 
+# Рубрики канала: хэштег в первой строке поста (как у крупных лент) — по заголовку
+RUBRICS = [(r"Покупатели vs продавцы", "потоки"), (r"Потоки в ОФЗ", "ОФЗ"), (r"^☀️|Сырьё и валюта: план|План дня|Трейдер: план|Подготовка", "план_дня"),
+           (r"Итоги дня", "итоги_дня"), (r"Аномалия|аномали|Индекс МосБиржи", "аномалия"), (r"Обзор дня:", "разбор"),
+           (r"Базовые активы|Торги выходного дня|Итоги недели", "неделя"), (r"Календарь недели", "календарь_недели"),
+           (r"Трейдер", "трейдер"), (r"Итоги закрытых идей", "итоги_идей")]
+
+
+def add_rubric(text):
+    head, sep, rest = text.partition("\n")
+    if "#" in re.sub(r"&#\d+;", "", head):
+        return text
+    for pat, tag in RUBRICS:
+        if re.search(pat, re.sub(r"<[^>]+>", "", head)):
+            # тот же хэштег ниже в тексте убираем, чтобы не дублировать
+            rest = re.sub(r"(^|[ \n])#" + re.escape(tag) + r"(?=[\s]|$)", r"\1", rest)
+            if tag == "аномалия":
+                rest = re.sub(r"(^|\n)#прогноз_аномалий(?=[\s]|$)", r"\1", rest)
+            rest = re.sub(r"\n[ \t]+#", "\n#", rest)
+            rest = re.sub(r"\n[ \t]*$", "", rest)
+            return f"{head} #{tag}{sep}{rest}"
+    return text
+
+
 class Publisher:
     """Telegram (TG_PUBLIC_CHAT) и ВК (VK_GROUP_TOKEN + VK_GROUP_ID; фото — с VK_USER_TOKEN). Без настроек — пишет в out/."""
 
@@ -473,6 +496,10 @@ class Publisher:
         return f"https://t.me/c/{cid[4:]}/{mid}" if cid.startswith("-100") else None
 
     def post(self, text, photos=None, document=None, vk_text_override=None, ai_lead=True, live=None):
+        try:
+            text = add_rubric(text)  # хэштег рубрики — в первую строку
+        except Exception as e:  # noqa: BLE001
+            log("рубрика не добавлена:", e)
         """text — HTML; photos — [(path, подпись)]; document — (path, подпись). Возвращает ссылку на пост в Telegram.
         live — ключ «живого» поста: первый вызов за день публикует пост, следующие в тот же день редактируют его
         (картинка и подпись — editMessageMedia, продолжение — editMessageText), новых постов в ленте не появляется."""
