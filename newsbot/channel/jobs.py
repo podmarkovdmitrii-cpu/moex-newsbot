@@ -36,7 +36,7 @@ CBR_DAYS = ["2026-10-23", "2026-12-18", "2027-02-12", "2027-03-20", "2027-04-24"
 FAM_RU = {"mom": "импульс", "pull": "откат к EMA 20", "sbrk": "шорт пробоя"}
 SEC_RU = {"bank": "банки", "oil": "нефтегаз", "metal": "металлурги", "retail": "ритейл", "tech": "IT и связь", "power": "энергетика", "chem": "химия", "devel": "девелоперы", "transport": "транспорт"}
 SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "weekly", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
-         "45 10 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening",
+         "45 7-15 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening",
          "20 3 * * 1-5": "trader_prep", "20 4 * * 1-5": "trader_open", "20 7 * * 1-5": "trader_open", "45 16 * * 5": "trader_week",
          "15 9 * * 1-5": "stock_review", "30 16 * * 0": "weekend_review", "55 15 * * 1-5": "strong_moves"}
 PUB = Publisher()
@@ -283,7 +283,7 @@ def flows():
         vol.append((r["SECID"], r["VALTODAY"] / (a20 * frac), r["VALTODAY"], (r.get("LASTTOPREVPRICE") or 0) / 100, a20))
     vup = sorted([v for v in vol if v[1] >= 2.5], key=lambda v: -v[1])[:6]
     vdn = sorted([v for v in vol if v[1] <= 0.35 and v[4] >= 150e6], key=lambda v: v[1])[:5]
-    txt = [f"⚖️ <b>Покупатели vs продавцы</b> · {now.strftime('%d.%m')}, {hm} МСК",
+    txt = [f"⚖️ <b>Покупатели vs продавцы</b> · {now.strftime('%d.%m')}, обновлено в {hm} МСК\n<i>🔄 Пост обновляется каждые 30 минут до конца торгов</i>",
            f"<blockquote>💰 <b>Деньги в акциях за день: {bln(tot_all)}</b>" + (f" ({fmt(norm_x, 1)}× к обычному на это время)" if norm_x else "") +
            f"\nПокупки по рынку {pc(share_b, 0, False)} · чистый {'приток' if net >= 0 else 'отток'} <b>{'+' if net >= 0 else '−'}{bln(abs(net))}</b> — {mood}</blockquote>", "",
            "🟢 <b>Перевес покупок</b>", *([row(x) for x in buyers] or ["<i>нет бумаг с заметным перевесом</i>"]),
@@ -356,7 +356,7 @@ def flows():
             "«Кит» — сделка от 50 млн ₽ в голубых фишках, от 5% среднего дневного оборота во 2–3 эшелоне, от 30 млн ₽ во фьючерсах. Данные Мосбиржи с задержкой до 15 минут; перевес — не прогноз.</blockquote>", "#потоки"]
     rows = [(x["lab"], key(x), None) for x in sorted(buyers + sellers[::-1], key=lambda x: -key(x))]
     img = hbars(rows, os.path.join(OUT, "flows.png"), f"Перевес покупок (+) и продаж (−), {now.strftime('%d.%m')} {hm} МСК", fmt_v=lambda v: pc(v, 0))
-    PUB.post("\n".join(txt), [(img, f"Перевес покупателей и продавцов на {hm} МСК")])
+    PUB.post("\n".join(txt), [(img, f"Перевес покупателей и продавцов на {hm} МСК")], live="flows")
     save_json("flows_last.json", dict(time=now.isoformat(), tot_all=tot_all, net=net, vol_up=[v[0] for v in vup], buyers=[(x["lab"], key(x)) for x in buyers], sellers=[(x["lab"], key(x)) for x in sellers], share=allb / allt))
 
 
@@ -701,7 +701,7 @@ def ofz():
     mins = (now.hour * 60 + now.minute) - 600
     frac = max(0.1, min(1.0, mins / 530))
     xa = f" ({fmt(tot / (avg * frac), 1)}× к обычному обороту {'на это время' if frac < 1 else 'за день'})" if avg else ""
-    txt = [f"🏦 <b>Потоки в ОФЗ</b> · {now.strftime('%d.%m')}, {'середина дня' if now.hour < 16 else 'итоги дня'}, {now.strftime('%H:%M')} МСК",
+    txt = [f"🏦 <b>Потоки в ОФЗ</b> · {now.strftime('%d.%m')}, {'середина дня' if now.hour < 16 else 'итоги дня'}, обновлено в {now.strftime('%H:%M')} МСК\n<i>🔄 Пост обновляется в течение дня</i>",
            f"<blockquote><b>Вывод:</b> {concl}</blockquote>",
            f"Оборот гособлигаций: <b>{bln(tot)}</b>{xa}." + (f" Индекс RGBI <code>{pc(rg1, 2)}</code> за день, <code>{pc(rg5, 2)}</code> за 5 дней." if rg1 is not None else ""), ""]
     for x in lines:
@@ -731,7 +731,7 @@ def ofz():
     img = os.path.join(OUT, "ofz.png")
     fig.savefig(img, facecolor=BG)
     plt.close(fig)
-    PUB.post("\n".join(txt), [(img, "Потоки в ОФЗ и кривая доходности")])
+    PUB.post("\n".join(txt), [(img, "Потоки в ОФЗ и кривая доходности")], live="ofz")
     save_json("ofz_last.json", dict(date=today, concl=concl, tot=tot, x=(tot / avg if avg else None), rg5=rg5, lines=lines))
 
 

@@ -472,8 +472,10 @@ class Publisher:
         cid = str(msg.get("chat", {}).get("id", ""))
         return f"https://t.me/c/{cid[4:]}/{mid}" if cid.startswith("-100") else None
 
-    def post(self, text, photos=None, document=None, vk_text_override=None, ai_lead=True):
-        """text — HTML; photos — [(path, подпись)]; document — (path, подпись). Возвращает ссылку на пост в Telegram."""
+    def post(self, text, photos=None, document=None, vk_text_override=None, ai_lead=True, live=None):
+        """text — HTML; photos — [(path, подпись)]; document — (path, подпись). Возвращает ссылку на пост в Telegram.
+        live — ключ «живого» поста: первый вызов за день публикует пост, следующие в тот же день редактируют его
+        (картинка и подпись — editMessageMedia, продолжение — editMessageText), новых постов в ленте не появляется."""
         if ai_lead:
             try:
                 import ai
@@ -503,6 +505,11 @@ class Publisher:
             self.sink.flush()
             print("----- ПОСТ (без отправки) -----\n" + re.sub(r"<[^>]+>", "", text) + "\n" + "\n".join(f"[фото] {os.path.basename(p)}" for p, _ in photos) + (f"\n[документ] {os.path.basename(document[0])}" if document else ""), flush=True)
             return None
+        if live and self.tg_chat:
+            try:
+                return self._live(live, text, photos[:1])
+            except Exception as e:  # noqa: BLE001
+                log("живой пост: ошибка, публикую обычным постом —", e)
         link = None
         photo_link = None
         if self.tg_chat and len(photos) == 1 and not document:
@@ -577,6 +584,100 @@ class Publisher:
             except Exception as e:  # noqa: BLE001
                 log("ВК: ошибка", e)
         return link
+
+    # ---- «живые» посты: один пост в день, обновляется ----
+    def _caption_split(self, text):
+        """Подпись к картинке (до ~1010 знаков, по абзацам) и остаток текста."""
+        blocks = text.split("\n\n")
+        disc = blocks.pop() if blocks and DISCLAIMER in blocks[-1] else ""
+        room = 1010 - len(re.sub(r"<[^>]+>", "", disc))
+        cap, k = "", 0
+        for k, bl in enumerate(blocks):
+            nx = cap + ("\n\n" if cap else "") + bl
+            if len(re.sub(r"<[^>]+>", "", nx)) > room:
+                break
+            cap = nx
+        else:
+            k = len(blocks)
+        rest = "\n\n".join(blocks[k:])
+        if cap and disc:
+            cap += "\n\n" + disc
+        if rest.strip() and disc:
+            rest += "\n\n" + disc
+        return cap, rest
+
+    @staticmethod
+    def _fit(t, n=4000):
+        if len(t) <= n:
+            return t
+        cut = t[:n].rsplit("\n", 1)[0]
+        if cut.count("<blockquote") != cut.count("</blockquote>"):
+            cut += "</blockquote>"
+        return cut + "\n…"
+
+    def _edit(self, method, data, files=None):
+        try:
+            self._tg(method, data, files)
+            return True
+        except RuntimeError as e:
+            if "not modified" in str(e):
+                return True
+            log(f"живой пост: {method} не прошёл —", e)
+            return False
+
+    def _live(self, key, text, photos):
+        today = now_msk().date().isoformat()
+        st = load_json("live_posts.json", {})
+        rec = st.get(key) if (st.get(key) or {}).get("date") == today else None
+        photo = photos[0] if photos else None
+        cap, rest = self._caption_split(text) if photo else ("", text)
+        if photo and not cap:  # первый абзац длиннее подписи — подпись из заголовка, всё остальное продолжением
+            cap, rest = photo[1][:1000], text
+        ok = bool(rec)
+        if rec and photo and rec.get("photo"):
+            with open(photo[0], "rb") as f:
+                media = {"type": "photo", "media": "attach://p", "caption": cap, "parse_mode": "HTML"}
+                ok = self._edit("editMessageMedia", {"chat_id": self.tg_chat, "message_id": rec["photo"],
+                                                     "media": json.dumps(media, ensure_ascii=False)}, {"p": (os.path.basename(photo[0]), f.read())})
+        elif rec and not photo and rec.get("text"):
+            ok = self._edit("editMessageText", {"chat_id": self.tg_chat, "message_id": rec["text"], "text": self._fit(text),
+                                                "parse_mode": "HTML", "disable_web_page_preview": True})
+            rest = ""
+        elif rec:
+            ok = False  # было с картинкой, стало без (или наоборот) — публикуем заново
+        if ok and photo and rest.strip():
+            body = "↑ <b>Продолжение</b>\n" + self._fit(rest, 3970)
+            if rec.get("text"):
+                ok = self._edit("editMessageText", {"chat_id": self.tg_chat, "message_id": rec["text"], "text": body,
+                                                    "parse_mode": "HTML", "disable_web_page_preview": True})
+            else:
+                m = self._tg("sendMessage", {"chat_id": self.tg_chat, "text": body, "parse_mode": "HTML", "disable_web_page_preview": True,
+                                             "reply_parameters": {"message_id": rec["photo"], "allow_sending_without_reply": True}})
+                rec["text"] = m["message_id"]
+        if ok:
+            rec["n"] = rec.get("n", 1) + 1
+            rec["upd"] = now_msk().strftime("%H:%M")
+            st[key] = rec
+            save_json("live_posts.json", st)
+            log(f"живой пост «{key}» обновлён ({rec['n']}-я версия за день)")
+            return rec.get("link")
+        # первый пост за день (или прежний удалён) — публикуем и запоминаем сообщения
+        rec = {"date": today, "n": 1}
+        if photo:
+            with open(photo[0], "rb") as f:
+                pm = self._tg("sendPhoto", {"chat_id": self.tg_chat, "caption": cap, "parse_mode": "HTML"}, {"photo": (os.path.basename(photo[0]), f.read())})
+            rec["photo"], rec["link"] = pm["message_id"], self.tg_link(pm)
+            if rest.strip():
+                m = self._tg("sendMessage", {"chat_id": self.tg_chat, "text": "↑ <b>Продолжение</b>\n" + self._fit(rest, 3970), "parse_mode": "HTML",
+                                             "disable_web_page_preview": True, "reply_parameters": {"message_id": pm["message_id"], "allow_sending_without_reply": True}})
+                rec["text"] = m["message_id"]
+        else:
+            m = self._tg("sendMessage", {"chat_id": self.tg_chat, "text": self._fit(text), "parse_mode": "HTML", "disable_web_page_preview": True})
+            rec["text"], rec["link"] = m["message_id"], self.tg_link(m)
+        st[key] = rec
+        save_json("live_posts.json", st)
+        log(f"живой пост «{key}» опубликован, дальше за день — обновления")
+        return rec.get("link")
 
     # ---- ВКонтакте ----
     def _vk(self, method, token, **params):
