@@ -234,7 +234,37 @@ async function vkPhoto(photo) {
   }
   return null;
 }
+// Название компании к первому упоминанию тикера: «$SBER» → «$SBER (Сбербанк)» (как channel/names.py)
+let TNAMES = null;
+function tName(t) {
+  if (!TNAMES) { try { TNAMES = JSON.parse(fs.readFileSync(path.join(__dirname, 'channel', 'ticker_names.json'), 'utf8')); } catch (e) { TNAMES = {}; } }
+  if (TNAMES[t]) return TNAMES[t];
+  const x = ((NC._tq() || {}).list || {})[t];
+  if (!x) return '';
+  const pref = /\bап\b|прив|акц\.?\s*пр/i.test(x.name || '');
+  let nm = String(x.name || x.sn || '').replace(/["«»]/g, '').replace(/\((ПАО|ОАО|АО)\)/g, '')
+    .replace(/(^|\s)(МКПАО|ПАО|ОАО|АО|акции|акц\.?|об\.?|обыкн\.?|ао\.?|ап\.?|пр\.?|ак\.)(?=\s|$)/gi, ' ').replace(/\s+[-–]\s+|\s{2,}/g, ' ').trim().replace(/^[-–.,\s]+|[-–.,\s]+$/g, '');
+  return nm ? nm + (pref ? ', прив.' : '') : '';
+}
+function withNames(html) {
+  if (!html || html.indexOf('$') < 0) return html;
+  const seen = new Set();
+  return html.replace(/(^|[^\w\/#=&"'])\$([A-Z][A-Z0-9]{0,6})\b(?!\s?\()/g, (m, pre, t, off) => {
+    if (seen.has(t)) return m;
+    seen.add(t);
+    const nm = tName(t);
+    if (!nm || nm.toUpperCase() === t) return m;
+    const before = html.slice(Math.max(0, off - 200), off + pre.length);
+    if (before.lastIndexOf('<') > before.lastIndexOf('>')) return m;  // внутри тега
+    const around = html.slice(Math.max(0, off - 70), off + 80).replace(/<[^>]+>/g, ' ').toLowerCase();
+    const stem = (nm.toLowerCase().match(/[a-zа-яё0-9]{3,}/) || [''])[0].slice(0, 5);
+    if (stem && around.includes(stem)) return m;
+    return `${pre}$${t} (${nm})`;
+  });
+}
 async function publish(S, html, reply, useAi, photo, more) {
+  html = withNames(html);
+  if (more) more = withNames(more);
   if (useAi) html = await AI.withLead(html, S, esc);
   const disc = `\n\n<i>${DISCLAIMER}</i>`;
   const full = html + (more ? '\n\n' + more : '') + disc;
@@ -541,7 +571,7 @@ async function feedFlush(S) {
     '<i>🔄 Лента пополняется в течение дня; самые весомые новости — отдельными постами #новости</i>';
   const lines = [];
   for (const x of f.items) { if (vis([head, ...lines, x].join('\n\n')).length > 3700) break; lines.push(x); }
-  const text = head + '\n\n' + lines.join('\n\n') + `\n\n<i>${DISCLAIMER}</i>`;
+  const text = withNames(head + '\n\n' + lines.join('\n\n')) + `\n\n<i>${DISCLAIMER}</i>`;
   if (f.id && await tgEdit(f.id, text)) return;
   f.id = await tgSend(text);
   log('лента дня: опубликована', f.id);
