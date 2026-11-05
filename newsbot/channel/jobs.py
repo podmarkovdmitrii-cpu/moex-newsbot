@@ -35,7 +35,7 @@ SEC_OF = json.load(open(os.path.join(HERE, "..", "impact.json"), encoding="utf-8
 CBR_DAYS = ["2026-10-23", "2026-12-18", "2027-02-12", "2027-03-20", "2027-04-24", "2027-06-11", "2027-07-23", "2027-09-10", "2027-10-22", "2027-12-17"]
 FAM_RU = {"mom": "импульс", "pull": "откат к EMA 20", "sbrk": "шорт пробоя"}
 SEC_RU = {"bank": "банки", "oil": "нефтегаз", "metal": "металлурги", "retail": "ритейл", "tech": "IT и связь", "power": "энергетика", "chem": "химия", "devel": "девелоперы", "transport": "транспорт"}
-SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "calendar_week", "35 16 * * 5": "weekly", "5 16 * * 5": "poll", "50 4 * * *": "nav", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
+SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "calendar_week", "35 16 * * 5": "weekly", "5 16 * * 5": "poll", "50 * * * *": "nav", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
          "45 7-15 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening",
          "20 3 * * 1-5": "trader_prep", "20 4 * * 1-5": "trader_open", "20 7 * * 1-5": "trader_open", "45 16 * * 5": "trader_week",
          "15 9 * * 1-5": "stock_review", "30 16 * * 0": "weekend_review", "55 15 * * 1-5": "strong_moves"}
@@ -3581,18 +3581,24 @@ def nav():
     if not ok:
         m = PUB._tg("sendMessage", {"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True, **({"reply_markup": kb} if kb else {})})
         st = {"id": m["message_id"], "link": PUB.tg_link(m)}
+    if not st.get("pinned"):
         try:
-            PUB._tg("pinChatMessage", {"chat_id": chat, "message_id": m["message_id"], "disable_notification": True})
+            PUB._tg("pinChatMessage", {"chat_id": chat, "message_id": st["id"], "disable_notification": True})
+            st["pinned"] = True
         except Exception as e:  # noqa: BLE001
             log("навигация: не удалось закрепить (нужно право бота «Закреплять сообщения» / «Изменять сообщения»):", e)
     if st.get("ver") != NAV_VERSION:
+        ok_all = True
         for meth, data in (("setChatTitle", {"title": SITE_TITLE[:128]}), ("setChatDescription", {"description": SITE_DESC[:255]})):
             try:
                 PUB._tg(meth, {"chat_id": chat, **data})
             except Exception as e:  # noqa: BLE001
                 if "not modified" not in str(e):
+                    ok_all = False
                     log(f"навигация: {meth} не прошёл (нужно право бота «Изменять профиль канала»):", e)
-    st["ver"] = NAV_VERSION
+        if ok_all:  # до успеха пробуем каждый час
+            st["ver"] = NAV_VERSION
+            log("навигация: название и описание канала обновлены")
     save_json("nav.json", st)
     log("навигация: закреплённый пост актуален", st.get("link"))
 
