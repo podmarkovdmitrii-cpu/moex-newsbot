@@ -250,7 +250,7 @@ def new_step(uid, w, text):
             return PW.say(uid, f"{t} не найден на Мосбирже (TQBR). Введите другой тикер.")
         d["ticker"], d["last"] = t, (q or {}).get("last")
         w["step"] = "entry"
-        cur = f"Сейчас {PW.fmt(d['last'])} ₽. " if d.get("last") else ""
+        cur = (f"{html.escape(PW.tlabel(t))}: сейчас {PW.fmt(d['last'])} ₽. " if d.get("last") else f"{html.escape(PW.tlabel(t))}. ")
         mk = {"inline_keyboard": [[{"text": f"По рынку {PW.fmt(d['last'])}", "callback_data": "wmkt"}]]} if d.get("last") else None
         return PW.say(uid, f"{cur}Шаг 2/5 — цена входа:", **({"reply_markup": mk} if mk else {}))
     if st in ("entry", "stop", "target"):
@@ -304,7 +304,7 @@ def show_ideas(uid):
     items = open_ideas()
     if not items:
         return PW.say(uid, "Открытых идей нет. Новая — кнопками «🟢 Новый лонг» / «🔴 Новый шорт».")
-    rows = [[{"text": f"#{k} {v['ticker']} {side_word(v['side'])} · стоп {PW.fmt(v['stop'])}", "callback_data": f"mi:{k}"}] for k, v in items]
+    rows = [[{"text": f"#{k} {PW.tlabel(v['ticker'])} {side_word(v['side'])} · стоп {PW.fmt(v['stop'])}", "callback_data": f"mi:{k}"}] for k, v in items]
     PW.say(uid, "📋 Открытые идеи — выберите, чтобы перенести стоп, изменить тейки или закрыть:", reply_markup={"inline_keyboard": rows})
 
 
@@ -313,7 +313,7 @@ def idea_card(iid):
     hit = set(v.get("hit") or [])
     tk = " / ".join(("✅" if i in hit else "") + PW.fmt(x) for i, x in enumerate(v["takes"]))
     st = "\n".join(v.get("status") or [])
-    txt = (f"<b>#{iid} {v['ticker']} {side_word(v['side'])}</b>\nВход {PW.fmt(v['entry'])} · стоп {PW.fmt(v['stop'])}"
+    txt = (f"<b>#{iid} {PW.tlabel(v['ticker'])} {side_word(v['side'])}</b>\nВход {PW.fmt(v['entry'])} · стоп {PW.fmt(v['stop'])}"
            f"{' (безубыток)' if v.get('be') else ''}\nТейки: {tk}" + (f"\n{html.escape(st)}" if st else ""))
     rows = [[{"text": "🛡 Стоп в безубыток", "callback_data": f"mbe:{iid}"}, {"text": "✏️ Изменить стоп", "callback_data": f"mst:{iid}"}],
             [{"text": "🎯 Изменить тейки", "callback_data": f"mtk:{iid}"}]]
@@ -341,7 +341,7 @@ def refresh(iid, note):
         if int(u) in PW.ADMINS:
             continue
         try:
-            PW.say(int(u), f"🔔 Обновление по идее <b>{v['ticker']} {side_word(v['side'])}</b>: {html.escape(note)}",
+            PW.say(int(u), f"🔔 Обновление по идее <b>{PW.tlabel(v['ticker'])} {side_word(v['side'])}</b>: {html.escape(note)}",
                    reply_markup={"inline_keyboard": [[{"text": "План сделки", "url": f"https://t.me/{PW.bot_username()}?start=plan_{iid}"}]]})
             sent += 1
             time.sleep(0.05)
@@ -370,7 +370,7 @@ def on_manage_cb(uid, kind, arg, cq):
         return f"Стоп в безубытке, уведомлено подписчиков: {n}"
     if kind == "mst":
         wiz_set(uid, k="stop", iid=iid)
-        PW.say(uid, f"Новый стоп для #{iid} {v['ticker']} (сейчас {PW.fmt(v['stop'])}):", reply_markup=cancel_kb())
+        PW.say(uid, f"Новый стоп для #{iid} {PW.tlabel(v['ticker'])} (сейчас {PW.fmt(v['stop'])}):", reply_markup=cancel_kb())
         return ""
     if kind == "mtk":
         wiz_set(uid, k="takes", iid=iid)
@@ -407,7 +407,7 @@ def on_manage_cb(uid, kind, arg, cq):
         return "Идея открыта: уровни показаны в посте."
     if kind == "mcl":
         wiz_set(uid, k="close", iid=iid)
-        PW.say(uid, f"Итог по #{iid} {v['ticker']} одной строкой (например «✅ Тейк взят +6,7%» или «❌ Стоп −3,1%»):", reply_markup=cancel_kb())
+        PW.say(uid, f"Итог по #{iid} {PW.tlabel(v['ticker'])} одной строкой (например «✅ Тейк взят +6,7%» или «❌ Стоп −3,1%»):", reply_markup=cancel_kb())
         return ""
     return ""
 

@@ -395,7 +395,12 @@ def report(r):
         return "Разбор невозможен: " + r["error"]
     side = "ЛОНГ" if r["side"] > 0 else "ШОРТ"
     P = r["P"]
-    L = [f"<b>Разбор идеи {r['ticker']} {side}</b>  вход {fmtp(r['E'])} · стоп {fmtp(r['S'])} · цель {fmtp(r['T'])}",
+    try:
+        import names
+        tl = names.label(r["ticker"])
+    except Exception:  # noqa: BLE001
+        tl = r["ticker"]
+    L = [f"<b>Разбор идеи {tl} {side}</b>  вход {fmtp(r['E'])} · стоп {fmtp(r['S'])} · цель {fmtp(r['T'])}",
          f"Сейчас {fmtp(r['last'])}, дневной ATR {fmtp(round(r['atr'], 4))}. Стоп {fmtp(round(r['a_s'], 2))} ATR, цель {fmtp(round(r['a_t'], 2))} ATR.",
          "",
          f"<b>Вердикт: {r['verdict']}</b>",

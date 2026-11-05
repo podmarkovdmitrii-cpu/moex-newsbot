@@ -268,7 +268,7 @@ def channel_text(idea):
         facts.append(f"вероятность цели {pl['p']:.0%}")
     t += "\n" + " · ".join(facts)
     if idea.get("open"):
-        t += f"\n\n🔓 <b>Открытая идея:</b> {idea['ticker']} · вход {fmt(idea['entry'])} · стоп {fmt(idea['stop'])} · тейки {' / '.join(fmt(x) for x in idea['takes'])}"
+        t += f"\n\n🔓 <b>Открытая идея:</b> {html.escape(tlabel(idea['ticker']))} · вход {fmt(idea['entry'])} · стоп {fmt(idea['stop'])} · тейки {' / '.join(fmt(x) for x in idea['takes'])}"
     marks = []  # статус без цен — уровни видят только подписчики
     if idea.get("hit"):
         marks.append(f"✅ Взято тейков: {len(idea['hit'])} из {len(idea['takes'])}")
@@ -281,10 +281,18 @@ def channel_text(idea):
     return t + f"\n\n<i>{DISCLAIMER}</i>"
 
 
+def tlabel(t):
+    try:
+        import names
+        return names.label(t)
+    except Exception:  # noqa: BLE001
+        return t
+
+
 def alert_text(idea):
     side = "ЛОНГ" if idea["side"] > 0 else "ШОРТ"
     tk = " / ".join(fmt(x) for x in idea["takes"])
-    t = f"{idea['ticker']} — {side}\nВход: {fmt(idea['entry'])}\nСтоп: {fmt(idea['stop'])}\nТейк: {tk}\nРиск {fmt(idea['risk_pct'])}%, прибыль/риск {fmt(idea['rr'])}"
+    t = f"{tlabel(idea['ticker'])} — {side}\nВход: {fmt(idea['entry'])}\nСтоп: {fmt(idea['stop'])}\nТейк: {tk}\nРиск {fmt(idea['risk_pct'])}%, прибыль/риск {fmt(idea['rr'])}"
     pl = idea.get("plan") or {}
     if pl.get("p") is not None:
         t += f"\nВероятность цели ~{pl['p']:.0%}"
@@ -298,7 +306,7 @@ def alert_text(idea):
 def plan_text(idea):
     """Полный план для подписчика (в личку): тейки с долями, перенос стопа, уровень подтверждения, вероятность."""
     side = "ЛОНГ" if idea["side"] > 0 else "ШОРТ"
-    L = [f"<b>{idea['ticker']} — {side}</b>", f"Вход {fmt(idea['entry'])} · стоп {fmt(idea['stop'])}"]
+    L = [f"<b>{html.escape(tlabel(idea['ticker']))} — {side}</b>", f"Вход {fmt(idea['entry'])} · стоп {fmt(idea['stop'])}"]
     pl = idea.get("plan") or {}
     tk = pl.get("takes") or [{"px": x, "share": 1 / len(idea["takes"])} for x in idea["takes"]]
     for i, t in enumerate(tk, 1):
@@ -457,7 +465,7 @@ def on_message(msg):
         elif arg.startswith("buy_"):
             idea = S["ideas"].get(arg[4:])
             if idea and has_access(uid):
-                say(uid, f"<b>{idea['ticker']}</b> в Т-Инвестициях: {tinvest_url(idea['ticker'])}\n\n{html.escape(alert_text(idea))}\n\n<i>{DISCLAIMER}</i>")
+                say(uid, f"<b>{html.escape(tlabel(idea['ticker']))}</b> в Т-Инвестициях: {tinvest_url(idea['ticker'])}\n\n{html.escape(alert_text(idea))}\n\n<i>{DISCLAIMER}</i>")
             else:
                 say(uid, "Ссылка доступна подписчикам закрытых идей.", reply_markup={"inline_keyboard": [[{"text": "Оплатить доступ", "callback_data": "pay"}]]})
         else:
@@ -497,7 +505,7 @@ def on_message(msg):
         judge_async(uid, idea, publish=(cmd == "/idea"))
     elif cmd == "/ideas" and admin:
         last = sorted(S["ideas"].items(), key=lambda kv: -int(kv[0]))[:15]
-        say(uid, "\n".join(f"#{k} {v['ticker']} {'лонг' if v['side'] > 0 else 'шорт'} {fmt(v['entry'])}/{fmt(v['stop'])}/{'/'.join(fmt(x) for x in v['takes'])}"
+        say(uid, "\n".join(f"#{k} {html.escape(tlabel(v['ticker']))} {'лонг' if v['side'] > 0 else 'шорт'} {fmt(v['entry'])}/{fmt(v['stop'])}/{'/'.join(fmt(x) for x in v['takes'])}"
                            f" — {dstr(v['t'])}{' — ' + html.escape(v['result']) if v.get('result') else ''}" for k, v in last) or "Идей пока нет.")
     elif cmd == "/result" and admin:
         p = text.split(maxsplit=2)
@@ -697,7 +705,7 @@ def stats_post(month=None):
              "<i>R — риск идеи (расстояние от входа до стопа). Результат посчитан по уровням: доли тейков из плана, остаток — по стопу на момент закрытия.</i>", ""]
     for (r, k), v in sorted(rs, key=lambda z: -(z[0][0] or -99)):
         sd = "лонг" if v["side"] > 0 else "шорт"
-        lines.append(f"{'🟢' if (r or 0) > 0 else '🔴' if (r or 0) < 0 else '⚪️'} {v['ticker']} {sd} — {k}, {'+' if (r or 0) >= 0 else '−'}{abs(r or 0):.2f}R".replace(".", ",")
+        lines.append(f"{'🟢' if (r or 0) > 0 else '🔴' if (r or 0) < 0 else '⚪️'} {html.escape(tlabel(v['ticker']))} {sd} — {k}, {'+' if (r or 0) >= 0 else '−'}{abs(r or 0):.2f}R".replace(".", ",")
                      + (f" · {html.escape(v['result'])}" if v.get("result") else ""))
     lines += ["", "🔒 Новые идеи — по кнопке «Смотреть идею» под постами #идея после оплаты доступа в боте.", f"<i>{DISCLAIMER}</i>"]
     txt = "\n".join(lines)

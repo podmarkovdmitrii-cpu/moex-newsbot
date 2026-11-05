@@ -500,6 +500,12 @@ class Publisher:
             text = add_rubric(text)  # хэштег рубрики — в первую строку
         except Exception as e:  # noqa: BLE001
             log("рубрика не добавлена:", e)
+        try:
+            import names
+            text = names.annotate(text)  # «$SBER» → «$SBER (Сбербанк)»
+            photos = [(p_, names.annotate(c_)) for p_, c_ in (photos or [])] if photos else photos
+        except Exception as e:  # noqa: BLE001
+            log("названия компаний не добавлены:", e)
         """text — HTML; photos — [(path, подпись)]; document — (path, подпись). Возвращает ссылку на пост в Telegram.
         live — ключ «живого» поста: первый вызов за день публикует пост, следующие в тот же день редактируют его
         (картинка и подпись — editMessageMedia, продолжение — editMessageText), новых постов в ленте не появляется."""
