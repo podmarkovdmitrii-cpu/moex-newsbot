@@ -40,8 +40,9 @@ SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "calendar_week", "35 16 * * 5"
          "15 9 * * 1-5": "stock_review", "30 16 * * 0": "weekend_review", "55 15 * * 1-5": "strong_moves"}
 PUB = Publisher()
 DISCLAIMER_TXT = DISCLAIMER
-# Бот-трейдер в канале выключен: сделки и идеи публикует администратор (закрытые идеи, paywall.py).
-# BOT_TRADING=1 вернёт сигналы стратегии и модельный портфель в посты (рубрику «Трейдер» — ещё и строки trader_* в SCHED).
+# Бот-трейдер в канале выключен: нет постов модельного портфеля и рубрики «Трейдер» (сделки ведёт администратор).
+# Идеи по бумагам (сигналы и сетапы в плане дня) и по сырью/валюте остаются.
+# BOT_TRADING=1 вернёт модельный портфель (рубрику «Трейдер» — ещё и строки trader_* в SCHED).
 BOT_TRADING = os.environ.get("BOT_TRADING") == "1"
 
 
@@ -1185,7 +1186,7 @@ def morning():
     mkt_share = st.median(shares_all) if shares_all else None
     # сигналы стратегии
     plan = []
-    if sig and BOT_TRADING:
+    if sig:
         for q in sig.get("pend", []):
             plan.append(dict(q, kind="signal"))
         held = {q["t"] for q in sig.get("pend", [])}
@@ -1359,7 +1360,7 @@ def morning():
         B.append(("ul", it))
     B.append(("hr",))
     B.append(("h3", "Как читать план"))
-    B.append(("ul", ([f"Стратегия «{esc((sig or {}).get('strategy', 'совмещённая v2'))}»: риск 1% на сделку, сигналы — по закрытию прошлого дня, вход на открытии."] if BOT_TRADING else []) + [
+    B.append(("ul", [f"Сигналы и сетапы — стратегия «{esc((sig or {}).get('strategy', 'совмещённая v2'))}»: сигналы по закрытию прошлого дня, вход на открытии; стоп и цель — на графиках."] + [
                      "Вес новости — насколько сильно рынок исторически реагировал на такие новости (2017–2026): процентиль среди всех типов, средняя реакция за 5 дней и число случаев.",
                      "Дивиденды: «гэп» — на сколько цена снижалась в день отсечки (в долях дивиденда); «закрытие гэпа» — за сколько дней цена возвращалась к уровню до отсечки; ралли — как бумага обгоняла индекс за 20 дней до отсечки.",
                      "Только публичные данные: Мосбиржа, dohod.ru, открытые Telegram-каналы. Статистика прошлого не гарантирует будущих результатов.",
@@ -1372,7 +1373,7 @@ def morning():
         tz.append(ixt)
     if top:
         tz += ["", "🌙 <b>Главное за ночь:</b>"] + [news_line(c, short=True) for c in top[:3]]
-    if BOT_TRADING and sig and sig.get("pend"):
+    if sig and sig.get("pend"):
         tz += ["", "🎯 <b>Сигналы на открытие:</b> " + ", ".join(f"${q['t']} {'покупка' if q['side'] > 0 else 'шорт'}" for q in sig["pend"])]
     near = [r for r in upc if r.get("last_buy") and 0 <= (dt.date.fromisoformat(r["last_buy"]) - today).days <= 14]
     if near:
@@ -1462,7 +1463,7 @@ def commod_plan():
         f = x["f"]
         tr = {1: "🟢 восходящий тренд", -1: "🔴 нисходящий тренд", 0: "⚪ боковик"}[x["trend"]]
         line = f"<b>{esc(f['name'])}</b> ({f['secid']}): {fmt(x['last'], 2)} {f['unit']} · {pc(f['chg'], 1)} за день" + (f" · {pc(x['r1m'], 1)} за месяц" if x["r1m"] is not None else "") + f"\n  {tr}" + (f", {x['brk']}" if x["brk"] else "")
-        if x["idea"] and BOT_TRADING:
+        if x["idea"]:
             i = x["idea"]
             line += f"\n  Идея по тренду: {'ЛОНГ' if i['side'] > 0 else 'ШОРТ'} от {fmt(i['entry'], 2)}, стоп {fmt(i['stop'], 2)}, тейк {fmt(i['take'], 2)}"
         rel = FUT[x["a"]][2]
@@ -1480,14 +1481,14 @@ def commod_plan():
             except Exception as e:  # noqa: BLE001
                 log("уровень", x["a"], e)
         txt.append(line)
-    txt += ["", "<i>Тренд — по EMA 20/50 дневных свечей склеенных контрактов" + ("; стоп — 1,5 дневного ATR, тейк — 2 риска" if BOT_TRADING else "") + ". Предположительный уровень — ближайший значимый уровень графика по тренду (оценка, не прогноз). "
+    txt += ["", "<i>Тренд — по EMA 20/50 дневных свечей склеенных контрактов; стоп — 1,5 дневного ATR, тейк — 2 риска. Предположительный уровень — ближайший значимый уровень графика по тренду (оценка, не прогноз). "
             "Фьючерсы — плечевой инструмент: гарантийное обеспечение и вариационная маржа. Цены Si и Eu — в рублях за 1000 единиц валюты.</i>", "#сырьё #валюта #фьючерсы"]
     imgs = []
     for x in sorted(rows, key=lambda x: -(x["f"].get("val") or 0))[:4]:
         try:
             bars = tf_bars(x["f"]["secid"], "4h", "fut")
             lines = []
-            if x["idea"] and BOT_TRADING:
+            if x["idea"]:
                 i = x["idea"]
                 lines = [(i["entry"], BLUE, "Вход", "--"), (i["stop"], DN, "Стоп", "-"), (i["take"], UP, "Тейк", "-")]
             p = candle_chart(bars, os.path.join(OUT, f"c_{x['a']}.png"), f"{x['f']['name']} ({x['f']['secid']}) · свечи 4 часа", lines=lines,
@@ -1539,9 +1540,10 @@ def evening():
     fl = load_json("flows_last.json", None)
     if fl and fl.get("time", "")[:10] == now.date().isoformat():
         txt.append("⚖️ <b>Перевес к закрытию</b>: покупатели — " + ", ".join(f"${t}" for t, _ in fl["buyers"][:3]) + "; продавцы — " + ", ".join(f"${t}" for t, _ in fl["sellers"][:3]))
-    if sig and BOT_TRADING:
-        eq = sig.get("equity") or 0
-        txt.append(f"💼 <b>Модельный портфель</b>: {fmt(eq, 0)} ₽ ({pc(eq / sig['capital'] - 1, 1)} с начала), открыто позиций: {len(sig.get('open') or [])}.")
+    if sig:
+        if BOT_TRADING:
+            eq = sig.get("equity") or 0
+            txt.append(f"💼 <b>Модельный портфель</b>: {fmt(eq, 0)} ₽ ({pc(eq / sig['capital'] - 1, 1)} с начала), открыто позиций: {len(sig.get('open') or [])}.")
         if sig.get("pend"):
             txt.append("🔔 Сигналы на завтра: " + ", ".join(f"${q['t']} {'покупка' if q['side'] > 0 else 'шорт'}" for q in sig["pend"]))
     pubc = (S.get("pub") or {}).get("count")
@@ -2565,7 +2567,7 @@ def watch_tomorrow(md, now):
             add(r["t"], f"дивидендный гэп (отсечка): ожидаемо около {pc(-abs(g), 1)}" + (f", гэп исторически закрывался в среднем за {fmt(s['close_med'], 0)} торг. дн." if s.get("close_med") is not None else ""))
     # сигналы стратегии
     sig = load_json("signals.json", None, NEWS_STATE)
-    for q in (sig or {}).get("pend", []) if BOT_TRADING else []:
+    for q in (sig or {}).get("pend", []):
         add(q["t"], f"сигнал стратегии на открытие: {'покупка' if q['side'] > 0 else 'шорт'} ≈ {fmt(q['entry'], 2)}, стоп {fmt(q['stop'], 2)}")
     # аномалии дня
     an = load_json("anomaly.json", {}, os.path.join(NEWS_STATE, "channel")) or load_json("anomaly.json", {})
