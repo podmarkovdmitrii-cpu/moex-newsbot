@@ -37,10 +37,12 @@ FAM_RU = {"mom": "импульс", "pull": "откат к EMA 20", "sbrk": "шо
 SEC_RU = {"bank": "банки", "oil": "нефтегаз", "metal": "металлурги", "retail": "ритейл", "tech": "IT и связь", "power": "энергетика", "chem": "химия", "devel": "девелоперы", "transport": "транспорт"}
 SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "calendar_week", "35 16 * * 5": "weekly", "5 16 * * 5": "poll", "50 * * * *": "nav", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
          "45 7-15 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening",
-         "20 3 * * 1-5": "trader_prep", "20 4 * * 1-5": "trader_open", "20 7 * * 1-5": "trader_open", "45 16 * * 5": "trader_week",
          "15 9 * * 1-5": "stock_review", "30 16 * * 0": "weekend_review", "55 15 * * 1-5": "strong_moves"}
 PUB = Publisher()
 DISCLAIMER_TXT = DISCLAIMER
+# Бот-трейдер в канале выключен: сделки и идеи публикует администратор (закрытые идеи, paywall.py).
+# BOT_TRADING=1 вернёт сигналы стратегии и модельный портфель в посты (рубрику «Трейдер» — ещё и строки trader_* в SCHED).
+BOT_TRADING = os.environ.get("BOT_TRADING") == "1"
 
 
 def wd_ru(d):
@@ -1183,7 +1185,7 @@ def morning():
     mkt_share = st.median(shares_all) if shares_all else None
     # сигналы стратегии
     plan = []
-    if sig:
+    if sig and BOT_TRADING:
         for q in sig.get("pend", []):
             plan.append(dict(q, kind="signal"))
         held = {q["t"] for q in sig.get("pend", [])}
@@ -1348,7 +1350,7 @@ def morning():
         for _, name, blocks in sect_out:
             B.append(("h3", name))
             B += blocks
-    if sig and sig.get("open"):
+    if BOT_TRADING and sig and sig.get("open"):
         B.append(("hr",))
         B.append(("h3", "📂 Модельный портфель"))
         it = [f"${p['t']} {'лонг' if p['side'] > 0 else 'шорт'} с {ddmm(p['d0'])} по {fmt(p['entry'], 2)} · сейчас {pc(p['pnl'], 1)} · стоп {fmt(p['stop'], 2)}" for p in sig["open"]]
@@ -1357,7 +1359,7 @@ def morning():
         B.append(("ul", it))
     B.append(("hr",))
     B.append(("h3", "Как читать план"))
-    B.append(("ul", [f"Стратегия «{esc((sig or {}).get('strategy', 'совмещённая v2'))}»: риск 1% на сделку, сигналы — по закрытию прошлого дня, вход на открытии.",
+    B.append(("ul", ([f"Стратегия «{esc((sig or {}).get('strategy', 'совмещённая v2'))}»: риск 1% на сделку, сигналы — по закрытию прошлого дня, вход на открытии."] if BOT_TRADING else []) + [
                      "Вес новости — насколько сильно рынок исторически реагировал на такие новости (2017–2026): процентиль среди всех типов, средняя реакция за 5 дней и число случаев.",
                      "Дивиденды: «гэп» — на сколько цена снижалась в день отсечки (в долях дивиденда); «закрытие гэпа» — за сколько дней цена возвращалась к уровню до отсечки; ралли — как бумага обгоняла индекс за 20 дней до отсечки.",
                      "Только публичные данные: Мосбиржа, dohod.ru, открытые Telegram-каналы. Статистика прошлого не гарантирует будущих результатов.",
@@ -1370,7 +1372,7 @@ def morning():
         tz.append(ixt)
     if top:
         tz += ["", "🌙 <b>Главное за ночь:</b>"] + [news_line(c, short=True) for c in top[:3]]
-    if sig and sig.get("pend"):
+    if BOT_TRADING and sig and sig.get("pend"):
         tz += ["", "🎯 <b>Сигналы на открытие:</b> " + ", ".join(f"${q['t']} {'покупка' if q['side'] > 0 else 'шорт'}" for q in sig["pend"])]
     near = [r for r in upc if r.get("last_buy") and 0 <= (dt.date.fromisoformat(r["last_buy"]) - today).days <= 14]
     if near:
@@ -1460,7 +1462,7 @@ def commod_plan():
         f = x["f"]
         tr = {1: "🟢 восходящий тренд", -1: "🔴 нисходящий тренд", 0: "⚪ боковик"}[x["trend"]]
         line = f"<b>{esc(f['name'])}</b> ({f['secid']}): {fmt(x['last'], 2)} {f['unit']} · {pc(f['chg'], 1)} за день" + (f" · {pc(x['r1m'], 1)} за месяц" if x["r1m"] is not None else "") + f"\n  {tr}" + (f", {x['brk']}" if x["brk"] else "")
-        if x["idea"]:
+        if x["idea"] and BOT_TRADING:
             i = x["idea"]
             line += f"\n  Идея по тренду: {'ЛОНГ' if i['side'] > 0 else 'ШОРТ'} от {fmt(i['entry'], 2)}, стоп {fmt(i['stop'], 2)}, тейк {fmt(i['take'], 2)}"
         rel = FUT[x["a"]][2]
@@ -1478,14 +1480,14 @@ def commod_plan():
             except Exception as e:  # noqa: BLE001
                 log("уровень", x["a"], e)
         txt.append(line)
-    txt += ["", "<i>Тренд — по EMA 20/50 дневных свечей склеенных контрактов; стоп — 1,5 дневного ATR, тейк — 2 риска. Предположительный уровень — ближайший значимый уровень графика по тренду (оценка, не прогноз). "
+    txt += ["", "<i>Тренд — по EMA 20/50 дневных свечей склеенных контрактов" + ("; стоп — 1,5 дневного ATR, тейк — 2 риска" if BOT_TRADING else "") + ". Предположительный уровень — ближайший значимый уровень графика по тренду (оценка, не прогноз). "
             "Фьючерсы — плечевой инструмент: гарантийное обеспечение и вариационная маржа. Цены Si и Eu — в рублях за 1000 единиц валюты.</i>", "#сырьё #валюта #фьючерсы"]
     imgs = []
     for x in sorted(rows, key=lambda x: -(x["f"].get("val") or 0))[:4]:
         try:
             bars = tf_bars(x["f"]["secid"], "4h", "fut")
             lines = []
-            if x["idea"]:
+            if x["idea"] and BOT_TRADING:
                 i = x["idea"]
                 lines = [(i["entry"], BLUE, "Вход", "--"), (i["stop"], DN, "Стоп", "-"), (i["take"], UP, "Тейк", "-")]
             p = candle_chart(bars, os.path.join(OUT, f"c_{x['a']}.png"), f"{x['f']['name']} ({x['f']['secid']}) · свечи 4 часа", lines=lines,
@@ -1537,7 +1539,7 @@ def evening():
     fl = load_json("flows_last.json", None)
     if fl and fl.get("time", "")[:10] == now.date().isoformat():
         txt.append("⚖️ <b>Перевес к закрытию</b>: покупатели — " + ", ".join(f"${t}" for t, _ in fl["buyers"][:3]) + "; продавцы — " + ", ".join(f"${t}" for t, _ in fl["sellers"][:3]))
-    if sig:
+    if sig and BOT_TRADING:
         eq = sig.get("equity") or 0
         txt.append(f"💼 <b>Модельный портфель</b>: {fmt(eq, 0)} ₽ ({pc(eq / sig['capital'] - 1, 1)} с начала), открыто позиций: {len(sig.get('open') or [])}.")
         if sig.get("pend"):
@@ -2563,7 +2565,7 @@ def watch_tomorrow(md, now):
             add(r["t"], f"дивидендный гэп (отсечка): ожидаемо около {pc(-abs(g), 1)}" + (f", гэп исторически закрывался в среднем за {fmt(s['close_med'], 0)} торг. дн." if s.get("close_med") is not None else ""))
     # сигналы стратегии
     sig = load_json("signals.json", None, NEWS_STATE)
-    for q in (sig or {}).get("pend", []):
+    for q in (sig or {}).get("pend", []) if BOT_TRADING else []:
         add(q["t"], f"сигнал стратегии на открытие: {'покупка' if q['side'] > 0 else 'шорт'} ≈ {fmt(q['entry'], 2)}, стоп {fmt(q['stop'], 2)}")
     # аномалии дня
     an = load_json("anomaly.json", {}, os.path.join(NEWS_STATE, "channel")) or load_json("anomaly.json", {})
@@ -3330,7 +3332,8 @@ def main():
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
     {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "anom_next": anom_next, "telegraph_check": telegraph_check, "shakeout_scan": shakeout_scan, "pattern_scan": shakeout_scan, "strong_moves": strong_moves, "nav": nav, "calendar_week": calendar_week, "poll": poll,
-     "trader_prep": lambda: trader_mod().prep(PUB), "trader_open": lambda: trader_mod().open_(PUB), "trader_week": lambda: trader_mod().week(PUB)}[mode]()
+     "trader_prep": lambda: trader_off() or trader_mod().prep(PUB), "trader_open": lambda: trader_off() or trader_mod().open_(PUB),
+     "trader_week": lambda: trader_off() or trader_mod().week(PUB)}[mode]()
 
 
 # =============================================================================================
@@ -3502,6 +3505,14 @@ def strong_moves():
     # отдельного поста нет: блок войдёт в «Итоги дня» (evening, 19:25 МСК)
     save_json("strong_today.json", {"day": now.date().isoformat(), "lines": txt})
     log("резкие движения: найдено", len(found[:6]), "— войдут в итоги дня")
+
+
+def trader_off():
+    """Рубрика «Трейдер» выключена (сделки публикует администратор); True — пропустить."""
+    if not BOT_TRADING:
+        log("бот-трейдер выключен (BOT_TRADING≠1) — пост не публикуется")
+        return True
+    return False
 
 
 def trader_mod():
