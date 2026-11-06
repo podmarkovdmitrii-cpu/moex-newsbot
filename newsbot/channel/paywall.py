@@ -501,7 +501,7 @@ def on_message(msg):
                     warn = "⚠️ " + warn
         if warn:
             say(uid, html.escape(warn))
-        say(uid, "⏳ Разбираю идею по истории бумаги (до минуты)…")
+        say(uid, "⏳ Разбираю идею: история бумаги и модель аномалий (обычно до минуты, первый разбор за день — до 3 минут)…")
         judge_async(uid, idea, publish=(cmd == "/idea"))
     elif cmd == "/ideas" and admin:
         last = sorted(S["ideas"].items(), key=lambda kv: -int(kv[0]))[:15]
@@ -568,7 +568,7 @@ def judge_async(uid, idea, publish):
         if r and not r.get("error"):
             cf = r.get("confirm")
             idea["plan"] = {"takes": [{"px": float(t["px"]), "share": float(t["share"]), "p": float(t["p"])} for t in r["takes"]],
-                            "rules": list(r["rules"]), "p": float(r["p"]), "verdict": r["verdict"],
+                            "rules": list(r["rules"]), "p": float(r.get("p_final", r["p"])), "verdict": r["verdict"],
                             "term": [int(x) for x in r["term"]] if r.get("term") else None, "potential": float(r.get("potential") or 0),
                             "confirm": {"px": float(cf["px"]), "p": float(cf["p"]), "strong": bool(cf.get("strong"))} if cf else None}
         with LOCK:

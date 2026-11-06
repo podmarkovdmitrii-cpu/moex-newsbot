@@ -17,12 +17,20 @@
      ближайшего сильного уровня (фиксация до уровня, а не на нём). Для каждого тейка — вероятность дойти до него.
   4. Уровни подтверждения: ближайший сильный уровень по ходу сделки между входом и целью. Закрепление за ним (закрытие
      дня или два закрытия часовых) — с пересчитанной вероятностью дойти до цели уже от этого уровня.
+  5. Модель аномалий (та же, что у бота в канале): вероятность резкого роста/падения бумаги на ближайший день,
+     направление, модель сценариев сделки (цель/стоп/время) и ранние признаки аномалии сегодня. Итоговая вероятность —
+     среднее истории и модели сценариев; после этого — заключение.
 
 Это статистика прошлого, а не гарантия: формулировки «точно пойдём» бот не использует.
 """
+import json
 import math
+import os
+import time
 
 import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 try:
     import common as C
@@ -378,16 +386,205 @@ def analyze(ticker, side, E, S, T, data=None, last=None):
     if 0 < med_val < 30e6:
         flags.append(("⚠️", f"Низкая ликвидность: медианный оборот {med_val / 1e6:.0f} млн ₽/день — проскальзывание."))
         score -= 1
+    an = None
+    try:
+        an = anomaly_check(ticker, side, E, S, T, term)
+    except Exception as e:  # noqa: BLE001
+        print("[разбор идеи] модель аномалий:", e, flush=True)
+    p_final = p
+    if an:
+        flags_an = an["flags"]
+        score += an["score"]
+        sc = an.get("scen")
+        if sc and sc["p_take"] + sc["p_stop"] > 0:
+            p_sc = sc["p_take"] / (sc["p_take"] + sc["p_stop"])
+            p_final = 0.5 * p + 0.5 * p_sc
+            an["p_sc"] = p_sc
+        if p_final - be < -0.03 and edge >= 0:
+            flags_an.append(("❌", f"С учётом модели аномалий вероятность цели {p_final:.0%} — ниже безубыточной ({be:.0%})."))
+            score -= 1
+        elif p_final - be >= 0.03 and edge < 0:
+            flags_an.append(("✅", f"С учётом модели аномалий вероятность цели {p_final:.0%} — выше безубыточной ({be:.0%}): история бумаги пессимистичнее текущей ситуации."))
+            score += 1
     verdict = ("Сильная идея" if score >= 3 else "Приемлемая идея" if score >= 1 else
                "Слабая идея" if score >= -1 else "Не рекомендую публиковать")
     return dict(term=term, potential=path / E, ticker=ticker, side=side, E=E, S=S, T=T, last=last, atr=A, rr=rr, a_s=a_s, a_t=a_t, p=p, be=be, P=P, tf=tf, H=Hz,
                 takes=takes, rules=rules, confirm=confirm, between=between[:6], obstacles=obstacles, flags=flags, score=score,
-                verdict=verdict, levels=lv)
+                verdict=verdict, levels=lv, anom=an, p_final=p_final)
+
+
+# ---------------------------------------------------------------------------------------------
+# Модель аномалий (та же, что у бота в канале: anomaly/train.py → прогноз дня + сценарии сделки)
+# ---------------------------------------------------------------------------------------------
+_AN = {}
+
+
+def _jobs():
+    import jobs as JB  # noqa: WPS433 — тяжёлый модуль, грузим только при разборе
+    return JB
+
+
+def _base(meta, name, dflt):
+    rep = (meta.get("report") or {}).get(name)
+    try:
+        if isinstance(rep, list):
+            v = [float(x["base"]) for x in rep if x.get("base") is not None]
+            return (sum(v) / len(v), [x.get("top5") for x in rep if x.get("top5") is not None]) if v else (dflt, [])
+        if isinstance(rep, dict) and rep.get("base") is not None:
+            return float(rep["base"]), [rep.get("top5")] if rep.get("top5") is not None else []
+    except Exception:  # noqa: BLE001
+        pass
+    return dflt, []
+
+
+def anom_features(t):
+    """Признаки и вероятности аномалий по бумаге: из утреннего прогноза канала, иначе считаем по одной бумаге (кэш 30 мин)."""
+    JB = _jobs()
+    f = JB.anom_features(t)
+    if f:
+        return f, "прогноз канала на день"
+    live = JB.anom_live()
+    if not live.ready():
+        return None, None
+    now = JB.now_msk()
+    day = now.date() if now.weekday() < 5 and now.hour < 19 else JB.next_wd(now.date())
+    key = (t, day.isoformat())
+    if key in _AN and time.time() - _AN[key][0] < 1800:
+        return _AN[key][1], "расчёт по бумаге"
+    # прогноз канала на день ещё не посчитан — считаем его (250 самых торгуемых бумаг, сохраняется для канала)
+    try:
+        out = JB.anom_pre() if day == now.date() else JB.anom_next(now)
+        if out and t in (out.get("rows") or {}):
+            return out["rows"][t], "прогноз канала на день"
+    except Exception as e:  # noqa: BLE001
+        print("[разбор идеи] прогноз дня:", e, flush=True)
+    try:
+        import divs
+        upc = divs.upcoming(60)
+    except Exception:  # noqa: BLE001
+        upc = []
+    impact = json.load(open(os.path.join(HERE, "..", "impact.json"), encoding="utf-8"))
+    # часть признаков считается относительно рынка (ранг оборота, средние по рынку) — считаем вместе с ликвидными бумагами
+    tick = list(dict.fromkeys(JB.top_stocks(120) + [t]))
+    X = live.daily_probs(tick, day.isoformat(), JB.DIVS, upc, JB.NEWS_STATE, impact)
+    if t not in X.index:
+        return None, None
+    r = X.loc[t]
+    d = {}
+    for k in r.index:
+        try:
+            v = float(r[k])
+            d[k] = None if v != v else v
+        except (TypeError, ValueError):
+            continue
+    d["why"] = live.reasons({k: (v if v is not None else 0) for k, v in d.items()})
+    _AN[key] = (time.time(), d)
+    return d, "расчёт по бумаге"
+
+
+def _R(x):
+    return ("+" if x >= 0 else "−") + f"{abs(x):.2f}".replace(".", ",") + "R"
+
+
+def anomaly_check(t, side, E, S, T, term=None):
+    """Вероятность резкого движения бумаги (аномалии) вверх/вниз и сценарии сделки → пункты разбора и поправка к оценке."""
+    feat, src = anom_features(t)
+    if not feat or feat.get("p_y") is None:
+        return None
+    JB = _jobs()
+    meta = JB.anom_live().meta()
+    b_y, top5 = _base(meta, "daily_y", 0.05)
+    b_up, _ = _base(meta, "daily_y_up", b_y / 2)
+    b_dn, _ = _base(meta, "daily_y_dn", b_y / 2)
+    p_y = float(feat.get("p_y") or 0)
+    pu, pd_ = float(feat.get("p_y_up") or 0), float(feat.get("p_y_dn") or 0)
+    pdir = feat.get("p_dir_up")
+    if pdir is None:
+        pdir = pu / (pu + pd_) if pu + pd_ > 0.005 else 0.5
+    p_with, p_against = (pu, pd_) if side > 0 else (pd_, pu)
+    b_with, b_against = (b_up, b_dn) if side > 0 else (b_dn, b_up)
+    r_y = p_y / b_y if b_y else 1
+    r_with = p_with / b_with if b_with else 1
+    r_against = p_against / b_against if b_against else 1
+    dir_with = pdir if side > 0 else 1 - pdir
+    flags, score = [], 0
+    word_with, word_ag = ("роста", "падения") if side > 0 else ("падения", "роста")
+    lvl = "высокая" if r_y >= 3 else "повышенная" if r_y >= 1.7 else "обычная" if r_y >= 0.7 else "низкая"
+    head = f"Вероятность аномалии (резкого движения или всплеска оборота) на ближайший день: {p_y:.0%} — {lvl} (обычно ~{b_y:.0%})."
+    if r_against >= 2 and p_against > p_with * 1.2:
+        flags.append(("❌" if r_against >= 3 else "⚠️", f"Повышен риск резкого {word_ag} — против идеи: {p_against:.0%} (обычно ~{b_against:.0%}). "
+                      "Гэп может пройти сквозь стоп."))
+        score -= 2 if r_against >= 3 else 1
+    elif r_with >= 2 and p_with > p_against * 1.2:
+        flags.append(("✅", f"Повышена вероятность резкого {word_with} — в сторону идеи: {p_with:.0%} (обычно ~{b_with:.0%})."))
+        score += 1
+    elif r_y >= 2:
+        a_s = abs(E - S) / E / (feat.get("atr") or 1e9)
+        flags.append(("⚠️", f"Модель ждёт сильное движение, но направление неясно (вверх {pdir:.0%})"
+                      + (" — стоп короче дневного хода, его может выбить первым же рывком." if a_s < 1 else ".")))
+        score -= 1 if a_s < 1 else 0
+    if r_y >= 1.7 and abs(dir_with - 0.5) >= 0.15:
+        flags.append(("✅" if dir_with > 0.5 else "⚠️", f"Если аномалия случится, модель направления: {'в сторону идеи' if dir_with > 0.5 else 'против идеи'} {max(dir_with, 1 - dir_with):.0%}."))
+    sc = None
+    try:
+        hz = int(round((term[0] + term[1]) / 2)) if term else 10
+        sc = JB.anom_live().scenario(feat, side, E, S, T, hz)
+    except Exception as e:  # noqa: BLE001
+        print("[разбор идеи] сценарии:", e, flush=True)
+    if sc:
+        if sc["exp_R"] <= -0.1:
+            flags.append(("⚠️", f"Модель сценариев: цель раньше стопа {sc['p_take']:.0%}, стоп раньше цели {sc['p_stop']:.0%} — ожидание {_R(sc['exp_R'])} (минус)."))
+            score -= 1
+        elif sc["exp_R"] >= 0.15:
+            flags.append(("✅", f"Модель сценариев: цель раньше стопа {sc['p_take']:.0%}, стоп раньше цели {sc['p_stop']:.0%} — ожидание {_R(sc['exp_R'])}."))
+            score += 1
+        else:
+            flags.append(("➖", f"Модель сценариев: цель раньше стопа {sc['p_take']:.0%}, стоп раньше цели {sc['p_stop']:.0%} — ожидание около нуля ({_R(sc['exp_R'])})."))
+    early = None
+    try:
+        stt = JB.load_json("anomaly.json", {})
+        if stt.get("date") == JB.now_msk().date().isoformat():
+            if t in (stt.get("sent") or {}):
+                early = "сегодня бумага уже дала аномалию — канал о ней писал"
+            elif t in (stt.get("warn") or {}):
+                early = "сегодня по бумаге были ранние признаки аномалии"
+    except Exception:  # noqa: BLE001
+        pass
+    if early:
+        flags.append(("⚠️", early.capitalize() + ": движение могло уже пройти, вход по рынку — с осторожностью."))
+    return dict(against=r_against >= 2 and p_against > p_with * 1.2, with_=r_with >= 2 and p_with > p_against * 1.2, p_y=p_y, p_up=pu, p_dn=pd_, p_dir_up=pdir, base=b_y, lvl=lvl, head=head, why=feat.get("why") or [], flags=flags, score=score,
+                scen=sc, src=src, top5=(sum(top5) / len(top5)) if top5 else None)
 
 
 def fmtp(x):
     s = f"{x:.6f}".rstrip("0").rstrip(".")
     return s.replace(".", ",")
+
+
+def conclusion(r):
+    """Короткий вывод одной-двумя фразами: что главное за и против."""
+    an = r.get("anom") or {}
+    pro = [t for ic, t in r["flags"] + an.get("flags", []) if ic == "✅"]
+    con = [t for ic, t in r["flags"] + an.get("flags", []) if ic == "❌"] + [t for ic, t in r["flags"] + an.get("flags", []) if ic == "⚠️"]
+    out = []
+    if r["score"] >= 3:
+        out.append("Идею можно публиковать: " + ("история бумаги и модель аномалий на её стороне." if an else "история бумаги на её стороне."))
+    elif r["score"] >= 1:
+        out.append("Идею можно публиковать, но с учётом рисков ниже.")
+    elif r["score"] >= -1:
+        out.append("Идея слабая: лучше улучшить вход, стоп или цель.")
+    else:
+        out.append("Публиковать не рекомендую.")
+    if con:
+        out.append("Главный риск: " + con[0].split(":")[0].rstrip(".") + ".")
+    if pro and r["score"] >= 1:
+        out.append("Главный плюс: " + pro[0].split(":")[0].rstrip(".") + ".")
+    if an.get("against"):
+        out.append("По времени входа: на ближайшей сессии высок риск резкого движения против идеи — разумнее дождаться, пока он "
+                   "реализуется или прогноз на следующий день снизится, либо входить меньшим объёмом.")
+    elif an.get("with_") and r["score"] >= 1:
+        out.append("По времени входа: модель ждёт резкое движение в сторону идеи — вход лучше не откладывать.")
+    return " ".join(out)
 
 
 def report(r):
@@ -403,13 +600,32 @@ def report(r):
     L = [f"<b>Разбор идеи {tl} {side}</b>  вход {fmtp(r['E'])} · стоп {fmtp(r['S'])} · цель {fmtp(r['T'])}",
          f"Сейчас {fmtp(r['last'])}, дневной ATR {fmtp(round(r['atr'], 4))}. Стоп {fmtp(round(r['a_s'], 2))} ATR, цель {fmtp(round(r['a_t'], 2))} ATR.",
          "",
-         f"<b>Вердикт: {r['verdict']}</b>",
+         f"<b>1. История бумаги</b>",
          f"Вероятность дойти до цели раньше стопа: <b>{r['p']:.0%}</b> (горизонт ~{r['H']} баров по {r['tf']}).",
          (f"Срок идеи: обычно {r['term'][0]}–{r['term'][1]} торг. дн. (когда цель достигалась) · потенциал {fmtp(round(r['potential'] * 100, 1))}%" if r.get("term") else f"Потенциал {fmtp(round(r['potential'] * 100, 1))}%"),
          f"  все дни истории: {P['p_all']:.0%} из {P['n_all']}" + (f"; похожие на сейчас: {P['p_sim']:.0%} из {P['n_sim']}" if P.get('n_sim') else "")]
     L.append("")
     for ic, t in r["flags"]:
         L.append(f"{ic} {t}")
+    L.append("")
+    an = r.get("anom")
+    L.append("<b>2. Модель аномалий</b> (та же, что в канале)")
+    if an:
+        L.append(an["head"])
+        L.append(f"Резкий рост: {an['p_up']:.0%} · резкое падение: {an['p_dn']:.0%}" + (f" · причины: {'; '.join(an['why'][:3])}" if an.get("why") else ""))
+        for ic, t in an["flags"]:
+            L.append(f"{ic} {t}")
+    else:
+        L.append("Прогноза нет (модель ещё не обучена или бумага не торгуется на TQBR) — заключение только по истории.")
+    L.append("")
+    L.append(f"<b>Заключение: {r['verdict']}</b>")
+    pf = r.get("p_final", r["p"])
+    if an and an.get("p_sc") is not None:
+        L.append(f"Итоговая вероятность цели раньше стопа: <b>{pf:.0%}</b> (история {r['p']:.0%} + модель сценариев {an['p_sc']:.0%}); "
+                 f"безубыточная {r['be']:.0%}.")
+    else:
+        L.append(f"Итоговая вероятность цели раньше стопа: <b>{pf:.0%}</b>; безубыточная {r['be']:.0%}.")
+    L.append(conclusion(r))
     L.append("")
     L.append("<b>План тейков</b>")
     for i, t in enumerate(r["takes"], 1):
