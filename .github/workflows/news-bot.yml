@@ -106,6 +106,8 @@ jobs:
           FAQ_TEXT: ${{ vars.FAQ_TEXT || secrets.FAQ_TEXT }}
           OZON_TIPS_URL: ${{ vars.OZON_TIPS_URL || secrets.OZON_TIPS_URL }}
           PAY_METHOD: ${{ vars.PAY_METHOD || secrets.PAY_METHOD }}
+          # бот-трейдер в канале (модельный портфель, сигналы стратегии): выключен, включить — переменная BOT_TRADING=1
+          BOT_TRADING: ${{ vars.BOT_TRADING }}
         run: |
           BOT=$(find . -name bot.js -path '*newsbot*' | head -1)
           if [ -z "$BOT" ]; then echo "Не найден newsbot/bot.js — загрузите папку newsbot в репозиторий"; exit 1; fi
