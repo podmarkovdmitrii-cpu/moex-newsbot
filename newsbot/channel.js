@@ -732,7 +732,8 @@ async function run(S, clusters, items) {
 
 // ---------- сделки модельного портфеля (прозрачный трек-рекорд) ----------
 async function trade(S, html) {
-  if (!ON || process.env.PUBLIC_TRADES === '0') return;
+  // бот-трейдер в канале выключен: сделки публикует администратор; BOT_TRADING=1 вернёт посты модельного портфеля
+  if (!ON || process.env.PUBLIC_TRADES === '0' || process.env.BOT_TRADING !== '1') return;
   S.pub = S.pub || { day: '', count: 0, links: [], msg: {} };
   await publish(S, html);
 }
