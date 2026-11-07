@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 """Обучение моделей аномалий (запуск: GitHub Actions, workflow anomaly-model.yml, раз в неделю).
 
-1) Данные: дневные свечи всех акций TQBR с 2012 г. и часовые с 2020 г. (Мосбиржа ISS, кэш с докачкой), индекс IMOEX,
-   история новостей (news_events.json.gz — 129 тыс. событий 2016–2026 + журнал бота news_log.jsonl), дивиденды divhist.json.
+1) Данные: дневные свечи всех акций TQBR с 2012 г. (Мосбиржа ISS, кэш с докачкой) + история 2008–2014 из hist_2008_2014.json.gz
+   (старые режимы торгов EQBR/EQNE/EQNL, в т.ч. бумаги, которых уже нет на бирже), часовые с 2020 г., индекс IMOEX с 2008 г.
+   Переименованные бумаги склеиваются со старыми тикерами (YNDX → YDEX, TCSG → T, FIVE → X5, MAIL → VKCO, HHRU → HEAD…).
+   Новости: архив Интерфакса 2008–2016 (research/data/ifx_events.json.gz), news_events.json.gz (2016–2026) и журнал бота
+   news_log.jsonl. Перед обучением история проходит ревизора связей (linkcheck.py): снимаются ошибочные связи
+   «новость → бумага» (SMLT и новости о самолётах, IRKT и Иркутск, новости раньше начала торгов бумагой…). Дивиденды divhist.json.
+   Обучение — с 2008 г. (ANOM_FROM), проверка — на будущих годах.
 2) Модель «до открытия»: вероятность аномалии дня по каждой бумаге (любая / ценовая / вверх / вниз).
 3) Модель «внутри дня»: вероятность, что бумага, ещё не ставшая аномалией к часу c, станет ею до конца дня.
 4) Честная проверка: обучение на прошлых годах → прогноз следующего года; калибровка вероятностей по этим прогнозам.
@@ -24,6 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "..", "channel"))
 import core_daily as CD  # noqa: E402
+import linkcheck as LC  # noqa: E402
 import core_intra as CI  # noqa: E402
 import regional as RG  # noqa: E402
 import scenario as SC  # noqa: E402
@@ -87,11 +93,74 @@ def load_series(kind, tickers, start, index=()):
     return out
 
 
-def events_all():
+FROM = os.environ.get("ANOM_FROM", "2008-06-01")   # начало обучающей выборки (первые месяцы 2008 — разгон признаков)
+
+
+def backfill(Dd, IX):
+    """Дописать в начало рядов историю 2008–2014 (старые режимы торгов) и склеить переименованные бумаги."""
+    p = os.path.join(HERE, "hist_2008_2014.json.gz")
+    if not os.path.exists(p):
+        log("нет", p, "— обучение с 2012 г.")
+        return Dd, IX
+    with gzip.open(p, "rt") as f:
+        bf = json.load(f)
+    from common import adjust_splits
+
+    def merge(new, old):
+        if not old:
+            return new
+        if not new:
+            return old
+        first = new[0][0][:10]
+        rows = [r for r in old if r[0][:10] < first] + new
+        B = adjust_splits([dict(t=r[0], o=r[1], h=r[2], l=r[3], c=r[4], v=r[5]) for r in rows])
+        return [[b["t"], b["o"], b["h"], b["l"], b["c"], b["v"]] for b in B]
+    n0 = sum(len(v) for v in Dd.values())
+    for t, rows in bf["d"].items():
+        t2 = LC.canon(t)
+        Dd[t2] = merge(Dd.get(t2, []), rows)
+    IX = merge(IX, bf["ix"]["IMOEX"])
+    log("история 2008–2014: рядов", len(Dd), "| строк было", n0, "стало", sum(len(v) for v in Dd.values()), "| IMOEX с", IX[0][0])
+    return Dd, IX
+
+
+def stitch_renamed(Dd):
+    """Старый тикер → новый (YNDX → YDEX…): ряд старой бумаги ставится перед новым (масштаб по цене на стыке, если разрыв > 2 раз)."""
+    old = [o for o in LC.RENAME if o not in Dd]
+    got = load_series("d", old, "2008-01-01") if not LOCAL else {}
+    for o, rows in got.items():
+        n = LC.RENAME[o]
+        new = Dd.get(n, [])
+        if not new:
+            Dd[n] = rows
+            continue
+        first = new[0][0][:10]
+        prev = [r for r in rows if r[0][:10] < first]
+        if not prev:
+            continue
+        k = new[0][1] / prev[-1][4] if prev[-1][4] else 1.0
+        k = 1.0 if 0.5 <= k <= 2 else k
+        Dd[n] = [[r[0], r[1] * k, r[2] * k, r[3] * k, r[4] * k, r[5]] for r in prev] + new
+        log("склеено:", o, "→", n, f"(+{len(prev)} дн., масштаб {k:.3f})")
+    return Dd
+
+
+def events_all(first_day=None):
+    """Новости 2008–2026: Интерфакс до начала news_events, затем news_events и журнал бота; ошибочные связи снимает ревизор."""
     ev = []
     with gzip.open(os.path.join(HERE, "news_events.json.gz"), "rt") as f:
         for tk, ts, ty, s, rum, off in json.load(f):
             ev.append(dict(tk=tk, ts=ts, ty=ty, s=s, rum=rum, off=off))
+    t_ne = min(e["ts"] for e in ev)
+    p_ifx = os.path.join(HERE, "..", "research", "data", "ifx_events.json.gz")
+    if os.path.exists(p_ifx):
+        with gzip.open(p_ifx, "rt") as f:
+            n_ifx = 0
+            for tk, ts, ty, s, rum, off in json.load(f)["events"]:
+                if ts < t_ne:
+                    ev.append(dict(tk=tk, ts=ts, ty=ty, s=s, rum=rum, off=off))
+                    n_ifx += 1
+        log("новости Интерфакса до", dt.datetime.utcfromtimestamp(t_ne).date(), ":", n_ifx)
     last = max(e["ts"] for e in ev)
     lp = os.environ.get("NEWS_LOG") or os.path.join(os.environ.get("NEWS_STATE", ""), "news_log.jsonl")
     if os.path.exists(lp):
@@ -100,10 +169,12 @@ def events_all():
                 e = json.loads(line)
             except ValueError:
                 continue
-            if e["ts"] > last and e["tk"] not in ("MOEX", "@REG"):
+            if e["ts"] > last and e.get("tk") not in ("MOEX", "@REG", "@INS") and e.get("ty"):
                 ev.append(e)
     ev.sort(key=lambda e: e["ts"])
-    return ev
+    clean, rep = LC.audit(ev, first_day)
+    log(LC.summary(rep))
+    return clean, rep
 
 
 # ------------------------------------------------------------------ модели
@@ -194,7 +265,7 @@ def scenarios(Dd, divh, X, IX, yr, meta):
     """Сценарии сделки: синтетические сделки по всей истории → модель исходов (стоп / тейк / по времени) + проверка по годам."""
     from sklearn.ensemble import HistGradientBoostingClassifier
     from sklearn.metrics import log_loss, roc_auc_score
-    T = SC.build(Dd, divh, X, ix_rows=IX)
+    T = SC.build(Dd, divh, X, ix_rows=IX, start=FROM)
     F = SC.TRADE + [f for f in SC.STABLE if f in T.columns]
     log("сценарии: синтетических сделок", len(T))
 
@@ -255,17 +326,23 @@ def main():
         top = sorted(turn, key=lambda t: -turn[t])[: int(os.environ.get("ANOM_HOURLY_N", "160"))]
         Hh = load_series("h", top + ["IMOEX"], "2020-01-01", index=("IMOEX",))
         IXH = Hh.pop("IMOEX")
+        Dd = stitch_renamed(Dd)
+    Dd, IX = backfill(Dd, IX)
     log("дневных рядов", len(Dd), "часовых", len(Hh), round(time.time() - t0), "с")
-    ev = events_all()
+    first_day = {t: dt.date.fromisoformat(v[0][0][:10]) for t, v in Dd.items() if v}
+    ev, lrep = events_all(first_day)
+    json.dump(lrep, open(os.path.join(MODELS, "linkcheck_report.json"), "w"), ensure_ascii=False, indent=1)
     W = [CD.news_weight(e, impact) for e in ev]
     covered = sorted({e["tk"] for e in ev})
     hd = CD.hourly_daily(Hh)
     RE = RG.company_events(RG.load_events(os.environ.get("NEWS_STATE")))
     X = CD.build({"sh": Dd, "ix": {"IMOEX": IX}}, divh, ev, news_tickers=set(covered), weights=W, hourly=hd, ix_hourly=IXH, sec_of=impact.get("secOf"), reg_events=RE)
-    X = X[X.d >= "2013-01-01"].reset_index(drop=True)
+    X = X[X.d >= FROM].reset_index(drop=True)
     FD = CD.feature_cols(X)
     log("признаки дня:", X.shape, "база аномалий", round(X.y.mean(), 4), round(time.time() - t0), "с")
-    meta = dict(trained=dt.datetime.utcnow().isoformat(timespec="minutes"), feat_daily=FD, feat_intra=CI.FEAT, covered=covered, report={}, calib={})
+    meta = dict(trained=dt.datetime.utcnow().isoformat(timespec="minutes"), feat_daily=FD, feat_intra=CI.FEAT, covered=covered, report={}, calib={},
+                data_from=str(X.d.min().date()), rows=int(len(X)), tickers=int(X.t.nunique()),
+                linkcheck=dict(total=lrep["total"], dropped=lrep["dropped"], drop_pairs=lrep["drop_pairs"], review=lrep["review"][:20]))
     yr = X.d.dt.year.max()
     # ---------- до открытия
     pre_oof = None

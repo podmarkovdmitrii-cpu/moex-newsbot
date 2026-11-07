@@ -19,6 +19,7 @@ import core_daily as CD  # noqa: E402
 import core_intra as CI  # noqa: E402
 import regional as RG  # noqa: E402
 import scenario as SC  # noqa: E402
+import linkcheck as LC  # noqa: E402
 
 MODELS = os.environ.get("ANOM_MODELS") or os.path.join(HERE, "models")
 _M = {}
@@ -66,8 +67,21 @@ def events(news_state):
                 continue
             if e.get("ts", 0) > last and e.get("tk") != "MOEX":
                 ev.append(e)
-    ev.sort(key=lambda e: e["ts"])
-    return ev
+    # ревизор связей: те же правила, что при обучении (текст, если есть, и пары «бумага — тип», снятые на истории)
+    pairs = set(((meta().get("linkcheck") or {}).get("drop_pairs")) or []) if ready() else set()
+    out = []
+    for e in ev:
+        if e.get("tk", "").startswith("@"):
+            out.append(e)
+            continue
+        e["tk"] = LC.canon(e["tk"])
+        if not LC.check_text(e["tk"], e.get("tx"))[0]:
+            continue
+        if f"{e['tk']}|{e.get('ty') or 'tone'}" in pairs and not e.get("tx"):
+            continue
+        out.append(e)
+    out.sort(key=lambda e: e["ts"])
+    return out
 
 
 def daily_probs(tickers, today, divh, upcoming, news_state, impact):
