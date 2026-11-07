@@ -12,6 +12,9 @@ const POS_W = ["вырос", "рост", "увелич", "рекорд", "одо
 // Старые тикеры → актуальные торговые коды на Мосбирже (иначе нет свечей и статистики по бумаге)
 const RENAME = { CIAN: 'CNRU', AGRO: 'RAGR', YNDX: 'YDEX', TCSG: 'T', TCS: 'T', FIVE: 'X5', HHRU: 'HEAD', FIXP: 'FIXR', GEMA: 'GEMC', ETLNL: 'ETLN' };
 const canon = t => RENAME[t] || t;
+const LC = require('./linkcheck.js');
+let LC_META = {};
+function linkLog(stateDir) { LC_META = { stateDir }; } // куда писать снятые связи (бот задаёт STATE_DIR)
 const norm = t => ' ' + String(t).toLowerCase().replace(/ё/g, 'е').replace(/ /g, ' ') + ' ';
 // Один псевдоним входит в другой: «тгк-1» в «тгк-14», «ozon» в «ozon фармацевтика»
 function fixOverlap(set, low) {
@@ -28,7 +31,7 @@ function tickersIn(text, known) {
   if (out.has('SIBN') && low.includes('газпром нефт') && !/газпром[ ,.](?!нефт)/.test(low)) out.delete('GAZP');
   if (out.has('MRKC') && out.has('MRKP')) out.delete('MRKC');
   fixOverlap(out, low);
-  return [...out].filter(t => !known || known.has(t)).sort();
+  return LC.filter([...out].filter(t => !known || known.has(t)).sort(), text).keep;
 }
 // Тикеры, о которых новость НА САМОМ ДЕЛЕ: упоминание в начале текста (первые ~280 знаков) или не меньше двух раз.
 // Хештеги и списки тикеров в конце поста («#SBER #GAZP …», «{$PHOR}» в расписаниях) не считаются. Больше 3 бумаг — это обзор, не новость о бумаге.
@@ -45,6 +48,7 @@ function subjectTickers(text, known, maxN = 3) {
   fixOverlap(hits, low);
   if (hits.has('MBNK') && hits.has('MTSS') && !/мтс[ ,.](?!банк)/.test(low.replace(/мтс[- ]банк/g, ''))) hits.delete('MTSS');
   let out = [...hits.entries()].filter(([tk, h]) => (!known || known.has(tk)) && (h.first < 280 || h.n >= 2)).sort((a, b) => a[1].first - b[1].first).map(([tk]) => tk);
+  out = LC.filter(out, raw, LC_META).keep; // ревизор связей: «самолёт» в новости о крушении ≠ $SMLT, «Иркутск» ≠ $IRKT
   if (out.length > maxN) out = []; // обзор/дайджест про много компаний — не новость о конкретной бумаге
   return out;
 }
@@ -68,4 +72,4 @@ function classify(text) {
   s = Math.max(-3, Math.min(3, s));
   return { types, s, rumor: RUMOR_RE.test(low), official: OFFICIAL_RE.test(low) };
 }
-module.exports = { canon, RENAME, tickersIn, subjectTickers, classify, ALIASES, SEC_OF, TYPES };
+module.exports = { linkLog, LC, canon, RENAME, tickersIn, subjectTickers, classify, ALIASES, SEC_OF, TYPES };

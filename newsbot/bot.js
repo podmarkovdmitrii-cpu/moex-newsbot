@@ -17,6 +17,7 @@ const AI = require('./ai.js');
 
 const HERE = __dirname;
 const STATE_DIR = process.env.STATE_DIR || path.join(HERE, 'state');
+N.linkLog(STATE_DIR); // ревизор связей «новость → бумага» пишет снятые связи в STATE_DIR/linkcheck_log.jsonl
 const STATE_FILE = path.join(STATE_DIR, 'newsbot.json');
 const DRY = process.argv.includes('--dry-run') || !process.env.TG_TOKEN;
 const FIXTURE = process.env.BOT_FIXTURE || null; // для проверки без сети: файл с сохранёнными ответами
@@ -253,7 +254,7 @@ function cluster(S, items) {
         const tk = key.split('|')[0];
         // журнал событий для модели аномалий (продолжение исторического ряда новостей)
         try {
-          fs.appendFileSync(path.join(STATE_DIR, 'news_log.jsonl'), JSON.stringify({ tk: tk === 'РЫНОК' ? 'IMOEX' : tk, ts: p.ts, ty: key.split('|')[1], s: Math.sign(p.score || 0), rum: p.rumor ? 1 : 0, off: p.official ? 1 : 0 }) + '\n');
+          fs.appendFileSync(path.join(STATE_DIR, 'news_log.jsonl'), JSON.stringify({ tk: tk === 'РЫНОК' ? 'IMOEX' : tk, ts: p.ts, ty: key.split('|')[1], s: Math.sign(p.score || 0), rum: p.rumor ? 1 : 0, off: p.official ? 1 : 0, tx: p.tx.slice(0, 300) }) + '\n');
         } catch (e) { /* журнал не критичен */ }
         if (tk !== 'РЫНОК' && p.best && !(S.newsEv || []).some(e => e.t === tk && e.ts === p.ts)) { S.newsEv = (S.newsEv || []).filter(e => p.ts - e.ts < 20 * 86400); S.newsEv.push({ t: tk, ts: p.ts, v: +(p.best.v).toFixed(3), ty: p.best.ty }); }
       }

@@ -1,0 +1,330 @@
+{
+ "_about": "Ревизор связей «новость → бумага» (linkcheck.js — в работе бота, anomaly/linkcheck.py — история новостей перед обучением модели аномалий). Текст сравнивается в нижнем регистре, ё → е. veto — признаки обычного значения слова (самолёт как воздушное судно, Иркутск как город…); strong — явные признаки компании. Связь снимается, если есть veto и нет strong. polluted_types — типы событий, которые обычное значение слова порождает массово (для истории без текста).",
+ "generic_strong": "облигац|дивиденд|выручк|чист\\S* прибыл|мсфо|рсбу|капитализац|котировк|ценн\\S* бумаг|эмитент|допэмисс|байбек|выкуп\\S* акций|совет\\S* директоров|целев\\S* цен",
+ "company_types": [
+  "div_rec",
+  "div_cut",
+  "buyback",
+  "spo",
+  "ipo",
+  "results_up",
+  "results_down",
+  "guidance_up",
+  "guidance_down",
+  "analyst_up",
+  "analyst_down",
+  "mna",
+  "delist_redom",
+  "management"
+ ],
+ "macro_types": [
+  "geo_escal",
+  "geo_peace",
+  "sanctions",
+  "tax",
+  "legal",
+  "oil_up",
+  "oil_down",
+  "ruble_weak",
+  "ruble_strong",
+  "cbr_cut",
+  "cbr_hike",
+  "cbr_hold",
+  "production_up",
+  "production_down"
+ ],
+ "rename": {
+  "CIAN": "CNRU",
+  "AGRO": "RAGR",
+  "YNDX": "YDEX",
+  "TCSG": "T",
+  "TCS": "T",
+  "FIVE": "X5",
+  "HHRU": "HEAD",
+  "FIXP": "FIXR",
+  "GEMA": "GEMC",
+  "ETLNL": "ETLN",
+  "MAIL": "VKCO"
+ },
+ "ambiguous": {
+  "SMLT": {
+   "meaning": "самолёт — воздушное судно, БПЛА, авиация",
+   "veto": "авиа|рейс|аэропорт|пассажир|экипаж|пилот|летчик|крушени|катастроф|разбил|аварийн|посадк|взлет|бпла|беспилот|дрон|истребител|бомбардировщ|штурмовик|сбит|ракет|\\bпво\\b|\\bввс\\b|самолетн|boeing|боинг|airbus|аэробус|суперджет|\\bssj|мс-21|\\bил-\\d|\\bту-\\d|\\bан-\\d|\\bсу-\\d|миг-\\d|вертолет|авиакомпан|авиаперевоз|борт\\S* (номер|самолет)|воздушн\\S* (судн|пространств)|самолет\\S* (типа|упал|разбил|сел|вылет|соверш|прилет|летел)",
+   "strong": "девелопер|застройщик|квартир|жиль|ипотек|недвижим|жил\\S* комплекс|\\bжк\\b|гк «?самолет|групп\\S* «?самолет|«самолет» \\(|\\$smlt|\\bsmlt\\b|(акци|бумаг|котировк|капитализаци)\\S* «?самолет",
+   "polluted_types": [
+    "geo_escal",
+    "geo_peace",
+    "sanctions",
+    "legal",
+    "tax",
+    "production_up",
+    "production_down",
+    "oil_up",
+    "oil_down",
+    "tone"
+   ]
+  },
+  "IRKT": {
+   "meaning": "Иркутск, Иркутская область",
+   "veto": "иркутск|иркутян|приангар|байкал",
+   "strong": "корпораци\\S* «?иркут|«иркут»|пао «?иркут|самолетостро|мс-21|яковлев|\\$irkt|\\birkt\\b|(акци|бумаг|котировк|капитализаци)\\S* «?иркут",
+   "polluted_types": [
+    "geo_escal",
+    "legal",
+    "tax",
+    "tone",
+    "production_up",
+    "production_down"
+   ]
+  },
+  "KMAZ": {
+   "meaning": "КамАЗ — грузовик в новостях о ДТП и боевых действиях",
+   "veto": "\\bдтп\\b|авари|столкнул|столкновени|перевернул|колонн\\S* (камаз|грузовик|техник)|обстрел|\\bсво\\b|\\bвсу\\b|бронирован|уничтожен\\S* (камаз|грузовик)|водител\\S* камаз|камаз\\S* (врезал|протаранил|сбил|загорел|съехал)",
+   "strong": "автопроизводител|автозавод|выпуск|продаж\\S* (грузовик|автомобил)|«камаз»|пао «?камаз|\\$kmaz|\\bkmaz\\b|(акци|бумаг|котировк|капитализаци)\\S* «?камаз",
+   "polluted_types": [
+    "geo_escal",
+    "legal",
+    "tone"
+   ]
+  },
+  "MGNT": {
+   "meaning": "магнит, магнитная буря",
+   "veto": "магнитн|магнитуд|магнитосфер|геомагнит|электромагнит|магнитол|магнитогорск",
+   "strong": "ретейл|ритейл|торгов\\S* сет|магазин|«магнит»|\\$mgnt|\\bmgnt\\b|(акци|бумаг|котировк|капитализаци)\\S* «?магнит|сет\\S* «?магнит",
+   "polluted_types": [
+    "tone"
+   ]
+  },
+  "PLZL": {
+   "meaning": "полюс (Северный полюс, полюс силы…)",
+   "veto": "северн\\S* полюс|южн\\S* полюс|полюс\\S* (холода|земли|недоступности|силы|роста|притяжения|мира)|многополюс|однополюс|биполюс|полюсн",
+   "strong": "золот|«полюс»|пао «?полюс|\\$plzl|\\bplzl\\b|(акци|бумаг|котировк|капитализаци)\\S* «?полюс",
+   "polluted_types": [
+    "geo_escal",
+    "geo_peace",
+    "tone"
+   ]
+  },
+  "PIKK": {
+   "meaning": "пик (пик спроса, час пик)",
+   "veto": "час\\S* пик|на пике|пик (продаж|спроса|сезона|нагрузки|активности|цен|инфляции|потребления|заболеваемост|ставк|отпуск|напряженност)|пиков|пика (сезона|спроса|нагрузки)",
+   "strong": "девелопер|застройщик|«пик»|гк пик|групп\\S* пик|\\$pikk|\\bpikk\\b|(акци|бумаг|котировк|капитализаци)\\S* «?пик",
+   "polluted_types": [
+    "tone"
+   ]
+  },
+  "LENT": {
+   "meaning": "лента новостей, лента (ткань)",
+   "veto": "лент\\S* новост|новостн\\S* лент|лент\\S* (событ|телеграм|telegram|соцсет)|красн\\S* лент|георгиевск\\S* лент|ленточн",
+   "strong": "ритейл|ретейл|гипермаркет|магазин|«лента»|\\$lent|\\blent\\b|(акци|бумаг|котировк|капитализаци)\\S* «?лент",
+   "polluted_types": [
+    "tone"
+   ]
+  },
+  "POSI": {
+   "meaning": "позитив (настроение)",
+   "veto": "позитивн|позитив (для|на|от|в|по|рынк|инвестор)|в позитив|настроени",
+   "strong": "positive technologies|кибербез|«позитив»|групп\\S* позитив|\\$posi|\\bposi\\b|(акци|бумаг|котировк|капитализаци)\\S* «?позитив",
+   "polluted_types": [
+    "tone"
+   ]
+  },
+  "ASTR": {
+   "meaning": "Астрахань, астра (цветок)",
+   "veto": "астрахан|астрал|астроном",
+   "strong": "astra linux|астра линукс|групп\\S* астра|«астра»|\\$astr|\\bastr\\b|(акци|бумаг|котировк|капитализаци)\\S* «?астр",
+   "polluted_types": [
+    "tone"
+   ]
+  },
+  "ETLN": {
+   "meaning": "эталон (образец)",
+   "veto": "эталонн|эталон (качеств|красот|стил|измерен|для)",
+   "strong": "девелопер|застройщик|«эталон»|гк «?эталон|\\$etln|\\betln\\b|(акци|бумаг|котировк|капитализаци)\\S* «?эталон",
+   "polluted_types": [
+    "tone"
+   ]
+  },
+  "ELMT": {
+   "meaning": "элемент (химический, конструкции)",
+   "veto": "химическ\\S* элемент|элемент\\S* (питания|таблиц|конструкц|систем)",
+   "strong": "микроэлектрон|«элемент»|гк «?элемент|\\$elmt|\\belmt\\b|(акци|бумаг|котировк|капитализаци)\\S* «?элемент",
+   "polluted_types": [
+    "tone"
+   ]
+  },
+  "BAZA": {
+   "meaning": "базис (налоговый, поставки)",
+   "veto": "базис\\S* (налог|поставк|цен|актив)|налогов\\S* базис",
+   "strong": "кибербез|«базис»|гк «?базис|\\$baza|\\bbaza\\b|(акци|бумаг|котировк|капитализаци)\\S* «?базис",
+   "polluted_types": [
+    "tone"
+   ]
+  },
+  "OZON": {
+   "meaning": "озон (газ, озоновый слой)",
+   "veto": "озонов|озон\\S* (в атмосфер|разруша|дыр)|озонир",
+   "strong": "маркетплейс|ozon|«озон»|озон банк|\\$ozon|\\bozon\\b|(акци|бумаг|котировк|капитализаци)\\S* «?озон",
+   "polluted_types": [
+    "tone"
+   ]
+  },
+  "CBOM": {
+   "meaning": "МКБ — классификация болезней",
+   "veto": "мкб-?1[01]|классификац\\S* болезн|диагноз",
+   "strong": "московск\\S* кредитн|\\$cbom|\\bcbom\\b|(акци|бумаг|котировк|капитализаци)\\S* «?мкб",
+   "polluted_types": [
+    "tone",
+    "legal"
+   ]
+  },
+  "BELU": {
+   "meaning": "белуга (рыба)",
+   "veto": "белуг\\S* (рыб|осетр|икр|вылов|в аквари)|белух|осетров",
+   "strong": "новабев|алкогол|водк|винлаб|«белуга»|\\$belu|\\bbelu\\b|(акци|бумаг|котировк|капитализаци)\\S* «?белуг",
+   "polluted_types": [
+    "tone"
+   ]
+  }
+ },
+ "sec_of": {
+  "LKOH": "oil",
+  "ROSN": "oil",
+  "TATN": "oil",
+  "TATNP": "oil",
+  "SNGS": "oil",
+  "SNGSP": "oil",
+  "SIBN": "oil",
+  "BANEP": "oil",
+  "NVTK": "oil",
+  "GAZP": "oil",
+  "TRNFP": "oil",
+  "RNFT": "oil",
+  "GMKN": "metal",
+  "CHMF": "metal",
+  "NLMK": "metal",
+  "MAGN": "metal",
+  "RUAL": "metal",
+  "ALRS": "metal",
+  "PLZL": "metal",
+  "UGLD": "metal",
+  "MTLR": "metal",
+  "RASP": "metal",
+  "SELG": "metal",
+  "ENPG": "metal",
+  "SBER": "bank",
+  "SBERP": "bank",
+  "VTBR": "bank",
+  "T": "bank",
+  "SVCB": "bank",
+  "BSPB": "bank",
+  "CBOM": "bank",
+  "MOEX": "bank",
+  "DOMRF": "bank",
+  "SMLT": "devel",
+  "PIKK": "devel",
+  "LSRG": "devel",
+  "MGNT": "retail",
+  "X5": "retail",
+  "OZON": "retail",
+  "LENT": "retail",
+  "MVID": "retail",
+  "BELU": "retail",
+  "GCHE": "retail",
+  "YDEX": "tech",
+  "VKCO": "tech",
+  "POSI": "tech",
+  "HEAD": "tech",
+  "ASTR": "tech",
+  "MTSS": "tech",
+  "RTKM": "tech",
+  "IRAO": "power",
+  "HYDR": "power",
+  "FEES": "power",
+  "UPRO": "power",
+  "MSNG": "power",
+  "MSRS": "power",
+  "MRKP": "power",
+  "MRKC": "power",
+  "PHOR": "chem",
+  "AKRN": "chem",
+  "AFLT": "transport",
+  "FLOT": "transport",
+  "NMTP": "transport",
+  "MBNK": "bank",
+  "LEAS": "bank",
+  "RENI": "bank",
+  "SFIN": "bank",
+  "CARM": "bank",
+  "ZAYM": "bank",
+  "MGKL": "bank",
+  "SPBE": "bank",
+  "ETLN": "devel",
+  "GLRX": "devel",
+  "FIXR": "retail",
+  "OKEY": "retail",
+  "APTK": "retail",
+  "SVET": "retail",
+  "CNRU": "tech",
+  "DIAS": "tech",
+  "DELI": "tech",
+  "IVAT": "tech",
+  "SOFL": "tech",
+  "DATA": "tech",
+  "WUSH": "tech",
+  "ELMT": "tech",
+  "BAZA": "tech",
+  "VSEH": "retail",
+  "BTBR": "tech",
+  "ABRD": "consumer",
+  "EVRZ": "metal",
+  "INCB": "industry",
+  "URKZ": "metal",
+  "USBN": "bank",
+  "MAGE": "power",
+  "ELFV": "power",
+  "LSNG": "power",
+  "MRKU": "power",
+  "MRKV": "power",
+  "MRKZ": "power",
+  "MRKS": "power",
+  "MRKY": "power",
+  "OGKB": "power",
+  "TGKA": "power",
+  "RTSB": "power",
+  "TGKN": "power",
+  "PMSB": "power",
+  "VRSB": "power",
+  "MRSB": "power",
+  "TORS": "power",
+  "KZOS": "chem",
+  "NKNC": "chem",
+  "KAZT": "chem",
+  "VSMO": "metal",
+  "CHMK": "metal",
+  "TRMK": "metal",
+  "ROLO": "metal",
+  "YAKG": "oil",
+  "KRKNP": "oil",
+  "FESH": "transport",
+  "UWGN": "transport",
+  "EUTR": "transport",
+  "GTRK": "transport",
+  "ABIO": "consumer",
+  "AQUA": "consumer",
+  "GEMC": "consumer",
+  "HNFG": "consumer",
+  "MDMG": "consumer",
+  "PRMD": "consumer",
+  "RAGR": "consumer",
+  "NKHP": "consumer",
+  "KROT": "consumer",
+  "OZPH": "consumer",
+  "RKKE": "industry",
+  "SVAV": "industry",
+  "UNAC": "industry",
+  "IRKT": "industry",
+  "NSVZ": "industry",
+  "MSTT": "industry"
+ }
+}
