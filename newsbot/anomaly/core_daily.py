@@ -94,7 +94,9 @@ def build(H, divhist, events, tier_of=None, news_tickers=None, weights=None, hou
     vals = {}
     for t, a in H["sh"].items():
         df = series(a)
-        vals[t] = df.set_index("d")["v"].rolling(60, min_periods=20).mean()
+        # эшелон — по обороту прошлых 60 дней (без сегодняшнего: иначе признак «знает» оборот дня, который прогнозируем;
+        # в работе бота сегодняшнего оборота утром и нет)
+        vals[t] = df.set_index("d")["v"].rolling(60, min_periods=20).mean().shift(1)
     V = pd.DataFrame(vals)
     rank = V.rank(axis=1, ascending=False)
     for t, a in H["sh"].items():
@@ -103,7 +105,7 @@ def build(H, divhist, events, tier_of=None, news_tickers=None, weights=None, hou
             continue
         df["r"] = df["c"].pct_change()
         df["ixr"] = df["d"].map(lambda d: ixr.get(np.datetime64(d)))
-        df["x"] = df["r"] - df["ixr"].fillna(0)
+        df["x"] = df["r"] - df["ixr"]  # нет значения индекса за день — отклонение не считаем (а не берём сырую доходность)
         ex = ex_days(df, divhist.get(t, []))
         df["ex"] = 0
         df.loc[list(ex), "ex"] = 1
