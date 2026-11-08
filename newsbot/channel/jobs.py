@@ -136,7 +136,13 @@ def turnover_avg(tickers, days=20):
     cache = {k: v for k, v in cache.items() if k >= (d - dt.timedelta(days=60)).isoformat()}
     save_json("turnover.json", cache)
     dates = [x for x in sorted(cache) if cache[x]][-days:]
-    return {t: (st.mean([cache[x].get(t, 0) for x in dates]) if dates else None) for t in tickers}
+    # медиана по дням, когда бумага торговалась: как «обычный оборот» в модели аномалий (медиана 20 дней), без влияния
+    # единичных всплесков и без нулей за дни до начала торгов
+    out = {}
+    for t in tickers:
+        v = [cache[x][t] for x in dates if cache[x].get(t)]
+        out[t] = st.median(v) if len(v) >= 5 else None
+    return out
 
 
 def fetch_fut_trades(secid, last=None, max_pages=150):
@@ -1265,8 +1271,9 @@ def morning():
     if atop:
         base = sum(arows[t].get("p_y") or 0 for t in arows) / max(1, len(arows))
         B.append(("h3", "🔮 Вероятность аномалий сегодня"))
-        B.append(("p", f"<i>Модель оценивает шанс, что бумага сегодня резко отклонится от индекса (порог эшелона, 4–8%) или наберёт оборот в 4–6 раз выше обычного. "
-                       f"В среднем по {len(arows)} бумагам — {pc(base, 1, False)}. Обучена на 2013–2026 и проверена на годах, которых не видела: у 5% бумаг с самым высоким прогнозом аномалия случалась в 8 раз чаще среднего. "
+        B.append(("p", f"<i>Модель оценивает шанс, что бумага сегодня резко отклонится от индекса (не меньше 4–8% по эшелону и трёх обычных дневных отклонений) или наберёт оборот в 4–6 раз выше обычного. "
+                       f"В среднем по {len(arows)} бумагам — {pc(base, 1, False)}. Обучена на истории {anom_period()[0]} и проверена на годах, которых не видела"
+                       + (f": у 5% бумаг с самым высоким прогнозом аномалия случалась в {fmt(anom_period()[1], 0)} раз чаще среднего. " if anom_period()[1] else ". ")
                        + anom_dir_note("daily_dir", "утром") + "</i>"))
         B.append(("ul", [f"<b>${t}</b> — <b>{arows[t]['p_y']:.0%}</b> (ценовая {arows[t].get('p_y_px') or 0:.0%}, {anom_dir_word(arows[t])})"
                          + (": " + "; ".join(arows[t].get("why") or []) if arows[t].get("why") else "") for t in atop]))
@@ -1557,7 +1564,7 @@ def evening():
             last = hist["days"][-20:]
             th = sum(len(d["hit"]) for d in last)
             tt = sum(len(d["top"]) for d in last)
-            txt.append(f"🔮 <b>Прогноз аномалий</b>: из 10 бумаг утреннего топа аномалией стали {len(rec['hit'])}" + (f" ({' '.join('$' + t for t in rec['hit'])})" if rec["hit"] else "")
+            txt.append(f"🔮 <b>Прогноз аномалий</b>: из {len(rec['top'])} бумаг утреннего топа аномалией стали {len(rec['hit'])}" + (f" ({' '.join('$' + t for t in rec['hit'])})" if rec["hit"] else "")
                        + f", модель ожидала ≈{exp:.1f}" + (f"; ранних предупреждений {len(rec['warn'])}, сбылось {len(rec['whit'])}" if rec["warn"] else "")
                        + (f". За {len(last)} дн.: {th} из {tt} ({th / tt:.0%})." if len(last) >= 3 and tt else ".")
                        + (f" Направление угадано: {rec['dir_ok']} из {rec['dir_n']}." if rec.get("dir_n") else ""))
@@ -2143,7 +2150,7 @@ def scen_text(sc, t=None):
     """Строки поста: вероятности сценариев + предупреждения из разбора ошибок модели."""
     if not sc:
         return ""
-    out = [f"🎲 <b>Сценарии после входа</b> (модель по истории 2013–2026, горизонт {sc['hz']} торг. дн.): "
+    out = [f"🎲 <b>Сценарии после входа</b> (модель по истории {anom_period()[0]}, горизонт {sc['hz']} торг. дн.): "
            f"цель раньше стопа — <b>{sc['p_take']:.0%}</b> · стоп раньше цели — <b>{sc['p_stop']:.0%}</b> · ни то ни другое, выход по времени — {sc['p_time']:.0%}. "
            f"Ожидаемый результат ≈ {'+' if sc['exp_R'] >= 0 else '−'}{fmt(abs(sc['exp_R']), 2)}R."]
     if sc.get("stop_atr") and sc["stop_atr"] == sc["stop_atr"] and sc["stop_atr"] < 1:
@@ -2274,6 +2281,22 @@ def trade_prob_cli():
     print("SCEN_JSON " + json.dumps(dict(sc or {}, text=txt, notes=txt.split("\n", 1)[1] if "\n" in txt else ""), ensure_ascii=False, default=float), flush=True)
 
 
+def anom_period():
+    """«2008–2026» — период обучения модели аномалий (из meta.json), и во сколько раз чаще аномалия у 5% бумаг с высшим прогнозом."""
+    try:
+        m = anom_live().meta()
+    except Exception:  # noqa: BLE001
+        m = {}
+    y0 = (m.get("data_from") or "2008")[:4]
+    y1 = (m.get("trained") or now_msk().date().isoformat())[:4]
+    lift = None
+    rep = (m.get("report") or {}).get("daily_y") or []
+    v = [(r.get("top5") or 0) / r["base"] for r in rep if r.get("base")]
+    if v:
+        lift = sum(v) / len(v)
+    return f"{y0}–{y1}", lift
+
+
 def anom_dir_note(name, when):
     try:
         a = anom_live().dir_acc(name)
@@ -2305,19 +2328,22 @@ def anom_intraday(stt, md, ixc, now):
         if k not in td.columns:
             td[k] = float("nan")
     td = td.astype({k: float for k in live.CI.DCOLS + ["p_y"]})
-    # оборот час назад — из почасовых снимков
+    # оборот на начало часа c (признак «оборот за последний час» в обучении — объём часовой свечи c): первый снимок в каждом
+    # часе; годится, только если сделан в первые 20 минут часа (иначе «час» был бы короче или длиннее — признак не заполняем)
     hs = stt.setdefault("hsnap", {})
     key_now = str(now.hour)
     if key_now not in hs:
-        hs[key_now] = {r["SECID"]: r.get("VALTODAY") or 0 for r in md}
-    prev_val = hs.get(str(now.hour - 1), {})
+        hs[key_now] = {"m": now.minute, "v": {r["SECID"]: r.get("VALTODAY") or 0 for r in md}}
+    c_hour = now.hour - 1 if now.minute < 50 else now.hour
+    snap = hs.get(str(c_hour))
+    prev_val = snap["v"] if isinstance(snap, dict) and "v" in snap and snap.get("m", 60) <= 20 else {}
     nh = {}
     S = load_json("newsbot.json", {}, NEWS_STATE)
     for c in (S.get("cl") or {}).values():
         w = dt.datetime.fromtimestamp(c.get("ts", 0), MSKTZ)
         if w.date() == now.date():
             nh.setdefault(c["key"].split("|")[0], []).append(w.hour + w.minute / 60)
-    F = live.intraday(md, ixc, now.hour - 1 if now.minute < 50 else now.hour, td, prev_val, nh)
+    F = live.intraday(md, ixc, c_hour, td, prev_val, nh)
     if F.empty:
         return
     warn = stt.setdefault("warn", {})
@@ -2335,7 +2361,7 @@ def anom_intraday(stt, md, ixc, now):
         txt.append(f"• <b>${r.t}</b> — вероятность аномалии <b>{r.p:.0%}</b> (ценовой {r.p_px:.0%}), {dirw}; сейчас {pc(r.cx, 1)} к индексу{vol_typ}"
                    + (f"; новостей за день: {int(r.nw_day)}" if r.nw_day else "") + (f"; утренний прогноз был {dd.get('p_y', 0):.0%}" if dd.get("p_y") else ""))
         warn[r.t] = dict(p=round(float(r.p), 3), px=round(float(r.p_px), 3), ts=time.time(), cx=round(float(r.cx), 4), up=round(pu, 3))
-    txt += ["", "<i>Аномалия — движение цены к индексу сильнее порога эшелона или оборот в 4–6 раз выше обычного. Вероятность — по модели, обученной на истории 2013–2026 и проверенной на годах, которых она не видела. "
+    txt += ["", "<i>Аномалия — движение цены к индексу сильнее порога эшелона или оборот в 4–6 раз выше обычного. Вероятность — по модели, обученной на истории " + anom_period()[0] + " и проверенной на годах, которых она не видела. "
             + anom_dir_note("intra_dir", "внутри дня") + " Это не сигнал на сделку.</i>",
             "#прогноз_аномалий " + " ".join("#" + r.t for r in cand)]
     stt["wn"] = stt.get("wn", 0) + 1
@@ -2349,10 +2375,17 @@ def anom_score_day(md, ixc):
         return None
     rows = today["rows"]
     real, xs = set(), {}
+    exset = set()
+    try:
+        import divs
+        pw = prev_wd(dt.date.fromisoformat(today["date"])).isoformat()
+        exset = {r["t"] for r in divs.upcoming(60) if r.get("last_buy") == pw}
+    except Exception:  # noqa: BLE001
+        pass
     for r in md:
         t = r["SECID"]
         d = rows.get(t)
-        if not d or d.get("sd60") is None:
+        if not d or d.get("sd60") is None or t in exset:  # день отсечки — как в обучении, не считаем
             continue
         tier = d.get("tier") or 3
         thr = max({1: 0.04, 2: 0.06}.get(int(tier), 0.08), 3 * d["sd60"])
@@ -2362,7 +2395,7 @@ def anom_score_day(md, ixc):
         med = 10 ** (d.get("lval") or 12)
         if abs(x) >= thr or (val / med >= (6 if tier == 3 else 4) and val >= 30e6):
             real.add(t)
-    topm = sorted(rows, key=lambda t: -(rows[t].get("p_y") or 0))[:10]
+    topm = sorted([t for t in rows if t not in exset], key=lambda t: -(rows[t].get("p_y") or 0))[:10]
     an = load_json("anomaly.json", {}, os.path.join(NEWS_STATE, "channel"))
     warn = an.get("warn", {}) if an.get("date") == today["date"] else {}
     exp = sum(rows[t]["p_y"] for t in topm)
@@ -2535,7 +2568,7 @@ def index_move(stt, md):
     except Exception as e:  # noqa: BLE001
         log("картинка индекса", e)
         img = None
-    PUB.post("\n".join(txt), [(img, "Индекс МосБиржи: дневные свечи")] if img and os.path.exists(img) else None)
+    PUB.post("\n".join(txt), [(img, "Индекс МосБиржи: часовые свечи")] if img and os.path.exists(img) else None)
     if reason == "level":
         s["lv"] = lv
     else:
@@ -2609,6 +2642,20 @@ def watch_tomorrow(md, now):
     return tmr, focus, notes
 
 
+def day_volume_share(now):
+    """Какая доля обычного дневного оборота набирается к этому времени (МСК). Дневной оборот из истории включает утреннюю
+    (06:50–09:50) и вечернюю (19:05–23:50) сессии; основная — активнее в первый час и к закрытию. Грубый профиль:
+    утро 6%, 10–11 ч +16%, 11–17 ч +52%, 17–18:50 +19%, вечер +7%."""
+    m = now.hour * 60 + now.minute
+    pts = [(6 * 60 + 50, 0.0), (9 * 60 + 50, 0.06), (10 * 60, 0.06), (11 * 60, 0.22), (17 * 60, 0.74), (18 * 60 + 50, 0.93), (19 * 60 + 5, 0.93), (23 * 60 + 50, 1.0)]
+    if m <= pts[0][0]:
+        return 0.06
+    for (a, fa), (b, fb) in zip(pts, pts[1:]):
+        if m <= b:
+            return max(0.06, fa + (fb - fa) * (m - a) / max(1, b - a))
+    return 1.0
+
+
 def anomaly():
     now = now_msk()
     hm = now.strftime("%H:%M")
@@ -2633,8 +2680,7 @@ def anomaly():
         log("фьючерсы", e)
         fut = {}
     secs = sec_of()
-    mins = (now.hour * 60 + now.minute) - 600
-    frac = max(0.06, min(1.0, mins / 530)) if mins < 530 else min(1.25, 1 + (mins - 540) / 1700)
+    frac = day_volume_share(now)
     try:
         index_move(stt, md)
     except Exception as e:  # noqa: BLE001
@@ -2649,7 +2695,7 @@ def anomaly():
     found = []
     by_sec = {}
     for r in md:
-        by_sec.setdefault(secs.get(r["SECID"], "?"), []).append((r.get("LASTTOPREVPRICE") or 0) / 100)
+        by_sec.setdefault(secs.get(r["SECID"], "?"), []).append((r["SECID"], (r.get("LASTTOPREVPRICE") or 0) / 100))
     for r in md:
         t, last, val = r["SECID"], r.get("LAST"), r.get("VALTODAY") or 0
         if not last:
@@ -2657,7 +2703,9 @@ def anomaly():
         chg = (r.get("LASTTOPREVPRICE") or 0) / 100
         tier = 1 if rank.get(t, 999) < 15 else 2 if rank.get(t, 999) < 50 else 3
         prev = stt["snap"].get(t)
-        jump = last / prev[0] - 1 if prev and prev[0] else 0
+        age = (time.time() - prev[2]) / 60 if prev and len(prev) > 2 else None
+        # «рывок» — только к свежему снимку (не старше 15 минут): после перезапуска бота снимок может быть часовой давности
+        jump = last / prev[0] - 1 if prev and prev[0] and age is not None and age <= 15 else 0
         a20 = avg.get(t) or 0
         vx = val / (a20 * frac) if a20 else None
         exc = chg - ixc
@@ -2667,10 +2715,10 @@ def anomaly():
         if abs(exc) >= (4 if tier == 1 else 6 if tier == 2 else 8) / 100 and val >= (100e6 if tier == 1 else 10e6):
             why.append(f"цена {pc(chg, 1)} за день при индексе {pc(ixc, 1)}")
         if abs(jump) >= (2 if tier == 1 else 3.5 if tier == 2 else 5) / 100 and val >= 5e6:
-            why.append(f"рывок {pc(jump, 1)} за последние минуты")
+            why.append(f"рывок {pc(jump, 1)} за {max(1, round(age))} мин")
         if vx and vx >= (4 if tier < 3 else 6) and val >= (300e6 if tier == 1 else 50e6 if tier == 2 else 30e6):
             why.append(f"оборот {fmt(vx, 1)}× к обычному на это время ({bln(val)})")
-        stt["snap"][t] = [last, val]
+        stt["snap"][t] = [last, val, time.time()]
         if why:
             lvl = max(abs(exc), abs(jump)) + (vx or 0) / 100
             old = stt["sent"].get(t)
@@ -2683,13 +2731,14 @@ def anomaly():
             continue
         th, tj = FUT_TH.get(a, (3, 1.5))
         prev = stt["snap"].get(t)
-        jump = last / prev[0] - 1 if prev and prev[0] else 0
-        stt["snap"][t] = [last, f.get("val") or 0]
+        age = (time.time() - prev[2]) / 60 if prev and len(prev) > 2 else None
+        jump = last / prev[0] - 1 if prev and prev[0] and age is not None and age <= 15 else 0
+        stt["snap"][t] = [last, f.get("val") or 0, time.time()]
         why = []
         if abs(f["chg"]) >= th / 100:
             why.append(f"цена {pc(f['chg'], 1)} за день")
         if abs(jump) >= tj / 100:
-            why.append(f"рывок {pc(jump, 1)} за последние минуты")
+            why.append(f"рывок {pc(jump, 1)} за {max(1, round(age))} мин")
         if why:
             lvl = max(abs(f["chg"]), abs(jump))
             old = stt["sent"].get(t)
@@ -2716,10 +2765,26 @@ def anomaly():
     log("аномалий найдено", len(found), "опубликовано", posted)
 
 
+def anom_title(x):
+    """Заголовок по фактам: цена за день, рывок за минуты или только оборот; против рынка — так и пишем."""
+    why = " ".join(x["why"])
+    chg, exc, jump = x["chg"], x.get("exc") or 0, x.get("jump") or 0
+    if why.startswith("цена") or "цена" in why:
+        if x["kind"] == "share" and (chg > 0) != (exc > 0) and abs(chg) >= 0.005:
+            return (exc > 0), ("держится сильно лучше рынка" if exc > 0 else "падает сильно хуже рынка")
+        up = (exc if x["kind"] == "share" else chg) > 0
+        return up, ("резкий рост" if up else "резкое падение")
+    if "рывок" in why:
+        return jump > 0, ("рывок вверх" if jump > 0 else "рывок вниз")
+    up = chg >= 0
+    return up, "всплеск оборота" + ((" при росте" if chg > 0 else " при снижении") + f" {pc(chg, 1)}" if abs(chg) >= 0.01 else "")
+
+
 def anomaly_post(x, md, by_sec, ixc):
-    t, up = x["t"], (x["exc"] if x["kind"] == "share" else x["chg"]) > 0
+    t = x["t"]
+    up, what = anom_title(x)
     lab = "$" + t if x["kind"] == "share" else f"{FUT[x['asset']][0]} ({t})"
-    txt = [f"🚨 <b>Аномалия: {lab} — {'резкий рост' if up else 'резкое падение'}" + (" на большом объёме" if x.get("vx") and x["vx"] >= 4 else "") + "</b>",
+    txt = [f"🚨 <b>Аномалия: {lab} — {what}" + (" на большом объёме" if x.get("vx") and x["vx"] >= 4 and "оборот" not in what else "") + "</b>",
            "<blockquote>" + "; ".join(x["why"]) + ".</blockquote>", ""]
     # кто двигал: последние сделки
     tr = recent_trades(t, x["kind"])
@@ -2773,9 +2838,9 @@ def anomaly_post(x, md, by_sec, ixc):
     # контекст и влияние
     if x["kind"] == "share":
         sec = x.get("sec")
-        peers = by_sec.get(sec, []) if sec else []
-        pm = st.mean(peers) if len(peers) >= 3 else None
-        ctx = f"Индекс МосБиржи {pc(ixc, 1)}" + (f", сектор «{SEC_NAME.get(sec, sec)}» в среднем {pc(pm, 1)}" if pm is not None else "")
+        peers = [c for p, c in by_sec.get(sec, []) if p != t] if sec else []  # сектор без самой бумаги
+        pm = st.median(peers) if len(peers) >= 3 else None
+        ctx = f"Индекс МосБиржи {pc(ixc, 1)}" + (f", сектор «{SEC_NAME.get(sec, sec)}» без неё — {pc(pm, 1)} (медиана)" if pm is not None else "")
         own = pm is None or abs(x["chg"] - pm) > abs(pm)
         txt.append(ctx + (" — движение индивидуальное, не всего рынка." if own else " — двигается весь сектор."))
         eff = []
@@ -2783,8 +2848,9 @@ def anomaly_post(x, md, by_sec, ixc):
             peers_t = [r["SECID"] for r in md if sec_of_cache().get(r["SECID"]) == sec and r["SECID"] != t][:4]
             if peers_t:
                 eff.append(f"бумаги сектора ({' '.join('$' + p for p in peers_t)}) — {'подтягиваются вверх' if up else 'под давлением'}, если причина отраслевая")
-        if x["tier"] == 1:
-            eff.append(f"индекс МосБиржи — бумага из числа самых торгуемых, её движение {'поддерживает' if up else 'тянет вниз'} индекс")
+        w_ix = ix_weights().get(t, 0)
+        if w_ix >= 0.01 and abs(x["chg"]) >= 0.005:
+            eff.append(f"индекс МосБиржи — вес бумаги {pc(w_ix, 1, False)}, её движение даёт индексу {'+' if x['chg'] > 0 else '−'}{fmt(abs(w_ix * x['chg']) * 100, 2)} п.п.")
         txt.append("На что может повлиять: " + ("; ".join(eff) if eff else "в основном на саму бумагу — во 2–3 эшелоне такие рывки редко передаются рынку") + ".")
     else:
         rel = FUT[x["asset"]][2]
@@ -2806,7 +2872,7 @@ def anomaly_post(x, md, by_sec, ixc):
     except Exception as e:  # noqa: BLE001
         log("картинка аномалии", e)
         img = None
-    PUB.post("\n".join(txt), [(img, f"{lab}: дневные свечи")] if img and os.path.exists(img) else None)
+    PUB.post("\n".join(txt), [(img, f"{lab}: часовые свечи")] if img and os.path.exists(img) else None)
 
 
 _SEC = None
@@ -3561,7 +3627,7 @@ def nav_text():
          "<b>Перевес покупок/продаж</b> — доля оборота, где инициатором сделки была покупка или продажа по рынку. ↳ — что может стоять за движением.",
          "<b>Кит</b> — сделка от 50 млн ₽ в голубых фишках или от 5% среднего дневного оборота в остальных бумагах.",
          "<b>Чистый поток в ОФЗ</b> — покупки минус продажи по рынку. Деньги в длинные ОФЗ при падении доходностей — рынок ждёт снижения ставки.",
-         "<b>Аномалия</b> — движение к индексу сильнее порога эшелона или оборот в 4–6 раз выше обычного; вероятности — модель на истории 2013–2026.",
+         "<b>Аномалия</b> — движение к индексу сильнее порога эшелона или оборот в 4–6 раз выше обычного; вероятности — модель на истории " + anom_period()[0] + ".",
          "<b>Вес новости</b> — насколько сильно рынок исторически реагировал на такие новости (2017–2026).",
          "<b>Сделки инсайдеров</b> — уже раскрытые покупки и продажи менеджмента и крупных акционеров (публичная информация, 224-ФЗ).",
          "",
