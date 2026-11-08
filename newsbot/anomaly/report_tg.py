@@ -5,7 +5,9 @@ import collections
 import html
 import json
 import os
+import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -60,18 +62,47 @@ def text():
     return "\n".join(L)
 
 
+def send(tok, chat, t):
+    """Отправить и вернуть строку для журнала: кому ушло или почему нет (ответ Telegram целиком)."""
+    data = urllib.parse.urlencode({"chat_id": chat, "text": t[:4000], "parse_mode": "HTML", "disable_web_page_preview": "true"}).encode()
+    try:
+        js = json.loads(urllib.request.urlopen(urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendMessage", data=data), timeout=30).read())
+        r = js.get("result") or {}
+        c = r.get("chat") or {}
+        return f"отправлено: чат {c.get('id')} ({c.get('type')}, {c.get('username') or c.get('first_name') or c.get('title') or ''}), сообщение {r.get('message_id')}"
+    except urllib.error.HTTPError as e:
+        return f"не отправлено (чат {chat}): {e.code} {e.read().decode('utf-8', 'replace')[:200]}"
+    except Exception as e:  # noqa: BLE001
+        return f"не отправлено (чат {chat}): {e}"
+
+
+def bot_name(tok):
+    try:
+        return "@" + json.loads(urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/getMe", timeout=20).read())["result"]["username"]
+    except Exception:  # noqa: BLE001
+        return "бот ?"
+
+
 def main():
     t = text()
     print(t)
-    tok, chat = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT_ID")
-    if not tok or not chat:
-        print("TG_TOKEN/TG_CHAT_ID не заданы — отчёт только в журнал")
+    # куда слать: администраторам в боте канала (тот, где кнопки и закрытые идеи) и в бот личных уведомлений
+    targets = []
+    pub = os.environ.get("TG_PUBLIC_TOKEN")
+    for a in re.split(r"[,;\s]+", os.environ.get("IDEA_ADMINS") or ""):
+        if pub and a.strip().lstrip("-").isdigit():
+            targets.append((pub, a.strip()))
+    if os.environ.get("TG_TOKEN") and os.environ.get("TG_CHAT_ID"):
+        targets.append((os.environ["TG_TOKEN"], os.environ["TG_CHAT_ID"]))
+    if not targets:
+        print("нет получателей: задайте IDEA_ADMINS + TG_PUBLIC_TOKEN или TG_TOKEN + TG_CHAT_ID — отчёт только в журнал")
         return
-    data = urllib.parse.urlencode({"chat_id": chat, "text": t[:4000], "parse_mode": "HTML", "disable_web_page_preview": "true"}).encode()
-    try:
-        urllib.request.urlopen(urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendMessage", data=data), timeout=30).read()
-    except Exception as e:  # noqa: BLE001
-        print("отчёт не отправлен:", e)
+    seen = set()
+    for tok, chat in targets:
+        if (tok, chat) in seen:
+            continue
+        seen.add((tok, chat))
+        print(bot_name(tok), "→", send(tok, chat, t))
 
 
 if __name__ == "__main__":
