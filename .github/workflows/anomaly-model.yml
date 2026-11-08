@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '17 2 * * 0'   # воскресенье 05:17 МСК
   workflow_dispatch:
+    inputs:
+      report_only:
+        description: 'Только прислать отчёт по последней модели (без обучения)'
+        type: boolean
+        default: false
 
 concurrency:
   group: anomaly-model
@@ -21,6 +26,7 @@ jobs:
       - name: Библиотеки
         run: pip install --quiet "scikit-learn==1.5.2" pandas numpy matplotlib
       - name: Кэш исторических свечей (докачка)
+        if: ${{ !inputs.report_only }}
         uses: actions/cache/restore@v4
         with:
           path: anomaly-data
@@ -32,7 +38,15 @@ jobs:
           path: newsbot-state
           key: newsbot-state-${{ github.run_id }}
           restore-keys: newsbot-state-
+      - name: Последняя обученная модель (режим «только отчёт»)
+        if: ${{ inputs.report_only }}
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-models
+          key: anomaly-models-${{ github.run_id }}
+          restore-keys: anomaly-models-
       - name: Обучение и проверка на будущих годах
+        if: ${{ !inputs.report_only }}
         env:
           ANOM_DATA: ${{ github.workspace }}/anomaly-data
           ANOM_MODELS: ${{ github.workspace }}/anomaly-models
@@ -47,15 +61,17 @@ jobs:
           NEWS_STATE: ${{ github.workspace }}/newsbot-state
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_PUBLIC_TOKEN: ${{ secrets.TG_PUBLIC_TOKEN }}
+          IDEA_ADMINS: ${{ vars.IDEA_ADMINS || secrets.IDEA_ADMINS }}
         run: python newsbot/anomaly/report_tg.py
       - name: Сохранить свечи
-        if: always()
+        if: ${{ always() && !inputs.report_only }}
         uses: actions/cache/save@v4
         with:
           path: anomaly-data
           key: anomaly-data-${{ github.run_id }}
       - name: Сохранить модели
-        if: always()
+        if: ${{ always() && !inputs.report_only }}
         uses: actions/cache/save@v4
         with:
           path: anomaly-models

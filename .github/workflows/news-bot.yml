@@ -106,6 +106,11 @@ jobs:
           FAQ_TEXT: ${{ vars.FAQ_TEXT || secrets.FAQ_TEXT }}
           OZON_TIPS_URL: ${{ vars.OZON_TIPS_URL || secrets.OZON_TIPS_URL }}
           PAY_METHOD: ${{ vars.PAY_METHOD || secrets.PAY_METHOD }}
+          # бот-помощник для Пульса (newsbot/channel/pulse_bot.py): черновики постов с картинками и итогами сделок
+          TG_PULSE_TOKEN: ${{ secrets.TG_PULSE_TOKEN }}
+          PULSE_LINK_MODE: ${{ vars.PULSE_LINK_MODE || 'text' }}
+          CHANNEL_LINK: ${{ vars.CHANNEL_LINK }}
+          CHANNEL_TITLE: ${{ vars.CHANNEL_TITLE }}
           # бот-трейдер в канале (модельный портфель, сигналы стратегии): выключен, включить — переменная BOT_TRADING=1
           BOT_TRADING: ${{ vars.BOT_TRADING }}
         run: |
@@ -113,8 +118,11 @@ jobs:
           if [ -z "$BOT" ]; then echo "Не найден newsbot/bot.js — загрузите папку newsbot в репозиторий"; exit 1; fi
           PW=$(find . -name paywall.py -path '*newsbot/channel*' | head -1)
           if [ -n "$PW" ] && [ "${{ vars.IDEAS }}" != "off" ]; then python "$PW" & PWPID=$!; fi
+          PB=$(find . -name pulse_bot.py -path '*newsbot/channel*' | head -1)
+          if [ -n "$PB" ] && [ -n "$TG_PULSE_TOKEN" ]; then python "$PB" & PBPID=$!; fi
           rc=0; node "$BOT" || rc=$?
           if [ -n "$PWPID" ]; then kill -TERM "$PWPID" 2>/dev/null; wait "$PWPID" 2>/dev/null || true; fi
+          if [ -n "$PBPID" ]; then kill -TERM "$PBPID" 2>/dev/null; wait "$PBPID" 2>/dev/null || true; fi
           exit $rc
       - name: Сохранить состояние бота
         if: always()
