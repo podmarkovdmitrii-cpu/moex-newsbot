@@ -571,6 +571,9 @@ def judge_async(uid, idea, publish):
                             "rules": list(r["rules"]), "p": float(r.get("p_final", r["p"])), "verdict": r["verdict"],
                             "term": [int(x) for x in r["term"]] if r.get("term") else None, "potential": float(r.get("potential") or 0),
                             "confirm": {"px": float(cf["px"]), "p": float(cf["p"]), "strong": bool(cf.get("strong"))} if cf else None}
+            an = r.get("anom") or {}
+            if an:  # короткая сводка проверки моделью аномалий — для постов (бот для Пульса)
+                idea["plan"]["anom"] = {"lvl": an.get("lvl"), "against": bool(an.get("against")), "with": bool(an.get("with_"))}
         with LOCK:
             S["seq"] += 1
             did = str(S["seq"])
@@ -661,22 +664,10 @@ def on_precheckout(q):
 
 
 def idea_outcome(v):
-    """Итог закрытой идеи в R по уровням: доли тейков из плана, остаток — по стопу на момент закрытия."""
-    E, side = v["entry"], v["side"]
-    r0 = E * v.get("risk_pct", 0) / 100
-    if r0 <= 0:
-        return None, "?"
-    shares = [t.get("share") for t in ((v.get("plan") or {}).get("takes") or [])]
-    if len(shares) != len(v["takes"]) or any(x is None for x in shares):
-        shares = [1 / len(v["takes"])] * len(v["takes"])
-    hit = set(v.get("hit") or [])
-    R = sum(shares[i] * (v["takes"][i] - E) * side / r0 for i in hit if i < len(shares))
-    rest = 1 - sum(shares[i] for i in hit if i < len(shares))
-    if rest > 1e-6:
-        R += rest * (v["stop"] - E) * side / r0
-    kind = "тейк" if rest <= 1e-6 else ("безубыток" if abs(v["stop"] - E) < 1e-9 and not hit else
-                                       "частично" if hit else "стоп")
-    return R, kind
+    """Итог закрытой идеи в R: процент из итога автора при закрытии, иначе по уровням (ideas_calc.py — та же формула в боте для Пульса)."""
+    import ideas_calc as IC
+    r = IC.result(v)
+    return r["R"], r["kind"]
 
 
 def stats_post(month=None):
@@ -702,7 +693,7 @@ def stats_post(month=None):
     lines = [f"📊 <b>Итоги закрытых идей · {mn} {y}</b>", "",
              f"Закрыто идей: <b>{len(ideas)}</b> · в плюсе {win} · " + " · ".join(f"{k} {n}" for k, n in cnt.items()),
              f"Суммарный результат: <b>{'+' if tot >= 0 else '−'}{abs(tot):.1f}R</b>, в среднем {'+' if tot >= 0 else '−'}{abs(tot) / max(1, len(vals)):.2f}R на идею".replace(".", ","),
-             "<i>R — риск идеи (расстояние от входа до стопа). Результат посчитан по уровням: доли тейков из плана, остаток — по стопу на момент закрытия.</i>", ""]
+             "<i>R — риск идеи (расстояние от входа до стопа). Результат — по итогу, указанному при закрытии; если процента в нём нет — по уровням: доли тейков из плана, остаток по стопу.</i>", ""]
     for (r, k), v in sorted(rs, key=lambda z: -(z[0][0] or -99)):
         sd = "лонг" if v["side"] > 0 else "шорт"
         lines.append(f"{'🟢' if (r or 0) > 0 else '🔴' if (r or 0) < 0 else '⚪️'} {html.escape(tlabel(v['ticker']))} {sd} — {k}, {'+' if (r or 0) >= 0 else '−'}{abs(r or 0):.2f}R".replace(".", ",")

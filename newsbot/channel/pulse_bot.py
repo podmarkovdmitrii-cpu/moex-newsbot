@@ -14,8 +14,12 @@
 Кнопки: итоги месяца, последние сделки (итог/тизер по любой), пост о рынке (потоки денег и аномалии дня),
 свой текст → пост для Пульса, где ставить ссылку (в тексте / «в профиле» / без ссылки).
 
-Результаты сделок берутся из закрытых идей (paywall.py, файл paywall.json): доли тейков из плана, остаток — по стопу
-на момент закрытия; комиссии не учитываются. Переменные: TG_PULSE_TOKEN (токен отдельного бота от @BotFather),
+Сделки — только идеи, опубликованные в Telegram-канале (paywall.py, файл paywall.json). Результат — итог, который автор
+написал при закрытии идеи («❌ Стоп −3,1%»); если процента нет — по уровням: доли тейков из плана, остаток по стопу
+(ideas_calc.py — та же формула, что в #итоги_идей канала). Комиссии не учитываются.
+Посты подчёркивают особенности канала: идея публикуется до входа (дата и ссылка на пост), проверка идеи моделью
+(вероятность цели, риск аномалии), план с частичными тейками, публикация убыточных сделок, общая статистика с первой идеи,
+модель аномалий и проверенные новости. Кнопка «🏆 Вся статистика» — пост со всеми закрытыми идеями. Переменные: TG_PULSE_TOKEN (токен отдельного бота от @BotFather),
 IDEA_ADMINS, TG_PUBLIC_CHAT (адрес канала), CHANNEL_LINK (если адрес другой), PULSE_LINK_MODE (text|profile|none).
 """
 import html
@@ -30,6 +34,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from common import BG, FG, UP, DN, BLUE, DISCLAIMER, fmt, pc, share_candles, candle_chart, hbars  # noqa: E402
+import ideas_calc as IC  # noqa: E402
 
 TOKEN = os.environ.get("TG_PULSE_TOKEN", "")
 ADMINS = {int(x) for x in re.findall(r"-?\d+", os.environ.get("IDEA_ADMINS", ""))}
@@ -64,10 +69,12 @@ def load():
 
 
 def ideas():
+    """Только идеи, опубликованные в Telegram-канале (черновики и отменённые сюда не попадают)."""
     try:
-        return json.load(open(PW_STATE, encoding="utf-8")).get("ideas") or {}
+        cur = json.load(open(PW_STATE, encoding="utf-8")).get("ideas") or {}
     except Exception:  # noqa: BLE001
         return {}
+    return {k: v for k, v in cur.items() if v.get("msg") or v.get("t")}
 
 
 # ---------------- Telegram ----------------
@@ -102,7 +109,7 @@ def tg_photo(chat, path, caption=""):
 
 KB = {"keyboard": [[{"text": "📊 Итоги месяца"}, {"text": "🧾 Последние сделки"}],
                    [{"text": "🗞 Пост о рынке"}, {"text": "✍️ Свой текст → пост"}],
-                   [{"text": "🔗 Где ссылка на канал"}]], "resize_keyboard": True}
+                   [{"text": "🏆 Вся статистика"}, {"text": "🔗 Где ссылка на канал"}]], "resize_keyboard": True}
 
 
 def say(chat, text, kb=None):
@@ -122,25 +129,10 @@ def deliver(title, text, imgs=()):
 
 
 # ---------------- расчёты по сделкам ----------------
-def shares_of(v):
-    sh = [t.get("share") for t in ((v.get("plan") or {}).get("takes") or [])]
-    if len(sh) != len(v["takes"]) or any(x is None for x in sh):
-        sh = [1 / len(v["takes"])] * len(v["takes"])
-    return sh
-
-
 def outcome(v):
-    """(% к цене входа, R, тип) по тейкам из плана и стопу на момент закрытия — как в статистике канала."""
-    E, side = v["entry"], v["side"]
-    rf = (v.get("risk_pct") or 0) / 100 or abs(E - (v.get("stop0") or v["stop"])) / E or 0.01  # риск в долях цены входа
-    sh, hit = shares_of(v), set(v.get("hit") or [])
-    pct = sum(sh[i] * (v["takes"][i] - E) * side / E for i in hit if i < len(sh))
-    rest = 1 - sum(sh[i] for i in hit if i < len(sh))
-    if rest > 1e-6 and v.get("closed"):
-        pct += rest * (v["stop"] - E) * side / E
-    R = pct / rf
-    kind = "тейк" if rest <= 1e-6 else ("безубыток" if abs(v["stop"] - E) < 1e-9 and not hit else "частично" if hit else "стоп")
-    return pct, R, kind
+    """(% к цене входа, R, тип) — как в #итоги_идей канала: итог автора при закрытии, иначе по уровням (ideas_calc.py)."""
+    r = IC.result(v)
+    return r["pct"], (r["R"] if r["R"] is not None else 0.0), r["kind"]
 
 
 def days(v):
@@ -152,10 +144,69 @@ def side_w(v, short=False):
     return ("Л" if v["side"] > 0 else "Ш") if short else ("ЛОНГ" if v["side"] > 0 else "ШОРТ")
 
 
+def dm(ts, year=False):
+    return time.strftime("%d.%m.%Y" if year else "%d.%m", time.gmtime(int(ts) + MSK)) if ts else ""
+
+
+def plural(n, one, few, many):
+    n10, n100 = n % 10, n % 100
+    return one if n10 == 1 and n100 != 11 else few if 2 <= n10 <= 4 and not 12 <= n100 <= 14 else many
+
+
+def Rs(x, d=1):
+    return f"{'+' if x >= 0 else '−'}{fmt(abs(x), d)}R"
+
+
+def post_url(v):
+    """Ссылка на пост с идеей в канале — доказательство, что идея вышла до входа (только для публичного канала и режима «ссылка в тексте»)."""
+    if ST.get("mode") == "text" and CHAN and not CHAN.lstrip("-").isdigit() and v.get("msg"):
+        return f"https://t.me/{CHAN}/{v['msg']}"
+    return ""
+
+
+def published(v):
+    return f"Идея опубликована в канале {dm(v['t'])} в {time.strftime('%H:%M', time.gmtime(int(v['t']) + MSK))} МСК" if v.get("t") else ""
+
+
+def model_line(v):
+    """Что сказала модель канала при проверке идеи перед публикацией."""
+    pl = v.get("plan") or {}
+    if pl.get("p") is None:
+        return ""
+    t = f"🤖 Проверка моделью перед публикацией: вероятность цели раньше стопа ~{pl['p']:.0%} (по истории бумаги и модели аномалий)"
+    an = pl.get("anom") or {}
+    if an.get("against"):
+        t += "; модель предупредила: риск резкого движения против сделки повышен"
+    elif an.get("with"):
+        t += "; модель ждёт резкое движение в сторону идеи"
+    elif an.get("lvl"):
+        t += f"; вероятность аномалии по бумаге — {an['lvl']}"
+    return t + "."
+
+
+def record_line():
+    rec = IC.record(ideas())
+    if not rec:
+        return ""
+    since = f" с {dm(rec['first_t'], True)}" if rec.get("first_t") else ""
+    return (f"📒 Все мои закрытые идеи{since}: {rec['n']}, в плюс {rec['wins']}, в минус {rec['losses']}, сумма {Rs(rec['sum_R'])}"
+            + (f" (в среднем {Rs(rec['avg_R'], 2)} на сделку)" if rec.get("avg_R") is not None else "") + ".")
+
+
+FEAT = {
+    "idea": "Каждую идею перед публикацией проверяет модель канала: вероятность цели по многолетней истории бумаги и риск резкого движения против сделки.",
+    "plan": "К каждой идее — план: частичные тейки, перенос стопа в безубыток после первого тейка, уровень подтверждения.",
+    "honest": "Публикую все сделки, включая убыточные: идея выходит до входа, итог — после закрытия, статистика открыта.",
+    "anom": "Модель аномалий канала (данные Мосбиржи с 2008 года) замечает резкие движения и всплески оборота за минуты.",
+    "news": "Новости — только официальные источники и агентства; слухи помечены как слухи, с историей их подтверждения.",
+}
+SHORT_FEAT = "В канале: мои сделки с итогами · аномалии за минуты · проверенные новости · куда идут деньги"
+
+
 def footer(tags=""):
     m = ST.get("mode", "text")
-    link = (f"📲 Все сделки с входами, стопами и итогами — в моём Telegram-канале «{TITLE}»: {LINK}" if m == "text" and LINK
-            else "📲 Все сделки и статистика — в моём Telegram-канале (ссылка в профиле)" if m in ("text", "profile") else "")
+    link = (f"📲 Telegram-канал «{TITLE}»: {LINK}\n{SHORT_FEAT}" if m == "text" and LINK
+            else f"📲 Telegram-канал «{TITLE}» — ссылка в профиле.\n{SHORT_FEAT}" if m in ("text", "profile") else "")
     return "\n\n" + "\n".join(x for x in (link, tags, DISCLAIMER) if x)
 
 
@@ -184,11 +235,26 @@ def stamp(path, top, color, bottom=None):
     return path
 
 
-def chart(v, iid, title, show_levels=True):
+def bars_for(t):
+    """Дневные свечи: акция TQBR, иначе — сырьё/валюта (непрерывный фьючерс FORTS)."""
     try:
-        bars = share_candles(v["ticker"], 260)
+        B = share_candles(t, 260)
+        if B:
+            return B
     except Exception as e:  # noqa: BLE001
-        log("свечи", v["ticker"], e)
+        log("свечи", t, e)
+    try:
+        from common import FUT, fut_continuous
+        a = next((k for k in FUT if k.lower() == t.lower()), None)
+        return fut_continuous(a, 260) if a else []
+    except Exception as e:  # noqa: BLE001
+        log("свечи фьючерса", t, e)
+        return []
+
+
+def chart(v, iid, title, show_levels=True):
+    bars = bars_for(v["ticker"])
+    if not bars:
         return None
     lines = []
     if show_levels:
@@ -200,17 +266,21 @@ def chart(v, iid, title, show_levels=True):
 
 
 def bottom_line():
-    return f"Все сделки и статистика — Telegram: {LINK}" if ST.get("mode") == "text" and LINK else None
+    m = ST.get("mode")
+    if m == "text" and LINK:
+        return f"«{TITLE}» · сделки, аномалии, новости — {LINK}"
+    return f"«{TITLE}» · Telegram" if m == "profile" else None
 
 
 # ---------------- черновики ----------------
 def d_teaser(iid, v):
     pl = v.get("plan") or {}
     pot = abs(v["takes"][-1] - v["entry"]) / v["entry"]
-    L = [f"🔒 Новая идея: ${v['ticker']} — {side_w(v)}", "",
+    L = [f"🔒 Новая идея в моём канале: ${v['ticker']} — {side_w(v)}", "",
          f"Потенциал ~{pc(pot, 1, False)}" + (f", срок обычно {pl['term'][0]}–{pl['term'][1]} торг. дн." if pl.get("term") else "")
-         + (f", вероятность цели по истории бумаги ~{pl['p']:.0%}" if pl.get("p") is not None else "") + ".",
-         f"Прибыль/риск {fmt(v.get('rr'))}. Точка входа, стоп и план фиксации — у подписчиков канала, итог опубликую здесь же."]
+         + f", прибыль/риск {fmt(v.get('rr'))}.", *([model_line(v)] if model_line(v) else []),
+         "Вход, стоп и план фиксации — у подписчиков канала. Итог сделки опубликую здесь, каким бы он ни был.",
+         "", FEAT["honest"] if model_line(v) else FEAT["idea"]]
     text = "\n".join(L) + footer("#идея #" + v["ticker"])
     p = chart(v, iid, f"{v['ticker']} · новая идея · {side_w(v)}", show_levels=False)
     if p:
@@ -219,14 +289,20 @@ def d_teaser(iid, v):
 
 
 def d_open(iid, v):
-    L = [f"💡 Идея: ${v['ticker']} — {side_w(v)}", "",
+    L = [f"💡 Идея из моего канала: ${v['ticker']} — {side_w(v)}", "",
          f"Вход {fmt(v['entry'])} · стоп {fmt(v['stop'])} · тейки {' / '.join(fmt(x) for x in v['takes'])}",
          f"Риск {fmt(v.get('risk_pct'))}%, прибыль/риск {fmt(v.get('rr'))}."]
     pl = v.get("plan") or {}
     if pl.get("rules"):
         L.append("План: " + "; ".join(pl["rules"][:2]))
+    if model_line(v):
+        L.append(model_line(v))
     if v.get("comment"):
         L += ["", v["comment"]]
+    pub = published(v)
+    if pub:
+        L += ["", pub + (f": {post_url(v)}" if post_url(v) else ".")]
+    L += ["", FEAT["plan"]]
     p = chart(v, iid, f"{v['ticker']} · {side_w(v)} · вход {fmt(v['entry'])}")
     if p:
         stamp(p, f"{v['ticker']} · {side_w(v)} · вход {fmt(v['entry'])}", UP if v["side"] > 0 else DN, bottom_line())
@@ -237,9 +313,11 @@ def d_take(iid, v, i):
     E = v["entry"]
     mv = (v["takes"][i] - E) * v["side"] / E
     L = [f"✅ ${v['ticker']}: тейк {i + 1} из {len(v['takes'])} взят — {pc(mv, 1)} от входа", "",
-         f"{side_w(v)} от {fmt(E)}, тейк {fmt(v['takes'][i])}" + (f", в сделке {days(v)} дн" if days(v) else "") + "."]
+         f"{side_w(v)} от {fmt(E)}, тейк {fmt(v['takes'][i])}" + (f", в сделке {days(v)} дн." if days(v) else "")
+         + (f" Идея вышла в канале {dm(v['t'])} — до входа." if v.get("t") else "")]
     if i + 1 < len(v["takes"]):
-        L.append("Остаток позиции держу" + (", стоп — в безубытке." if v.get("be") else "."))
+        L.append("Остаток позиции держу" + (", стоп — в безубытке, сделка уже без риска." if v.get("be") else "."))
+    L += ["", FEAT["plan"]]
     p = chart(v, iid, f"{v['ticker']} · тейк {i + 1} взят")
     if p:
         stamp(p, f"{v['ticker']} · тейк {i + 1} · {pc(mv, 1)}", UP, bottom_line())
@@ -249,15 +327,23 @@ def d_take(iid, v, i):
 def d_close(iid, v):
     pct, R, kind = outcome(v)
     good = pct >= 0
-    L = [f"{'🏁' if good else '⛔️'} Итог сделки ${v['ticker']} ({side_w(v)}): {pc(pct, 1)}, {'+' if R >= 0 else '−'}{fmt(abs(R), 1)}R", "",
-         f"Вход {fmt(v['entry'])}, тейки {' / '.join(('✅' if j in set(v.get('hit') or []) else '') + fmt(x) for j, x in enumerate(v['takes']))}"
-         + (f", закрыта за {days(v)} дн." if days(v) else "") + f" ({kind}).",
-         "Каждую сделку публикую до входа и закрываю публично — итоги по всем сделкам ниже в ленте и в канале."]
+    hit = set(v.get("hit") or [])
+    L = [f"{'🏁' if good else '⛔️'} Итог сделки ${v['ticker']} ({side_w(v)}): {pc(pct, 1)}, {Rs(R)}", "",
+         f"Вход {fmt(v['entry'])}, тейки {' / '.join(('✅' if j in hit else '') + fmt(x) for j, x in enumerate(v['takes']))} ({kind})."]
     if v.get("result"):
-        L.insert(2, v["result"])
+        L.append(f"Мой итог при закрытии: {v['result']}")
+    if v.get("t"):
+        L.append(f"Идея опубликована в канале {dm(v['t'])}, закрыта {dm(v.get('closed_t'))}" + (f" — {days(v)} дн. в сделке" if days(v) else "")
+                 + (f": {post_url(v)}" if post_url(v) else "."))
+    if not good:
+        L.append("Убыточные сделки публикую так же, как прибыльные: без этого статистика ничего не стоит.")
+    rl = record_line()
+    if rl:
+        L += ["", rl]
+    L += ["", FEAT["honest"]]
     p = chart(v, iid, f"{v['ticker']} · итог сделки")
     if p:
-        stamp(p, f"{v['ticker']} · {side_w(v)} · {pc(pct, 1)} · {'+' if R >= 0 else '−'}{fmt(abs(R), 1)}R", UP if good else DN, bottom_line())
+        stamp(p, f"{v['ticker']} · {side_w(v)} · {pc(pct, 1)} · {Rs(R)}", UP if good else DN, bottom_line())
     deliver(f"итог ${v['ticker']}", "\n".join(L) + footer("#итоги #сделка #" + v["ticker"]), [p])
 
 
@@ -276,16 +362,49 @@ def d_month(key=None):
     wins = sum(1 for r in rows if r[2] > 0)
     tot = sum(r[2] for r in rows)
     sR = sum(r[3] for r in rows)
-    L = [f"📊 Мои сделки за {MONTHS[m - 1]} {y}: {wins} из {len(rows)} в плюс, сумма {pc(tot, 1)} ({'+' if sR >= 0 else '−'}{fmt(abs(sR), 1)}R)", ""]
+    L = [f"📊 Мои сделки из Telegram-канала за {MONTHS[m - 1]} {y}: {wins} из {len(rows)} в плюс, сумма {pc(tot, 1)} ({Rs(sR)})", ""]
     for iid, v, pct, R, kind in rows:
         L.append(f"{'✅' if pct > 0 else '➖' if abs(pct) < 1e-9 else '❌'} ${v['ticker']} {side_w(v)} {pc(pct, 1)} ({kind}{', ' + str(days(v)) + ' дн.' if days(v) else ''})")
-    L.append("\nСумма — простая сумма результатов сделок в % к цене входа, без плеча и комиссий; убыточные сделки тоже в списке.")
+    L.append("\nСумма — простая сумма результатов сделок в % к цене входа, без плеча и комиссий; убыточные сделки тоже в списке. "
+             "Результат — мой итог при закрытии идеи, если процента нет — по уровням.")
+    rl = record_line()
+    if rl:
+        L += ["", rl]
+    L += ["", FEAT["honest"]]
     os.makedirs(OUT, exist_ok=True)
     p = hbars([(f"{v['ticker']} {side_w(v, True)}", pct * 100, None) for _, v, pct, _, _ in rows], os.path.join(OUT, f"month_{key}.png"),
               f"Сделки за {MONTHS[m - 1]} {y}: {wins} из {len(rows)} в плюс", xlabel="результат, % к цене входа", fmt_v=lambda x: f"{x:+.1f}%".replace(".", ","))
     if p:
         stamp(p, f"{MONTHS[m - 1].capitalize()} {y}: {pc(tot, 1)} · {wins}/{len(rows)} в плюс", UP if tot >= 0 else DN, bottom_line())
     deliver(f"итоги за {MONTHS[m - 1]} {y}", "\n".join(L) + footer("#итоги"), [p])
+    return True
+
+
+def d_record():
+    """Вся статистика закрытых идей канала с первой сделки — главный аргумент доверия."""
+    rec = IC.record(ideas())
+    if not rec:
+        return None
+    rows = sorted(rec["rows"], key=lambda z: int(z[1].get("closed_t") or z[1].get("t") or 0))
+    since = f" с {dm(rec['first_t'], True)}" if rec.get("first_t") else ""
+    L = [f"📒 Все мои сделки из Telegram-канала{since}", "",
+         f"Закрыто идей: {rec['n']} · в плюс {rec['wins']} · в минус {rec['losses']} · сумма {pc(rec['sum_pct'], 1)} ({Rs(rec['sum_R'])})"
+         + (f", в среднем {Rs(rec['avg_R'], 2)} на сделку" if rec.get("avg_R") is not None else "") + ".", ""]
+    for iid, v, r in rows[-12:]:
+        L.append(f"{'✅' if r['pct'] > 0 else '➖' if abs(r['pct']) < 1e-9 else '❌'} {dm(v.get('closed_t'))} ${v['ticker']} {side_w(v)} {pc(r['pct'], 1)}")
+    if len(rows) > 12:
+        L.append(f"…и ещё {len(rows) - 12} — полный список в канале.")
+    L += ["", "R — результат в рисках сделки (расстояние от входа до стопа). Без плеча и комиссий.", "", FEAT["honest"], FEAT["idea"]]
+    os.makedirs(OUT, exist_ok=True)
+    acc, pts = 0.0, []
+    for iid, v, r in rows:
+        acc += r["R"] or 0
+        pts.append((f"{dm(v.get('closed_t'))} {v['ticker']}", acc, None))
+    p = hbars(pts[-15:], os.path.join(OUT, f"record_{int(time.time())}.png"), "Накопленный результат сделок, R", xlabel="сумма R с первой идеи",
+              fmt_v=lambda x: f"{x:+.1f}R".replace(".", ","))
+    if p:
+        stamp(p, f"{rec['n']} {plural(rec['n'], 'сделка', 'сделки', 'сделок')} · {rec['wins']} в плюс · {Rs(rec['sum_R'])}", UP if rec["sum_R"] >= 0 else DN, bottom_line())
+    deliver("вся статистика сделок", "\n".join(L) + footer("#итоги #статистика"), [p])
     return True
 
 
@@ -309,6 +428,7 @@ def d_market():
     if len(L) <= 2:
         return None
     L.append("\nПеревес — доля оборота, где инициатором была покупка или продажа по рынку (данные Мосбиржи).")
+    L += ["", FEAT["anom"], FEAT["news"]]
     p = None
     if rows:
         os.makedirs(OUT, exist_ok=True)
@@ -382,13 +502,13 @@ def on_message(m):
     text = (m.get("text") or "").strip()
     if uid not in ADMINS:
         return say(m["chat"]["id"], "Это служебный бот автора канала: он готовит посты для Пульса." + (f" Канал: {LINK}" if LINK else ""))
-    if ST["wiz"].get(str(uid)) == "custom" and text and not text.startswith(("/", "📊", "🧾", "🗞", "✍️", "🔗")):
+    if ST["wiz"].get(str(uid)) == "custom" and text and not text.startswith(("/", "📊", "🧾", "🗞", "✍️", "🔗", "🏆")):
         ST["wiz"].pop(str(uid), None)
         save()
         return d_custom(text)
     if text in ("/start", "/menu", "меню"):
         return say(uid, "Готовлю посты для Пульса с картинками, результатами ваших сделок и ссылкой на канал. "
-                        "Черновики по идеям (тизер, тейк, итог, итоги месяца) приходят сами.", KB)
+                        "Сделки беру из ваших идей в Telegram-канале; черновики (тизер, тейк, итог, итоги месяца) приходят сами.", KB)
     if text.startswith("📊"):
         if not d_month():
             say(uid, "За прошлый месяц закрытых идей нет. Итоги текущего: /month " + time.strftime("%Y-%m", time.gmtime(time.time() + MSK)))
@@ -403,6 +523,9 @@ def on_message(m):
         kb = {"inline_keyboard": [[{"text": f"#{iid} {v['ticker']} {side_w(v, True)}" + (" · итог" if v.get("closed") else ""), "callback_data": f"pc:{iid}"},
                                    {"text": "тизер", "callback_data": f"pt:{iid}"}] for iid, v in cur]}
         say(uid, "Последние идеи — пост с итогом (для закрытых) или тизер:", kb)
+    elif text.startswith("🏆"):
+        if not d_record():
+            say(uid, "Закрытых идей пока нет — статистика появится после первой закрытой идеи в канале.")
     elif text.startswith("🗞"):
         if not d_market():
             say(uid, "Данных о потоках за сегодня ещё нет (пост «Покупатели vs продавцы» выходит с 10:00).")
