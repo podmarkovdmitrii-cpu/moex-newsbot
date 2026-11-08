@@ -242,7 +242,7 @@ def parse_idea(text):
     risk = abs(entry - stop) / entry
     if risk > 0.25:
         return f"Стоп дальше 25% от входа ({risk:.0%}) — похоже на опечатку."
-    return {"ticker": ticker.upper(), "side": side, "entry": entry, "stop": stop, "takes": takes, "comment": comment.strip()[:300],
+    return {"ticker": ticker.upper(), "side": side, "entry": entry, "stop": stop, "stop0": stop, "takes": takes, "comment": comment.strip()[:300],
             "risk_pct": round(risk * 100, 2), "rr": round(abs(takes[0] - entry) / abs(entry - stop), 2)}
 
 
