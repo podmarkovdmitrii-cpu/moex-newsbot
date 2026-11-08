@@ -5,13 +5,12 @@
 администратору черновик: картинку (сохранить и прикрепить) и текст (нажать — скопируется) с тикерами, хэштегами,
 дисклеймером и ссылкой на Telegram-канал.
 
-Что бот присылает сам:
-  • новая закрытая идея в канале → тизер без уровней (тикер, сторона, потенциал, вероятность, срок; детали — в канале);
-  • идею открыли всем (кнопка «Открыть всем») → полный пост с уровнями;
-  • взят тейк → пост «тейк взят» с графиком и результатом;
-  • идея закрыта → итог сделки: результат в % и R, срок, график входа/выхода;
-  • 1-го числа после 12:00 → итоги сделок за прошлый месяц (таблица + картинка).
-Кнопки: итоги месяца, последние сделки (итог/тизер по любой), пост о рынке (потоки денег и аномалии дня),
+Что бот присылает сам — ровно 2 черновика в торговый день (будни):
+  • ~13:05 МСК — рынок в целом: индекс, секторы, кто растёт и падает, куда идут деньги, аномалии дня и прогноз модели;
+  • ~19:45 МСК — результаты открытых идей канала (% от входа, тейки, безубыток), закрытые сегодня, общая статистика,
+    взгляд на завтра: положение индекса относительно средних, перевес к закрытию, вероятные аномалии по модели.
+Черновики по каждому событию идеи (тизер, тейк, итог) и итоги месяца — кнопками; автоматически — только с PULSE_EVENTS=1.
+Кнопки: рынок днём, вечер (идеи и завтра), итоги месяца, последние сделки (итог/тизер по любой), вся статистика,
 свой текст → пост для Пульса, где ставить ссылку (в тексте / «в профиле» / без ссылки).
 
 Сделки — только идеи, опубликованные в Telegram-канале (paywall.py, файл paywall.json). Результат — итог, который автор
@@ -33,7 +32,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from common import BG, FG, UP, DN, BLUE, DISCLAIMER, fmt, pc, share_candles, candle_chart, hbars  # noqa: E402
+from common import BG, FG, UP, DN, BLUE, DISCLAIMER, fmt, pc, share_candles, index_candles, candle_chart, hbars, iss, table  # noqa: E402
 import ideas_calc as IC  # noqa: E402
 
 TOKEN = os.environ.get("TG_PULSE_TOKEN", "")
@@ -107,8 +106,9 @@ def tg_photo(chat, path, caption=""):
         log("sendPhoto", e)
 
 
-KB = {"keyboard": [[{"text": "📊 Итоги месяца"}, {"text": "🧾 Последние сделки"}],
-                   [{"text": "🗞 Пост о рынке"}, {"text": "✍️ Свой текст → пост"}],
+KB = {"keyboard": [[{"text": "🧭 Рынок днём"}, {"text": "🌙 Вечер: идеи и завтра"}],
+                   [{"text": "📊 Итоги месяца"}, {"text": "🧾 Последние сделки"}],
+                   [{"text": "✍️ Свой текст → пост"}],
                    [{"text": "🏆 Вся статистика"}, {"text": "🔗 Где ссылка на канал"}]], "resize_keyboard": True}
 
 
@@ -408,34 +408,193 @@ def d_record():
     return True
 
 
-def d_market():
-    def j(name):
-        for base in (STATE_DIR, os.path.join(os.environ.get("STATE_DIR", ""), "channel")):
-            try:
-                return json.load(open(os.path.join(base, name), encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                continue
+# ---------------- данные рынка ----------------
+SECT_IX = [("MOEXOG", "нефть и газ"), ("MOEXFN", "финансы"), ("MOEXMM", "металлы и добыча"), ("MOEXCN", "потребительский"),
+           ("MOEXEU", "электроэнергетика"), ("MOEXTL", "телеком"), ("MOEXCH", "химия"), ("MOEXTN", "транспорт"), ("MOEXRE", "недвижимость"),
+           ("MOEXIT", "IT")]
+
+
+def j(name):
+    """Файл состояния канала: посты по расписанию (CHANNEL_STATE_DIR) или детектор аномалий (STATE_DIR/channel)."""
+    for base in (STATE_DIR, os.path.join(os.environ.get("STATE_DIR", ""), "channel")):
+        try:
+            return json.load(open(os.path.join(base, name), encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+    return {}
+
+
+def today():
+    return time.strftime("%Y-%m-%d", time.gmtime(time.time() + MSK))
+
+
+def market():
+    """Индекс, секторы, лидеры по 60 самым ликвидным акциям — с Мосбиржи (ISS)."""
+    out = {"ix": {}, "sect": [], "md": []}
+    try:
+        ixm = {r["SECID"]: r for r in table(iss("engines/stock/markets/index/securities.json", **{"iss.only": "marketdata",
+                                                 "marketdata.columns": "SECID,CURRENTVALUE,LASTCHANGEPRC,UPDATETIME,TRADEDATE"}), "marketdata")}
+        out["ix"] = ixm.get("IMOEX") or {}
+        out["sect"] = [(n, ixm[s]["LASTCHANGEPRC"] / 100) for s, n in SECT_IX if (ixm.get(s) or {}).get("LASTCHANGEPRC") is not None]
+    except Exception as e:  # noqa: BLE001
+        log("индексы", e)
+    try:
+        md = table(iss("engines/stock/markets/shares/boards/TQBR/securities.json", **{"iss.only": "marketdata",
+                       "marketdata.columns": "SECID,LAST,LASTTOPREVPRICE,VALTODAY"}), "marketdata")
+        out["md"] = sorted([r for r in md if r.get("VALTODAY") and r.get("LAST")], key=lambda r: -r["VALTODAY"])[:60]
+    except Exception as e:  # noqa: BLE001
+        log("акции", e)
+    return out
+
+
+def last_prices(tks):
+    try:
+        md = table(iss("engines/stock/markets/shares/boards/TQBR/securities.json", securities=",".join(tks),
+                       **{"iss.only": "marketdata", "marketdata.columns": "SECID,LAST,LCURRENTPRICE"}), "marketdata")
+        return {r["SECID"]: r.get("LAST") or r.get("LCURRENTPRICE") for r in md if r.get("LAST") or r.get("LCURRENTPRICE")}
+    except Exception as e:  # noqa: BLE001
+        log("цены идей", e)
         return {}
-    fl, an = j("flows_last.json"), j("anomaly.json")
-    L, rows = ["🧭 Куда шли деньги на Мосбирже сегодня", ""], []
-    if fl.get("buyers") or fl.get("sellers"):
-        L.append("Перевес покупок: " + ", ".join(f"${t} {pc(v, 0)}" for t, v in (fl.get("buyers") or [])[:4]))
-        L.append("Перевес продаж: " + ", ".join(f"${t} {pc(v, 0)}" for t, v in (fl.get("sellers") or [])[:4]))
-        rows = [(t, v * 100, None) for t, v in (fl.get("buyers") or [])[:5] + (fl.get("sellers") or [])[:5]]
-    sent = (an.get("sent") or {}) if an.get("date") == time.strftime("%Y-%m-%d", time.gmtime(time.time() + MSK)) else {}
-    if sent:
-        L += ["", "⚡️ Резкие движения дня: " + ", ".join(f"${t} {pc(x[1], 1)}" for t, x in list(sent.items())[:5])]
-    if len(L) <= 2:
+
+
+def trend_line():
+    """Индекс относительно средних за 20 и 50 дней — без прогнозов, только положение."""
+    try:
+        B = index_candles("IMOEX", 120)
+        c = [b["c"] for b in B]
+        if len(c) < 50:
+            return ""
+        m20, m50 = sum(c[-20:]) / 20, sum(c[-50:]) / 50
+        w = (f"выше средних за 20 и 50 дней — краткосрочный тренд вверх" if c[-1] > m20 > m50 else
+             f"ниже средних за 20 и 50 дней — краткосрочный тренд вниз" if c[-1] < m20 < m50 else
+             f"между средними за 20 ({fmt(m20, 0)}) и 50 дней ({fmt(m50, 0)}) — без явного тренда")
+        return f"Индекс {w}; за 5 дней {pc(c[-1] / c[-6] - 1, 1)}."
+    except Exception as e:  # noqa: BLE001
+        log("тренд индекса", e)
+        return ""
+
+
+def dir_word(r):
+    pu = r.get("p_dir_up")
+    if pu is None:
+        up, dn = r.get("p_y_up") or 0, r.get("p_y_dn") or 0
+        pu = up / (up + dn) if up + dn > 0.01 else 0.5
+    return "направление неясно" if abs(pu - 0.5) < 0.1 else (f"скорее вверх ({pu:.0%})" if pu > 0.5 else f"скорее вниз ({1 - pu:.0%})")
+
+
+# ---------------- пост 1: рынок днём ----------------
+def d_market():
+    mk = market()
+    ix, md = mk["ix"], mk["md"]
+    if not ix and not md:
         return None
-    L.append("\nПеревес — доля оборота, где инициатором была покупка или продажа по рынку (данные Мосбиржи).")
+    L = [f"🧭 Рынок к середине дня · {time.strftime('%d.%m', time.gmtime(time.time() + MSK))}", ""]
+    if ix.get("CURRENTVALUE"):
+        L.append(f"Индекс МосБиржи {fmt(ix['CURRENTVALUE'], 0)} ({pc((ix.get('LASTCHANGEPRC') or 0) / 100, 2)})"
+                 + (f", оборот 60 крупнейших акций {fmt(sum(r['VALTODAY'] for r in md) / 1e9, 1)} млрд ₽." if md else "."))
+    if mk["sect"]:
+        sc = sorted(mk["sect"], key=lambda x: -x[1])
+        L.append(f"Сильнее рынка — {sc[0][0]} ({pc(sc[0][1], 1)}), слабее — {sc[-1][0]} ({pc(sc[-1][1], 1)}).")
+    if md:
+        up = [r for r in sorted(md, key=lambda r: -(r.get("LASTTOPREVPRICE") or 0))[:3] if (r.get("LASTTOPREVPRICE") or 0) > 0]
+        dn = [r for r in sorted(md, key=lambda r: (r.get("LASTTOPREVPRICE") or 0))[:3] if (r.get("LASTTOPREVPRICE") or 0) < 0]
+        parts = ([("Растут: " + ", ".join(f"${r['SECID']} {pc(r['LASTTOPREVPRICE'] / 100, 1)}" for r in up))] if up else []) + \
+                ([("падают: " if up else "Падают: ") + ", ".join(f"${r['SECID']} {pc(r['LASTTOPREVPRICE'] / 100, 1)}" for r in dn)] if dn else [])
+        if parts:
+            L.append("; ".join(parts) + ".")
+    fl = j("flows_last.json")
+    if (fl.get("time") or "")[:10] == today() and (fl.get("buyers") or fl.get("sellers")):
+        L += ["", "⚖️ Куда идут деньги (перевес покупок/продаж по рынку): покупают " + ", ".join(f"${t}" for t, _ in (fl.get("buyers") or [])[:3])
+              + "; продают " + ", ".join(f"${t}" for t, _ in (fl.get("sellers") or [])[:3]) + "."]
+    an = j("anomaly.json")
+    sent = (an.get("sent") or {}) if an.get("date") == today() else {}
+    if sent:
+        L.append("⚡️ Аномалии сегодня (резкое движение или всплеск оборота): "
+                 + ", ".join(f"${t} {pc(x[1], 1)}" if isinstance(x, list) and len(x) > 1 and x[1] is not None else f"${t}" for t, x in list(sent.items())[:5]) + ".")
+    pre = j("anom_today.json")
+    if pre.get("date") == today() and pre.get("rows"):
+        rows = pre["rows"]
+        top = [t for t in sorted(rows, key=lambda t: -(rows[t].get("p_y") or 0))[:3] if t not in sent]
+        if top:
+            L.append("🔮 Модель канала утром выделила (ещё не сработали): " + ", ".join(f"${t} {rows[t]['p_y']:.0%}, {dir_word(rows[t])}" for t in top) + ".")
     L += ["", FEAT["anom"], FEAT["news"]]
     p = None
-    if rows:
+    if mk["sect"]:
         os.makedirs(OUT, exist_ok=True)
-        p = hbars(rows, os.path.join(OUT, f"market_{int(time.time())}.png"), "Перевес покупок и продаж по рынку", fmt_v=lambda x: f"{x:+.0f}%")
+        p = hbars([(n.capitalize(), v * 100, None) for n, v in sorted(mk["sect"], key=lambda x: -x[1])], os.path.join(OUT, f"noon_{int(time.time())}.png"),
+                  "Секторы Мосбиржи сегодня, %", fmt_v=lambda x: f"{x:+.1f}%".replace(".", ","))
         if p:
-            stamp(p, "Куда шли деньги сегодня", BLUE, bottom_line())
-    deliver("пост о рынке", "\n".join(L) + footer("#рынок #потоки"), [p])
+            stamp(p, f"IMOEX {pc((ix.get('LASTCHANGEPRC') or 0) / 100, 2)} · середина дня", UP if (ix.get("LASTCHANGEPRC") or 0) >= 0 else DN, bottom_line())
+    deliver("рынок днём", "\n".join(L) + footer("#рынок #IMOEX"), [p])
+    return True
+
+
+# ---------------- пост 2: вечер — открытые идеи и взгляд на завтра ----------------
+def d_evening():
+    I = ideas()
+    op = {k: v for k, v in I.items() if not v.get("closed")}
+    closed_today = {k: v for k, v in I.items() if v.get("closed") and dm(v.get("closed_t"), True) == dm(time.time(), True)}
+    px = last_prices(sorted({v["ticker"] for v in op.values()})) if op else {}
+    L = [f"🌙 Мои идеи и рынок на завтра · {time.strftime('%d.%m', time.gmtime(time.time() + MSK))}", ""]
+    rows = []
+    if op:
+        L.append(f"📂 Открытые идеи из канала ({len(op)}):")
+        for iid, v in sorted(op.items(), key=lambda kv: int(kv[0])):
+            p_ = px.get(v["ticker"])
+            if not p_:
+                continue
+            mv = (p_ - v["entry"]) * v["side"] / v["entry"]
+            hit = len(v.get("hit") or [])
+            st = []
+            if hit:
+                st.append(f"тейков {hit} из {len(v['takes'])}")
+            if v.get("be"):
+                st.append("стоп в безубытке")
+            L.append(f"{'🟢' if mv > 0 else '🔴' if mv < 0 else '⚪️'} ${v['ticker']} {side_w(v)}: {pc(mv, 1)} от входа"
+                     + (f", {days(v)} дн." if days(v) else "") + (f" ({', '.join(st)})" if st else ""))
+            rows.append((f"{v['ticker']} {side_w(v, True)}", mv * 100, None))
+        if rows:
+            L.append(f"Средний результат открытых идей: {pc(sum(r[1] for r in rows) / len(rows) / 100, 1)} (цена на {time.strftime('%H:%M', time.gmtime(time.time() + MSK))} МСК, без комиссий).")
+    else:
+        L.append("📂 Открытых идей сейчас нет — новые публикую в канале до входа.")
+    if closed_today:
+        L += ["", "🏁 Закрыты сегодня:"]
+        for iid, v in closed_today.items():
+            pct, R, kind = outcome(v)
+            L.append(f"{'✅' if pct > 0 else '❌' if pct < 0 else '➖'} ${v['ticker']} {side_w(v)}: {pc(pct, 1)}, {Rs(R)} ({kind})")
+    rl = record_line()
+    if rl:
+        L += ["", rl]
+    # взгляд на завтра — только факты и модель, без рекомендаций
+    mk = market()
+    ix = mk["ix"]
+    L += ["", "🔭 На завтра:"]
+    if ix.get("CURRENTVALUE"):
+        L.append(f"Индекс МосБиржи {fmt(ix['CURRENTVALUE'], 0)} ({pc((ix.get('LASTCHANGEPRC') or 0) / 100, 2)} за день). " + trend_line())
+    fl = j("flows_last.json")
+    if (fl.get("time") or "")[:10] == today() and fl.get("buyers"):
+        L.append("К закрытию деньги шли в " + ", ".join(f"${t}" for t, _ in fl["buyers"][:3]) + "; из " + ", ".join(f"${t}" for t, _ in (fl.get("sellers") or [])[:3]) + ".")
+    nx = j("anom_next.json")
+    if nx.get("rows") and (nx.get("made") or "")[:10] == today():
+        r_ = nx["rows"]
+        top = sorted(r_, key=lambda t: -(r_[t].get("p_y") or 0))[:4]
+        L.append("Модель аномалий ждёт резкое движение или всплеск оборота: " + "; ".join(f"${t} {r_[t]['p_y']:.0%}, {dir_word(r_[t])}" for t in top) + ".")
+    L += ["", FEAT["honest"]]
+    p = None
+    os.makedirs(OUT, exist_ok=True)
+    if rows:
+        p = hbars(rows, os.path.join(OUT, f"eve_{int(time.time())}.png"), "Открытые идеи: результат от входа, %", fmt_v=lambda x: f"{x:+.1f}%".replace(".", ","))
+        if p:
+            avg = sum(r[1] for r in rows) / len(rows) / 100
+            stamp(p, f"Открытые идеи · {len(rows)} · в среднем {pc(avg, 1)}", UP if avg >= 0 else DN, bottom_line())
+    else:
+        try:
+            p = candle_chart(index_candles("IMOEX", 260), os.path.join(OUT, f"eve_ix_{int(time.time())}.png"), "Индекс МосБиржи · дневной график", n=90, dec=0)
+            if p:
+                stamp(p, f"IMOEX {pc((ix.get('LASTCHANGEPRC') or 0) / 100, 2)} · итоги дня", UP if (ix.get("LASTCHANGEPRC") or 0) >= 0 else DN, bottom_line())
+        except Exception as e:  # noqa: BLE001
+            log("график индекса", e)
+    deliver("вечер: идеи и взгляд на завтра", "\n".join(L) + footer("#идеи #рынок"), [p])
     return True
 
 
@@ -455,6 +614,33 @@ def d_custom(text):
 
 
 # ---------------- события из закрытых идей ----------------
+NOON, EVE = (13, 5), (19, 45)  # МСК: пост о рынке и вечерний пост (будни)
+
+
+def check_schedule():
+    """Ровно два черновика в торговый день: ~13:05 — рынок, ~19:45 — открытые идеи и взгляд на завтра."""
+    t = time.gmtime(time.time() + MSK)
+    if t.tm_wday >= 5:
+        return
+    d, hm = today(), (t.tm_hour, t.tm_min)
+    day = ST.setdefault("daily", {})
+    if day.get("d") != d:
+        day.clear()
+        day["d"] = d
+    try:
+        if NOON <= hm < (16, 0) and not day.get("noon"):
+            day["noon"] = True
+            save()
+            d_market()
+        if EVE <= hm < (23, 30) and not day.get("eve"):
+            day["eve"] = True
+            save()
+            d_evening()
+    except Exception as e:  # noqa: BLE001
+        log("плановый пост", e)
+    save()
+
+
 def check_events():
     cur = ideas()
     seen = ST["seen"]
@@ -502,13 +688,14 @@ def on_message(m):
     text = (m.get("text") or "").strip()
     if uid not in ADMINS:
         return say(m["chat"]["id"], "Это служебный бот автора канала: он готовит посты для Пульса." + (f" Канал: {LINK}" if LINK else ""))
-    if ST["wiz"].get(str(uid)) == "custom" and text and not text.startswith(("/", "📊", "🧾", "🗞", "✍️", "🔗", "🏆")):
+    if ST["wiz"].get(str(uid)) == "custom" and text and not text.startswith(("/", "📊", "🧾", "🗞", "🧭", "🌙", "✍️", "🔗", "🏆")):
         ST["wiz"].pop(str(uid), None)
         save()
         return d_custom(text)
     if text in ("/start", "/menu", "меню"):
         return say(uid, "Готовлю посты для Пульса с картинками, результатами ваших сделок и ссылкой на канал. "
-                        "Сделки беру из ваших идей в Telegram-канале; черновики (тизер, тейк, итог, итоги месяца) приходят сами.", KB)
+                        "Сделки беру из ваших идей в Telegram-канале. Сам присылаю 2 черновика в торговый день: ~13:05 — рынок в целом, "
+                        "~19:45 — результаты открытых идей и взгляд на завтра. Остальное — кнопками.", KB)
     if text.startswith("📊"):
         if not d_month():
             say(uid, "За прошлый месяц закрытых идей нет. Итоги текущего: /month " + time.strftime("%Y-%m", time.gmtime(time.time() + MSK)))
@@ -526,9 +713,11 @@ def on_message(m):
     elif text.startswith("🏆"):
         if not d_record():
             say(uid, "Закрытых идей пока нет — статистика появится после первой закрытой идеи в канале.")
-    elif text.startswith("🗞"):
+    elif text.startswith(("🧭", "🗞")):
         if not d_market():
-            say(uid, "Данных о потоках за сегодня ещё нет (пост «Покупатели vs продавцы» выходит с 10:00).")
+            say(uid, "Нет данных Мосбиржи — попробуйте позже.")
+    elif text.startswith("🌙"):
+        d_evening()
     elif text.startswith("✍️"):
         ST["wiz"][str(uid)] = "custom"
         save()
@@ -576,7 +765,9 @@ def main():
     while True:
         if time.time() - last > 60:
             last = time.time()
-            check_events()
+            check_schedule()
+            if os.environ.get("PULSE_EVENTS") == "1":  # черновики по каждому событию идеи (по умолчанию выключено: 2 поста в день)
+                check_events()
         ups = tg("getUpdates", {"offset": ST["offset"], "timeout": 25, "allowed_updates": ["message", "callback_query"]}, timeout=40) or []
         for u in ups:
             ST["offset"] = u["update_id"] + 1
