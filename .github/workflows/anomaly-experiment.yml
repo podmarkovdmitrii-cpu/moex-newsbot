@@ -1,0 +1,58 @@
+name: Проверка идей для модели аномалий (история с 2008 г.)
+
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: 'Сколько последних лет проверять (обучение на всех предыдущих)'
+        default: '10'
+
+concurrency:
+  group: anomaly-model
+  cancel-in-progress: false
+
+jobs:
+  experiment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Библиотеки
+        run: pip install --quiet "scikit-learn==1.5.2" pandas numpy matplotlib
+      - name: Кэш исторических свечей (тот же, что у обучения модели)
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
+          restore-keys: anomaly-data-
+      - name: Журнал новостей бота
+        uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - name: Проверка идей на годах, которых модель не видела
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-exp
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          EXP_YEARS: ${{ inputs.years }}
+          EXP_BUDGET_MIN: '320'
+        run: python newsbot/anomaly/experiment.py
+      - name: Отчёт (файл)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp-report
+          path: anomaly-exp/exp_report.json
+          if-no-files-found: ignore
+      - name: Сохранить свечи и историю срочного рынка
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
