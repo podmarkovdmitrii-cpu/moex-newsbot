@@ -23,6 +23,7 @@
 
 Это статистика прошлого, а не гарантия: формулировки «точно пойдём» бот не использует.
 """
+import datetime as dt
 import json
 import math
 import os
@@ -56,16 +57,20 @@ _CACHE = {}
 
 
 def load(ticker):
-    """Дневные свечи за 10 лет и часовые за ~5 месяцев; кэш на 30 минут."""
-    import time
+    """Дневные свечи за 10 лет и часовые за ~5 месяцев (качаются параллельно); кэш на 30 минут."""
+    from concurrent.futures import ThreadPoolExecutor
     hit = _CACHE.get(ticker)
     if hit and time.time() - hit[0] < 1800:
         return hit[1]
-    d = C.candles(f"engines/stock/markets/shares/boards/TQBR/securities/{ticker}/candles.json", 365 * 10, 24)
-    try:
-        hh = _arr(C.candles(f"engines/stock/markets/shares/boards/TQBR/securities/{ticker}/candles.json", 150, 60))
-    except Exception:  # noqa: BLE001  — без часовых считаем по дневным
-        hh = None
+    path = f"engines/stock/markets/shares/boards/TQBR/securities/{ticker}/candles.json"
+    with ThreadPoolExecutor(2) as ex:
+        fd = ex.submit(C.candles, path, 365 * 10, 24)
+        fh = ex.submit(C.candles, path, 150, 60)
+        d = fd.result()
+        try:
+            hh = _arr(fh.result())
+        except Exception:  # noqa: BLE001  — без часовых считаем по дневным
+            hh = None
     res = (_arr(d), hh)
     _CACHE[ticker] = (time.time(), res)
     return res
@@ -107,34 +112,32 @@ LAST_WIN_BARS = []  # сколько баров шли до цели в выиг
 
 
 def first_touch(a, atr, side, a_s, a_t, H, idx):
-    """Для каждого бара i из idx: вход по закрытию, стоп a_s·ATR_i, цель a_t·ATR_i. Возвращает (цель, стоп, не дошло)."""
+    """Для каждого бара i из idx: вход по закрытию, стоп a_s·ATR_i, цель a_t·ATR_i. Возвращает (цель, стоп, не дошло).
+
+    Считается сразу матрицей «бар входа × следующие H баров» (numpy) — в десятки раз быстрее цикла по барам.
+    Если в одном баре задеты и стоп, и цель — считается стоп."""
+    from numpy.lib.stride_tricks import sliding_window_view
     LAST_WIN_BARS.clear()
     h, l, c = a["h"], a["l"], a["c"]
     n = len(c)
-    win = loss = tout = 0
-    for i in idx:
-        A = atr[i]
-        if not (A > 0) or i + 1 >= n:
-            continue
-        E = c[i]
-        S = E - side * a_s * A
-        T = E + side * a_t * A
-        res = 0
-        for k in range(i + 1, min(n, i + 1 + H)):
-            if (side > 0 and l[k] <= S) or (side < 0 and h[k] >= S):
-                res = -1
-                break
-            if (side > 0 and h[k] >= T) or (side < 0 and l[k] <= T):
-                res = 1
-                LAST_WIN_BARS.append(k - i)
-                break
-        if res > 0:
-            win += 1
-        elif res < 0:
-            loss += 1
-        elif i + H < n:
-            tout += 1
-    return win, loss, tout
+    idx = np.asarray([i for i in idx if i + 1 < n and atr[i] > 0], dtype=int)
+    if not len(idx):
+        return 0, 0, 0
+    pad = np.full(H, np.nan)
+    Wh = sliding_window_view(np.r_[h[1:], pad], H)[idx]  # строка i — бары i+1 … i+H
+    Wl = sliding_window_view(np.r_[l[1:], pad], H)[idx]
+    E, A = c[idx], atr[idx]
+    S = (E - side * a_s * A)[:, None]
+    T = (E + side * a_t * A)[:, None]
+    stop, take = (Wl <= S, Wh >= T) if side > 0 else (Wh >= S, Wl <= T)
+    big = H + 1
+    fs = np.where(stop.any(1), stop.argmax(1), big)
+    ft = np.where(take.any(1), take.argmax(1), big)
+    loss = (fs < big) & (fs <= ft)
+    win = (ft < big) & (ft < fs)
+    tout = ~(loss | win) & (idx + H < n)
+    LAST_WIN_BARS.extend((ft[win] + 1).tolist())
+    return int(win.sum()), int(loss.sum()), int(tout.sum())
 
 
 def prob(a, side, a_s, a_t, H, step=1, similar=None):
@@ -416,9 +419,6 @@ def analyze(ticker, side, E, S, T, data=None, last=None):
 # ---------------------------------------------------------------------------------------------
 # Модель аномалий (та же, что у бота в канале: anomaly/train.py → прогноз дня + сценарии сделки)
 # ---------------------------------------------------------------------------------------------
-_AN = {}
-
-
 def _jobs():
     import jobs as JB  # noqa: WPS433 — тяжёлый модуль, грузим только при разборе
     return JB
@@ -438,48 +438,25 @@ def _base(meta, name, dflt):
 
 
 def anom_features(t):
-    """Признаки и вероятности аномалий по бумаге: из утреннего прогноза канала, иначе считаем по одной бумаге (кэш 30 мин)."""
+    """Признаки и вероятности аномалий по бумаге — из прогноза, который бот канала уже посчитал (утром на день, вечером
+    на следующий день). Сам разбор прогноз на 250 бумаг не пересчитывает: это занимало минуты и задерживало ответ.
+    Если свежего прогноза нет — берётся последний за неделю (с пометкой даты), иначе блок модели пропускается."""
     JB = _jobs()
     f = JB.anom_features(t)
     if f:
         return f, "прогноз канала на день"
-    live = JB.anom_live()
-    if not live.ready():
-        return None, None
-    now = JB.now_msk()
-    day = now.date() if now.weekday() < 5 and now.hour < 19 else JB.next_wd(now.date())
-    key = (t, day.isoformat())
-    if key in _AN and time.time() - _AN[key][0] < 1800:
-        return _AN[key][1], "расчёт по бумаге"
-    # прогноз канала на день ещё не посчитан — считаем его (250 самых торгуемых бумаг, сохраняется для канала)
-    try:
-        out = JB.anom_pre() if day == now.date() else JB.anom_next(now)
-        if out and t in (out.get("rows") or {}):
-            return out["rows"][t], "прогноз канала на день"
-    except Exception as e:  # noqa: BLE001
-        print("[разбор идеи] прогноз дня:", e, flush=True)
-    try:
-        import divs
-        upc = divs.upcoming(60)
-    except Exception:  # noqa: BLE001
-        upc = []
-    impact = json.load(open(os.path.join(HERE, "..", "impact.json"), encoding="utf-8"))
-    # часть признаков считается относительно рынка (ранг оборота, средние по рынку) — считаем вместе с ликвидными бумагами
-    tick = list(dict.fromkeys(JB.top_stocks(120) + [t]))
-    X = live.daily_probs(tick, day.isoformat(), JB.DIVS, upc, JB.NEWS_STATE, impact)
-    if t not in X.index:
-        return None, None
-    r = X.loc[t]
-    d = {}
-    for k in r.index:
-        try:
-            v = float(r[k])
-            d[k] = None if v != v else v
-        except (TypeError, ValueError):
-            continue
-    d["why"] = live.reasons({k: (v if v is not None else 0) for k, v in d.items()})
-    _AN[key] = (time.time(), d)
-    return d, "расчёт по бумаге"
+    today = JB.now_msk().date()
+    best = None
+    for base in (None, os.path.join(JB.NEWS_STATE, "channel")):
+        for name in ("anom_today.json", "anom_next.json"):
+            cur = JB.load_json(name, {}, base)
+            d = cur.get("date") or ""
+            if t in (cur.get("rows") or {}) and d >= (today - dt.timedelta(days=7)).isoformat():
+                if best is None or d > best[0]:
+                    best = (d, cur["rows"][t])
+    if best:
+        return best[1], f"прогноз канала от {best[0][8:10]}.{best[0][5:7]}"
+    return None, None
 
 
 def _R(x):
@@ -616,7 +593,7 @@ def report(r):
         for ic, t in an["flags"]:
             L.append(f"{ic} {t}")
     else:
-        L.append("Прогноза нет (модель ещё не обучена или бумага не торгуется на TQBR) — заключение только по истории.")
+        L.append("Прогноза модели по бумаге нет (бумага вне 250 самых ликвидных или бот канала ещё не посчитал прогноз дня) — заключение только по истории.")
     L.append("")
     L.append(f"<b>Заключение: {r['verdict']}</b>")
     pf = r.get("p_final", r["p"])

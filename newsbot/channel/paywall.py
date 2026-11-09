@@ -51,6 +51,12 @@ RUN_MIN = float(os.environ.get("PAYWALL_MIN") or (float(os.environ.get("NEWS_LOO
 DISCLAIMER = "Не является индивидуальной инвестиционной рекомендацией."
 DAY = 86400
 LOCK = threading.RLock()  # разбор идеи идёт в отдельном потоке
+# Разбор идеи (idea_judge → jobs/common) берёт прогноз модели аномалий из состояния новостного бота. bot.js передаёт
+# своим задачам NEWS_STATE/CHANNEL_STATE, а этот процесс запускается отдельно — без них разбор не находил готовый
+# прогноз и пересчитывал его по 250 бумагам (минуты на каждую идею).
+if os.environ.get("STATE_DIR"):
+    os.environ.setdefault("NEWS_STATE", os.environ["STATE_DIR"])
+    os.environ.setdefault("CHANNEL_STATE", os.path.join(os.environ["STATE_DIR"], "channel"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import menu as MENU  # noqa: E402  (кнопки меню и пошаговые сценарии)
 
@@ -501,7 +507,7 @@ def on_message(msg):
                     warn = "⚠️ " + warn
         if warn:
             say(uid, html.escape(warn))
-        say(uid, "⏳ Разбираю идею: история бумаги и модель аномалий (обычно до минуты, первый разбор за день — до 3 минут)…")
+        say(uid, "⏳ Разбираю идею: история бумаги и модель аномалий (обычно 10–30 секунд)…")
         judge_async(uid, idea, publish=(cmd == "/idea"))
     elif cmd == "/ideas" and admin:
         last = sorted(S["ideas"].items(), key=lambda kv: -int(kv[0]))[:15]

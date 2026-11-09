@@ -290,7 +290,7 @@ def finish_new(uid, w):
         return menu(uid, html.escape(idea))
     if d.get("last"):
         idea["name"] = d["ticker"]
-    menu(uid, "⏳ Разбираю идею: история бумаги и модель аномалий (обычно до минуты, первый разбор за день — до 3 минут)…")
+    menu(uid, "⏳ Разбираю идею: история бумаги и модель аномалий (обычно 10–30 секунд)…")
     PW.judge_async(uid, idea, publish=True)
 
 
