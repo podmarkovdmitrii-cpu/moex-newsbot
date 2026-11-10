@@ -508,7 +508,9 @@ class Publisher:
             log("названия компаний не добавлены:", e)
         """text — HTML; photos — [(path, подпись)]; document — (path, подпись). Возвращает ссылку на пост в Telegram.
         live — ключ «живого» поста: первый вызов за день публикует пост, следующие в тот же день редактируют его
-        (картинка и подпись — editMessageMedia, продолжение — editMessageText), новых постов в ленте не появляется."""
+        (картинка и подпись — editMessageMedia, продолжение — editMessageText), новых постов в ленте не появляется.
+        self.sent — отправленные сообщения [{id, kind: caption|text, html}] (чтобы потом точечно отредактировать блок)."""
+        self.sent = []
         if ai_lead:
             try:
                 import ai
@@ -575,14 +577,17 @@ class Publisher:
                 with open(photos[0][0], "rb") as f:
                     pm = self._tg("sendPhoto", {"chat_id": self.tg_chat, "caption": cap or photos[0][1][:1000], "parse_mode": "HTML"}, {"photo": (os.path.basename(photos[0][0]), f.read())})
                 link = photo_link = self.tg_link(pm)
+                self.sent.append({"id": pm["message_id"], "kind": "caption", "html": cap or photos[0][1][:1000]})
                 rest = "\n\n".join(blocks[k:]) if cap else text
                 if rest.strip() and cap and disc:
                     rest += "\n\n" + disc
                 # продолжение — ответом на пост с картинкой (видно, к чему оно относится)
                 for j, part in enumerate(split_text(rest, 3980) if rest.strip() else []):
-                    self._tg("sendMessage", {"chat_id": self.tg_chat, "text": ("↑ <b>Продолжение</b>\n" if j == 0 and cap else "") + part, "parse_mode": "HTML",
-                                             "disable_web_page_preview": True,
-                                             "reply_parameters": {"message_id": pm["message_id"], "allow_sending_without_reply": True}})
+                    body = ("↑ <b>Продолжение</b>\n" if j == 0 and cap else "") + part
+                    m = self._tg("sendMessage", {"chat_id": self.tg_chat, "text": body, "parse_mode": "HTML",
+                                                 "disable_web_page_preview": True,
+                                                 "reply_parameters": {"message_id": pm["message_id"], "allow_sending_without_reply": True}})
+                    self.sent.append({"id": m["message_id"], "kind": "text", "html": body})
             except Exception as e:  # noqa: BLE001
                 log("Telegram: ошибка", e)
         elif self.tg_chat:
@@ -591,6 +596,7 @@ class Publisher:
                 for part in split_text(text, 4000):
                     m = self._tg("sendMessage", {"chat_id": self.tg_chat, "text": part, "parse_mode": "HTML", "disable_web_page_preview": True})
                     first = first or m
+                    self.sent.append({"id": m["message_id"], "kind": "text", "html": part})
                 link = self.tg_link(first)
                 for k in range(0, len(photos), 10):
                     chunk = photos[k:k + 10]

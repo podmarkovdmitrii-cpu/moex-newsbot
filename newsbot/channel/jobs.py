@@ -1588,12 +1588,7 @@ def evening():
         for t in ntop:
             if (nr[t].get("p_y") or 0) >= 0.15:
                 focus.setdefault(t, []).insert(0, f"вероятность аномалии {nr[t]['p_y']:.0%}, {anom_dir_word(nr[t])}")
-        txt += ["", f"🔮 <b>Вероятные аномалии на {dt.date.fromisoformat(nxt['date']).strftime('%d.%m')}</b> (модель; утром в плане дня — уточнение с ночными новостями):"]
-        for t in ntop:
-            r = nr[t]
-            txt.append(f"• <b>${t}</b> — {r['p_y']:.0%} (ценовая {r.get('p_y_px') or 0:.0%}), {anom_dir_word(r)}" + (": " + "; ".join((r.get("why") or [])[:3]).replace("вчера", "сегодня") if r.get("why") else ""))
-        base = sum((r.get("p_y") or 0) for r in nr.values()) / max(1, len(nr))
-        txt.append(f"<i>В среднем по {len(nr)} бумагам — {pc(base, 1, False)}. " + anom_dir_note("daily_dir", "утром") + "</i>")
+        txt += [""] + anom_next_block(nxt)
     try:
         nm = news_movers(md, now, (nxt or {}).get("rows"))
     except Exception as e:  # noqa: BLE001
@@ -1617,6 +1612,11 @@ def evening():
     txt.append("#итоги_дня")
     img = hbars([(n, v / 100, None) for n, v in sorted(secs, key=lambda x: -x[1])], os.path.join(OUT, "evening.png"), f"Отраслевые индексы МосБиржи за {now.strftime('%d.%m')}", fmt_v=lambda v: pc(v, 2)) if secs else None
     PUB.post("\n".join(txt), [(img, "Отраслевые индексы за день")] if img else None)
+    if nxt and nxt.get("rows"):  # сообщение с прогнозом на завтра — ночью его обновит пересчёт после вечерней сессии
+        for m in getattr(PUB, "sent", []) or []:
+            if ANB_HEAD in m["html"]:
+                save_json_to(EVE_MSG, dict(m, date=now.date().isoformat(), target=nxt["date"]), os.environ.get("CHANNEL_STATE_DIR"))
+                break
 
 
 # =============================================================================================
@@ -2107,18 +2107,103 @@ def anom_dir_word(r):
     return f"⬆️ вверх {pu:.0%}" if pu > 0.5 else f"⬇️ вниз {1 - pu:.0%}"
 
 
-def anom_next(now=None):
-    """Прогноз аномалий на следующий торговый день по данным сегодняшней сессии (для итогов дня)."""
+ANB_HEAD = "🔮 <b>Вероятные аномалии на"
+EVE_MSG = "evening_anom_msg.json"
+
+
+def save_json_to(name, obj, base=None):
+    """save_json в указанную папку состояния (вечерний пост пишет в CHANNEL_STATE_DIR, ночной пересчёт читает оттуда же)."""
+    if not base:
+        return save_json(name, obj)
+    os.makedirs(base, exist_ok=True)
+    with open(os.path.join(base, name), "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, default=str)
+
+
+def anom_next_block(nxt):
+    """Строки блока «Вероятные аномалии на …» вечернего поста (тот же текст при ночном обновлении)."""
+    nr = nxt["rows"]
+    ntop = sorted(nr, key=lambda t: -(nr[t].get("p_y") or 0))[:8]
+    when = ("пересчитано после вечерней сессии, " + str(nxt.get("made", ""))[11:16] if nxt.get("final")
+            else "предварительно: торги дня ещё идут, после закрытия вечерней сессии блок обновится")
+    L = [f"{ANB_HEAD} {dt.date.fromisoformat(nxt['date']).strftime('%d.%m')}</b> (модель; {when}; утром в плане дня — уточнение с ночными новостями):"]
+    for t in ntop:
+        r = nr[t]
+        why = "; ".join((r.get("why") or [])[:3])
+        if not nxt.get("final"):  # вечером «вчера» в причинах — это сегодняшний день; ночное обновление читают уже назавтра
+            why = why.replace("вчера", "сегодня")
+        L.append(f"• <b>${t}</b> — {r['p_y']:.0%} (ценовая {r.get('p_y_px') or 0:.0%}), {anom_dir_word(r)}" + (": " + why if why else ""))
+    base = sum((r.get("p_y") or 0) for r in nr.values()) / max(1, len(nr))
+    L.append(f"<i>В среднем по {len(nr)} бумагам — {pc(base, 1, False)}. " + anom_dir_note("daily_dir", "утром") + "</i>")
+    return L
+
+
+def anom_next(now=None, final=False):
+    """Прогноз аномалий на следующий торговый день по данным сегодняшней сессии (для итогов дня, Пульса, сценариев).
+
+    Один расчёт на вечер для всех: новостной бот считает его в начале вечера (STATE_DIR/channel), вечерний пост и бот
+    для Пульса берут готовый, а не пересчитывают (раньше каждый считал свой — цифры расходились). final=True — пересчёт
+    после закрытия вечерней сессии (23:55–01:00 МСК): свеча дня уже полная, как в истории, на которой учили модель, и как
+    в утреннем прогнозе; вечерний расчёт идёт по незаконченному дню и поэтому заметно отличается от утреннего."""
     now = now or now_msk()
-    day = next_wd(now.date()).isoformat()
-    cur = load_json("anom_next.json", {})
-    if cur.get("date") == day and cur.get("made", "")[:10] == now.date().isoformat():
-        return cur
+    eve = (now - dt.timedelta(hours=3)).date()  # вечер, к которому относится прогноз (после полуночи — вчерашний)
+    day = next_wd(eve).isoformat()
+    for base in (None, os.path.join(NEWS_STATE, "channel"), os.environ.get("CHANNEL_STATE_DIR")):
+        cur = load_json("anom_next.json", {}, base)
+        if cur.get("date") == day and (cur.get("eve") or str(cur.get("made", ""))[:10]) == eve.isoformat() and cur.get("rows") \
+                and (cur.get("final") or not final):
+            return cur
     out = anom_pre(force=True, day=day)
     if out:
-        out["made"] = now.isoformat()
+        out.update(made=now.isoformat(), eve=eve.isoformat(), final=bool(final))
         save_json("anom_next.json", out)
     return out
+
+
+def anom_final():
+    """Ночной пересчёт прогноза на завтра по полной свече дня + обновление блока прогноза в вечернем посте канала."""
+    now = now_msk()
+    nxt = anom_next(now, final=True)
+    if not nxt or not nxt.get("rows"):
+        log("ночной прогноз на завтра: не посчитан")
+        return
+    rec = load_json(EVE_MSG, {}, os.environ.get("CHANNEL_STATE_DIR"))
+    if rec.get("target") != nxt["date"] or ANB_HEAD not in (rec.get("html") or ""):
+        log("ночной прогноз на завтра посчитан; вечернего поста с блоком прогноза нет — обновлять нечего")
+        return
+    html_ = rec["html"]
+    i = html_.index(ANB_HEAD)
+    j = html_.find("\n\n", i)
+    j = len(html_) if j < 0 else j
+    blk = "\n".join(anom_next_block(nxt))
+    try:
+        import names
+        blk = names.annotate(blk)
+    except Exception:  # noqa: BLE001
+        pass
+    new = html_[:i] + blk + html_[j:]
+    nr = nxt["rows"]
+
+    def upd(m):  # «$T — вероятность аномалии 45%, ⬆️ вверх 62%» в блоке «На что обратить внимание завтра»
+        r = nr.get(m.group(2))
+        return f"{m.group(1)}вероятность аномалии {r['p_y']:.0%}, {anom_dir_word(r)}" if r else m.group(0)
+    new = re.sub(r"(<b>\$([A-Z0-9]+)(?: \([^)<]*\))?</b> — )вероятность аномалии \d+%, [^;\n]*", upd, new)
+    if new == html_:
+        log("ночной прогноз на завтра: блок не изменился")
+        return
+    if PUB.dry or not PUB.tg_chat:
+        log("ночной прогноз на завтра (без отправки):\n" + re.sub(r"<[^>]+>", "", new))
+        return
+    meth = "editMessageCaption" if rec.get("kind") == "caption" else "editMessageText"
+    data = {"chat_id": PUB.tg_chat, "message_id": rec["id"], "parse_mode": "HTML"}
+    data.update({"caption": new} if meth == "editMessageCaption" else {"text": new, "disable_web_page_preview": True})
+    try:
+        PUB._tg(meth, data)
+        rec["html"] = new
+        save_json_to(EVE_MSG, rec, os.environ.get("CHANNEL_STATE_DIR"))
+        log("ночной прогноз на завтра: блок в вечернем посте обновлён; топ:", ", ".join(f"{t} {nr[t]['p_y']:.0%}" for t in sorted(nr, key=lambda t: -nr[t]["p_y"])[:5]))
+    except Exception as e:  # noqa: BLE001
+        log("ночной прогноз на завтра: пост не обновлён —", e)
 
 
 # =============================================================================================
@@ -3399,7 +3484,7 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "anom_next": anom_next, "telegraph_check": telegraph_check, "shakeout_scan": shakeout_scan, "pattern_scan": shakeout_scan, "strong_moves": strong_moves, "nav": nav, "calendar_week": calendar_week, "poll": poll,
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "anom_next": anom_next, "anom_final": anom_final, "telegraph_check": telegraph_check, "shakeout_scan": shakeout_scan, "pattern_scan": shakeout_scan, "strong_moves": strong_moves, "nav": nav, "calendar_week": calendar_week, "poll": poll,
      "trader_prep": lambda: trader_off() or trader_mod().prep(PUB), "trader_open": lambda: trader_off() or trader_mod().open_(PUB),
      "trader_week": lambda: trader_off() or trader_mod().week(PUB)}[mode]()
 

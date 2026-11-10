@@ -415,13 +415,18 @@ SECT_IX = [("MOEXOG", "нефть и газ"), ("MOEXFN", "финансы"), ("M
 
 
 def j(name):
-    """Файл состояния канала: посты по расписанию (CHANNEL_STATE_DIR) или детектор аномалий (STATE_DIR/channel)."""
+    """Файл состояния канала: посты по расписанию (CHANNEL_STATE_DIR) или новостной бот (STATE_DIR/channel).
+    Если файл есть в обеих папках — берём более свежий (раньше брался первый найденный, даже вчерашний)."""
+    best, key = {}, ""
     for base in (STATE_DIR, os.path.join(os.environ.get("STATE_DIR", ""), "channel")):
         try:
-            return json.load(open(os.path.join(base, name), encoding="utf-8"))
+            d = json.load(open(os.path.join(base, name), encoding="utf-8"))
         except Exception:  # noqa: BLE001
             continue
-    return {}
+        k = str(d.get("made") or d.get("time") or d.get("date") or "") if isinstance(d, dict) else ""
+        if not best or k > key:
+            best, key = d, k
+    return best
 
 
 def today():
@@ -578,7 +583,8 @@ def d_evening():
     if nx.get("rows") and (nx.get("made") or "")[:10] == today():
         r_ = nx["rows"]
         top = sorted(r_, key=lambda t: -(r_[t].get("p_y") or 0))[:4]
-        L.append("Модель аномалий ждёт резкое движение или всплеск оборота: " + "; ".join(f"${t} {r_[t]['p_y']:.0%}, {dir_word(r_[t])}" for t in top) + ".")
+        L.append("Модель аномалий ждёт резкое движение или всплеск оборота" + ("" if nx.get("final") else " (предварительно — торги дня ещё идут, утром уточнится)")
+                 + ": " + "; ".join(f"${t} {r_[t]['p_y']:.0%}, {dir_word(r_[t])}" for t in top) + ".")
     L += ["", FEAT["honest"]]
     p = None
     os.makedirs(OUT, exist_ok=True)
