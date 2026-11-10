@@ -3,7 +3,8 @@
 
 У Пульса нет открытого API для публикации, а автопостинг ботами правилами не предусмотрен, поэтому бот присылает
 администратору черновик: картинку (сохранить и прикрепить) и текст (нажать — скопируется) с тикерами, хэштегами,
-дисклеймером и ссылкой на Telegram-канал.
+дисклеймером. Черновики соблюдают правила Пульса (см. PULSE_RULES ниже): без рекламы и упоминаний Telegram-канала,
+не больше 10 бумаг ($тикеров) в посте.
 
 Что бот присылает сам — ровно 2 черновика в торговый день (будни):
   • ~13:05 МСК — рынок в целом: индекс, секторы, кто растёт и падает, куда идут деньги, аномалии дня и прогноз модели;
@@ -34,6 +35,92 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from common import BG, FG, UP, DN, BLUE, DISCLAIMER, fmt, pc, share_candles, index_candles, candle_chart, hbars, iss, table  # noqa: E402
 import ideas_calc as IC  # noqa: E402
+
+# ---------------- правила Пульса ----------------
+# Команда Пульса: реклама Telegram-каналов и чатов в сообществе запрещена (посты с ней удаляют модераторы). В посте можно
+# указать не больше 10 бумаг. Поэтому в черновиках нет ссылок и упоминаний канала (режим «где ссылка» больше не действует),
+# а лишние бумаги срезаются: остаются первые 10 по порядку в тексте — порядок блоков в постах задан по важности.
+MAX_TICKERS = 10
+TICK = re.compile(r"\$([A-Z][A-Z0-9]{0,6})\b")  # в т.ч. однобуквенные ($T)
+PROMO = re.compile(r"t\.me/|telegram|телеграм|tg-канал|тг-канал|в (?:моём |мой |моем )?канале|из (?:моего )?канала|подписчик|подпис(?:ывайтесь|аться)|ссылк[аи] в профиле", re.I)
+PULSE_RULES = ("Правила Пульса, которые соблюдают черновики:\n"
+               "• не больше 10 бумаг ($тикеров) в одном посте — лишние строки бот убирает сам;\n"
+               "• никакой рекламы Telegram-каналов и чатов: ни ссылок, ни названия канала, ни «ссылка в профиле»;\n"
+               "• без призывов купить/продать и обещаний доходности; дисклеймер «не ИИР» — в каждом посте.")
+
+
+def _items(s, sep):
+    """Разбить перечисление по sep; куски без $тикера («вверх», «неясно») приклеить к предыдущему пункту."""
+    out = []
+    for k, part in enumerate(s.split(sep)):
+        if out and not TICK.search(part):
+            out[-1] += sep + part
+        else:
+            out.append(part)
+    return out
+
+
+def limit_tickers(text, n=MAX_TICKERS):
+    """Оставить в посте не больше n разных $тикеров. Строка, где все бумаги помещаются, — целиком; в перечислениях
+    («$A 1%, вверх; $B 2%…» или «$A, $B, $C») лишние пункты убираются; если не помещается первый пункт (в нём начало
+    фразы) — строка удаляется. Возвращает (текст, убранные бумаги)."""
+    allowed, dropped, out = [], [], []
+
+    def fits(seg):
+        nw = [t for t in dict.fromkeys(TICK.findall(seg)) if t not in allowed]
+        return len(allowed) + len(nw) <= n, nw
+
+    for line in text.split("\n"):
+        ok, nw = fits(line)
+        if ok:
+            allowed += nw
+            out.append(line)
+            continue
+        end = "." if line.rstrip().endswith(".") else ""
+        body = line.rstrip()[:-1] if end else line.rstrip()
+        kept, first_lost = [], False
+        for i1, big in enumerate(_items(body, "; ")):
+            ok, nw = fits(big)
+            if ok:
+                allowed += nw
+                kept.append((big, "; "))
+                continue
+            subs = _items(big, ", ")
+            sk = []
+            for i2, sm in enumerate(subs):
+                ok, nw = fits(sm)
+                if ok:
+                    allowed += nw
+                    sk.append(sm)
+                else:
+                    dropped += [t for t in nw if t not in dropped]
+                    if i1 == 0 and i2 == 0:
+                        first_lost = True
+            if sk and not first_lost:
+                kept.append((", ".join(sk), "; "))
+            if first_lost:
+                break
+        if first_lost or not kept:
+            for t in TICK.findall(line):
+                if t not in allowed and t not in dropped:
+                    dropped.append(t)
+            continue
+        out.append("; ".join(k for k, _ in kept) + end)
+    txt = re.sub(r"\n{3,}", "\n\n", "\n".join(out))
+    return txt, dropped
+
+
+def pulse_check(text):
+    """Последняя проверка черновика: лимит бумаг и следы рекламы канала. Возвращает (текст, замечания для автора)."""
+    text, dropped = limit_tickers(text)
+    notes = []
+    if dropped:
+        notes.append(f"убрал бумаги сверх лимита Пульса ({MAX_TICKERS}): " + ", ".join(dropped))
+    bad = [ln for ln in text.split("\n") if PROMO.search(ln) and DISCLAIMER not in ln]
+    if bad:
+        notes.append("⚠️ похоже на рекламу/упоминание канала — уберите перед публикацией: «" + bad[0][:80] + "»")
+    return text, notes
+
 
 TOKEN = os.environ.get("TG_PULSE_TOKEN", "")
 ADMINS = {int(x) for x in re.findall(r"-?\d+", os.environ.get("IDEA_ADMINS", ""))}
@@ -109,7 +196,7 @@ def tg_photo(chat, path, caption=""):
 KB = {"keyboard": [[{"text": "🧭 Рынок днём"}, {"text": "🌙 Вечер: идеи и завтра"}],
                    [{"text": "📊 Итоги месяца"}, {"text": "🧾 Последние сделки"}],
                    [{"text": "✍️ Свой текст → пост"}],
-                   [{"text": "🏆 Вся статистика"}, {"text": "🔗 Где ссылка на канал"}]], "resize_keyboard": True}
+                   [{"text": "🏆 Вся статистика"}, {"text": "📏 Правила Пульса"}]], "resize_keyboard": True}
 
 
 def say(chat, text, kb=None):
@@ -117,10 +204,14 @@ def say(chat, text, kb=None):
 
 
 def deliver(title, text, imgs=()):
-    """Черновик всем администраторам: картинки, затем текст поста одним блоком (нажать — скопируется)."""
+    """Черновик всем администраторам: картинки, затем текст поста одним блоком (нажать — скопируется).
+    Перед отправкой — проверка по правилам Пульса (не больше 10 бумаг, без рекламы канала)."""
+    text, notes = pulse_check(text)
+    nt = len(set(TICK.findall(text)))
     for a in ADMINS:
         say(a, f"📝 <b>Черновик для Пульса: {html.escape(title)}</b>\nСохраните картинку → в Пульсе «Новый пост» → прикрепите её → вставьте текст. "
-               "Тикеры после вставки проверьте: Пульс превращает их в ссылки, если выбрать тикер из подсказки после «$».")
+               "Тикеры после вставки проверьте: Пульс превращает их в ссылки, если выбрать тикер из подсказки после «$». "
+               f"Бумаг в посте: {nt} из {MAX_TICKERS}." + "".join("\n" + html.escape(x) for x in notes))
         for p in imgs:
             if p and os.path.exists(p):
                 tg_photo(a, p)
@@ -159,17 +250,15 @@ def Rs(x, d=1):
 
 def post_url(v):
     """Ссылка на пост с идеей в канале — доказательство, что идея вышла до входа (только для публичного канала и режима «ссылка в тексте»)."""
-    if ST.get("mode") == "text" and CHAN and not CHAN.lstrip("-").isdigit() and v.get("msg"):
-        return f"https://t.me/{CHAN}/{v['msg']}"
-    return ""
+    return ""  # ссылки на Telegram в Пульсе запрещены (реклама канала)
 
 
 def published(v):
-    return f"Идея опубликована в канале {dm(v['t'])} в {time.strftime('%H:%M', time.gmtime(int(v['t']) + MSK))} МСК" if v.get("t") else ""
+    return f"Идея опубликована {dm(v['t'])} в {time.strftime('%H:%M', time.gmtime(int(v['t']) + MSK))} МСК" if v.get("t") else ""
 
 
 def model_line(v):
-    """Что сказала модель канала при проверке идеи перед публикацией."""
+    """Что сказала модель при проверке идеи перед публикацией."""
     pl = v.get("plan") or {}
     if pl.get("p") is None:
         return ""
@@ -194,20 +283,18 @@ def record_line():
 
 
 FEAT = {
-    "idea": "Каждую идею перед публикацией проверяет модель канала: вероятность цели по многолетней истории бумаги и риск резкого движения против сделки.",
+    "idea": "Каждую идею перед публикацией проверяет моя модель: вероятность цели по многолетней истории бумаги и риск резкого движения против сделки.",
     "plan": "К каждой идее — план: частичные тейки, перенос стопа в безубыток после первого тейка, уровень подтверждения.",
     "honest": "Публикую все сделки, включая убыточные: идея выходит до входа, итог — после закрытия, статистика открыта.",
-    "anom": "Модель аномалий канала (данные Мосбиржи с 2008 года) замечает резкие движения и всплески оборота за минуты.",
+    "anom": "Моя модель аномалий (данные Мосбиржи с 2008 года) замечает резкие движения и всплески оборота за минуты.",
     "news": "Новости — только официальные источники и агентства; слухи помечены как слухи, с историей их подтверждения.",
 }
-SHORT_FEAT = "В канале: мои сделки с итогами · аномалии за минуты · проверенные новости · куда идут деньги"
+SHORT_FEAT = ""
 
 
 def footer(tags=""):
-    m = ST.get("mode", "text")
-    link = (f"📲 Telegram-канал «{TITLE}»: {LINK}\n{SHORT_FEAT}" if m == "text" and LINK
-            else f"📲 Telegram-канал «{TITLE}» — ссылка в профиле.\n{SHORT_FEAT}" if m in ("text", "profile") else "")
-    return "\n\n" + "\n".join(x for x in (link, tags, DISCLAIMER) if x)
+    """Хэштеги и дисклеймер. Ссылок и упоминаний Telegram-канала нет: в Пульсе это реклама, такие посты удаляют."""
+    return "\n\n" + "\n".join(x for x in (tags, DISCLAIMER) if x)
 
 
 # ---------------- картинки ----------------
@@ -266,20 +353,17 @@ def chart(v, iid, title, show_levels=True):
 
 
 def bottom_line():
-    m = ST.get("mode")
-    if m == "text" and LINK:
-        return f"«{TITLE}» · сделки, аномалии, новости — {LINK}"
-    return f"«{TITLE}» · Telegram" if m == "profile" else None
+    return None  # подпись канала на картинке — тоже реклама канала по правилам Пульса
 
 
 # ---------------- черновики ----------------
 def d_teaser(iid, v):
     pl = v.get("plan") or {}
     pot = abs(v["takes"][-1] - v["entry"]) / v["entry"]
-    L = [f"🔒 Новая идея в моём канале: ${v['ticker']} — {side_w(v)}", "",
+    L = [f"🔒 Новая идея: ${v['ticker']} — {side_w(v)}", "",
          f"Потенциал ~{pc(pot, 1, False)}" + (f", срок обычно {pl['term'][0]}–{pl['term'][1]} торг. дн." if pl.get("term") else "")
          + f", прибыль/риск {fmt(v.get('rr'))}.", *([model_line(v)] if model_line(v) else []),
-         "Вход, стоп и план фиксации — у подписчиков канала. Итог сделки опубликую здесь, каким бы он ни был.",
+         "Итог сделки опубликую здесь, каким бы он ни был.",
          "", FEAT["honest"] if model_line(v) else FEAT["idea"]]
     text = "\n".join(L) + footer("#идея #" + v["ticker"])
     p = chart(v, iid, f"{v['ticker']} · новая идея · {side_w(v)}", show_levels=False)
@@ -289,7 +373,7 @@ def d_teaser(iid, v):
 
 
 def d_open(iid, v):
-    L = [f"💡 Идея из моего канала: ${v['ticker']} — {side_w(v)}", "",
+    L = [f"💡 Моя идея: ${v['ticker']} — {side_w(v)}", "",
          f"Вход {fmt(v['entry'])} · стоп {fmt(v['stop'])} · тейки {' / '.join(fmt(x) for x in v['takes'])}",
          f"Риск {fmt(v.get('risk_pct'))}%, прибыль/риск {fmt(v.get('rr'))}."]
     pl = v.get("plan") or {}
@@ -314,7 +398,7 @@ def d_take(iid, v, i):
     mv = (v["takes"][i] - E) * v["side"] / E
     L = [f"✅ ${v['ticker']}: тейк {i + 1} из {len(v['takes'])} взят — {pc(mv, 1)} от входа", "",
          f"{side_w(v)} от {fmt(E)}, тейк {fmt(v['takes'][i])}" + (f", в сделке {days(v)} дн." if days(v) else "")
-         + (f" Идея вышла в канале {dm(v['t'])} — до входа." if v.get("t") else "")]
+         + (f" Идея опубликована {dm(v['t'])} — до входа." if v.get("t") else "")]
     if i + 1 < len(v["takes"]):
         L.append("Остаток позиции держу" + (", стоп — в безубытке, сделка уже без риска." if v.get("be") else "."))
     L += ["", FEAT["plan"]]
@@ -333,7 +417,7 @@ def d_close(iid, v):
     if v.get("result"):
         L.append(f"Мой итог при закрытии: {v['result']}")
     if v.get("t"):
-        L.append(f"Идея опубликована в канале {dm(v['t'])}, закрыта {dm(v.get('closed_t'))}" + (f" — {days(v)} дн. в сделке" if days(v) else "")
+        L.append(f"Идея опубликована {dm(v['t'])}, закрыта {dm(v.get('closed_t'))}" + (f" — {days(v)} дн. в сделке" if days(v) else "")
                  + (f": {post_url(v)}" if post_url(v) else "."))
     if not good:
         L.append("Убыточные сделки публикую так же, как прибыльные: без этого статистика ничего не стоит.")
@@ -362,7 +446,7 @@ def d_month(key=None):
     wins = sum(1 for r in rows if r[2] > 0)
     tot = sum(r[2] for r in rows)
     sR = sum(r[3] for r in rows)
-    L = [f"📊 Мои сделки из Telegram-канала за {MONTHS[m - 1]} {y}: {wins} из {len(rows)} в плюс, сумма {pc(tot, 1)} ({Rs(sR)})", ""]
+    L = [f"📊 Мои сделки за {MONTHS[m - 1]} {y}: {wins} из {len(rows)} в плюс, сумма {pc(tot, 1)} ({Rs(sR)})", ""]
     for iid, v, pct, R, kind in rows:
         L.append(f"{'✅' if pct > 0 else '➖' if abs(pct) < 1e-9 else '❌'} ${v['ticker']} {side_w(v)} {pc(pct, 1)} ({kind}{', ' + str(days(v)) + ' дн.' if days(v) else ''})")
     L.append("\nСумма — простая сумма результатов сделок в % к цене входа, без плеча и комиссий; убыточные сделки тоже в списке. "
@@ -387,13 +471,13 @@ def d_record():
         return None
     rows = sorted(rec["rows"], key=lambda z: int(z[1].get("closed_t") or z[1].get("t") or 0))
     since = f" с {dm(rec['first_t'], True)}" if rec.get("first_t") else ""
-    L = [f"📒 Все мои сделки из Telegram-канала{since}", "",
+    L = [f"📒 Все мои сделки{since}", "",
          f"Закрыто идей: {rec['n']} · в плюс {rec['wins']} · в минус {rec['losses']} · сумма {pc(rec['sum_pct'], 1)} ({Rs(rec['sum_R'])})"
          + (f", в среднем {Rs(rec['avg_R'], 2)} на сделку" if rec.get("avg_R") is not None else "") + ".", ""]
-    for iid, v, r in rows[-12:]:
+    for iid, v, r in rows[-12:]:  # бумаги сверх 10 срежет pulse_check (правило Пульса)
         L.append(f"{'✅' if r['pct'] > 0 else '➖' if abs(r['pct']) < 1e-9 else '❌'} {dm(v.get('closed_t'))} ${v['ticker']} {side_w(v)} {pc(r['pct'], 1)}")
     if len(rows) > 12:
-        L.append(f"…и ещё {len(rows) - 12} — полный список в канале.")
+        L.append(f"…и ещё {len(rows) - 12} — на картинке накопленный результат по всем.")
     L += ["", "R — результат в рисках сделки (расстояние от входа до стопа). Без плеча и комиссий.", "", FEAT["honest"], FEAT["idea"]]
     os.makedirs(OUT, exist_ok=True)
     acc, pts = 0.0, []
@@ -501,27 +585,27 @@ def d_market():
         sc = sorted(mk["sect"], key=lambda x: -x[1])
         L.append(f"Сильнее рынка — {sc[0][0]} ({pc(sc[0][1], 1)}), слабее — {sc[-1][0]} ({pc(sc[-1][1], 1)}).")
     if md:
-        up = [r for r in sorted(md, key=lambda r: -(r.get("LASTTOPREVPRICE") or 0))[:3] if (r.get("LASTTOPREVPRICE") or 0) > 0]
-        dn = [r for r in sorted(md, key=lambda r: (r.get("LASTTOPREVPRICE") or 0))[:3] if (r.get("LASTTOPREVPRICE") or 0) < 0]
+        up = [r for r in sorted(md, key=lambda r: -(r.get("LASTTOPREVPRICE") or 0))[:2] if (r.get("LASTTOPREVPRICE") or 0) > 0]
+        dn = [r for r in sorted(md, key=lambda r: (r.get("LASTTOPREVPRICE") or 0))[:2] if (r.get("LASTTOPREVPRICE") or 0) < 0]
         parts = ([("Растут: " + ", ".join(f"${r['SECID']} {pc(r['LASTTOPREVPRICE'] / 100, 1)}" for r in up))] if up else []) + \
                 ([("падают: " if up else "Падают: ") + ", ".join(f"${r['SECID']} {pc(r['LASTTOPREVPRICE'] / 100, 1)}" for r in dn)] if dn else [])
         if parts:
             L.append("; ".join(parts) + ".")
     fl = j("flows_last.json")
     if (fl.get("time") or "")[:10] == today() and (fl.get("buyers") or fl.get("sellers")):
-        L += ["", "⚖️ Куда идут деньги (перевес покупок/продаж по рынку): покупают " + ", ".join(f"${t}" for t, _ in (fl.get("buyers") or [])[:3])
-              + "; продают " + ", ".join(f"${t}" for t, _ in (fl.get("sellers") or [])[:3]) + "."]
+        L += ["", "⚖️ Куда идут деньги (перевес покупок/продаж по рынку): покупают " + ", ".join(f"${t}" for t, _ in (fl.get("buyers") or [])[:2])
+              + "; продают " + ", ".join(f"${t}" for t, _ in (fl.get("sellers") or [])[:2]) + "."]
     an = j("anomaly.json")
     sent = (an.get("sent") or {}) if an.get("date") == today() else {}
     if sent:
         L.append("⚡️ Аномалии сегодня (резкое движение или всплеск оборота): "
-                 + ", ".join(f"${t} {pc(x[1], 1)}" if isinstance(x, list) and len(x) > 1 and x[1] is not None else f"${t}" for t, x in list(sent.items())[:5]) + ".")
+                 + ", ".join(f"${t} {pc(x[1], 1)}" if isinstance(x, list) and len(x) > 1 and x[1] is not None else f"${t}" for t, x in list(sent.items())[:3]) + ".")
     pre = j("anom_today.json")
     if pre.get("date") == today() and pre.get("rows"):
         rows = pre["rows"]
         top = [t for t in sorted(rows, key=lambda t: -(rows[t].get("p_y") or 0))[:3] if t not in sent]
         if top:
-            L.append("🔮 Модель канала утром выделила (ещё не сработали): " + ", ".join(f"${t} {rows[t]['p_y']:.0%}, {dir_word(rows[t])}" for t in top) + ".")
+            L.append("🔮 Моя модель утром выделила (ещё не сработали): " + ", ".join(f"${t} {rows[t]['p_y']:.0%}, {dir_word(rows[t])}" for t in top) + ".")
     L += ["", FEAT["anom"], FEAT["news"]]
     p = None
     if mk["sect"]:
@@ -543,10 +627,15 @@ def d_evening():
     L = [f"🌙 Мои идеи и рынок на завтра · {time.strftime('%d.%m', time.gmtime(time.time() + MSK))}", ""]
     rows = []
     if op:
-        L.append(f"📂 Открытые идеи из канала ({len(op)}):")
+        L.append(f"📂 Мои открытые идеи ({len(op)}):")
+        shown = 0
         for iid, v in sorted(op.items(), key=lambda kv: int(kv[0])):
             p_ = px.get(v["ticker"])
             if not p_:
+                continue
+            shown += 1
+            if shown > 5:  # правило Пульса — до 10 бумаг в посте: остальные идеи только на картинке
+                rows.append((f"{v['ticker']} {side_w(v, True)}", (p_ - v["entry"]) * v["side"] / v["entry"] * 100, None))
                 continue
             mv = (p_ - v["entry"]) * v["side"] / v["entry"]
             hit = len(v.get("hit") or [])
@@ -558,10 +647,12 @@ def d_evening():
             L.append(f"{'🟢' if mv > 0 else '🔴' if mv < 0 else '⚪️'} ${v['ticker']} {side_w(v)}: {pc(mv, 1)} от входа"
                      + (f", {days(v)} дн." if days(v) else "") + (f" ({', '.join(st)})" if st else ""))
             rows.append((f"{v['ticker']} {side_w(v, True)}", mv * 100, None))
+        if shown > 5:
+            L.append(f"…и ещё {shown - 5} — на картинке.")
         if rows:
             L.append(f"Средний результат открытых идей: {pc(sum(r[1] for r in rows) / len(rows) / 100, 1)} (цена на {time.strftime('%H:%M', time.gmtime(time.time() + MSK))} МСК, без комиссий).")
     else:
-        L.append("📂 Открытых идей сейчас нет — новые публикую в канале до входа.")
+        L.append("📂 Открытых идей сейчас нет — новые публикую до входа.")
     if closed_today:
         L += ["", "🏁 Закрыты сегодня:"]
         for iid, v in closed_today.items():
@@ -578,11 +669,11 @@ def d_evening():
         L.append(f"Индекс МосБиржи {fmt(ix['CURRENTVALUE'], 0)} ({pc((ix.get('LASTCHANGEPRC') or 0) / 100, 2)} за день). " + trend_line())
     fl = j("flows_last.json")
     if (fl.get("time") or "")[:10] == today() and fl.get("buyers"):
-        L.append("К закрытию деньги шли в " + ", ".join(f"${t}" for t, _ in fl["buyers"][:3]) + "; из " + ", ".join(f"${t}" for t, _ in (fl.get("sellers") or [])[:3]) + ".")
+        L.append("К закрытию деньги шли в " + ", ".join(f"${t}" for t, _ in fl["buyers"][:1]) + "; из " + ", ".join(f"${t}" for t, _ in (fl.get("sellers") or [])[:1]) + ".")
     nx = j("anom_next.json")
     if nx.get("rows") and (nx.get("made") or "")[:10] == today():
         r_ = nx["rows"]
-        top = sorted(r_, key=lambda t: -(r_[t].get("p_y") or 0))[:4]
+        top = sorted(r_, key=lambda t: -(r_[t].get("p_y") or 0))[:3]
         L.append("Модель аномалий ждёт резкое движение или всплеск оборота" + ("" if nx.get("final") else " (предварительно — торги дня ещё идут, утром уточнится)")
                  + ": " + "; ".join(f"${t} {r_[t]['p_y']:.0%}, {dir_word(r_[t])}" for t in top) + ".")
     L += ["", FEAT["honest"]]
@@ -605,7 +696,7 @@ def d_evening():
 
 
 def d_custom(text):
-    tks = re.findall(r"\$([A-Z][A-Z0-9]{1,6})\b", text)
+    tks = TICK.findall(text)
     body = text.strip()
     p = None
     if tks:
@@ -693,13 +784,13 @@ def on_message(m):
     uid = (m.get("from") or {}).get("id")
     text = (m.get("text") or "").strip()
     if uid not in ADMINS:
-        return say(m["chat"]["id"], "Это служебный бот автора канала: он готовит посты для Пульса." + (f" Канал: {LINK}" if LINK else ""))
-    if ST["wiz"].get(str(uid)) == "custom" and text and not text.startswith(("/", "📊", "🧾", "🗞", "🧭", "🌙", "✍️", "🔗", "🏆")):
+        return say(m["chat"]["id"], "Это служебный бот автора: он готовит посты для Пульса.")
+    if ST["wiz"].get(str(uid)) == "custom" and text and not text.startswith(("/", "📊", "🧾", "🗞", "🧭", "🌙", "✍️", "🔗", "📏", "🏆")):
         ST["wiz"].pop(str(uid), None)
         save()
         return d_custom(text)
     if text in ("/start", "/menu", "меню"):
-        return say(uid, "Готовлю посты для Пульса с картинками, результатами ваших сделок и ссылкой на канал. "
+        return say(uid, "Готовлю посты для Пульса с картинками и результатами ваших сделок — по правилам Пульса (до 10 бумаг, без рекламы канала). "
                         "Сделки беру из ваших идей в Telegram-канале. Сам присылаю 2 черновика в торговый день: ~13:05 — рынок в целом, "
                         "~19:45 — результаты открытых идей и взгляд на завтра. Остальное — кнопками.", KB)
     if text.startswith("📊"):
@@ -727,12 +818,9 @@ def on_message(m):
     elif text.startswith("✍️"):
         ST["wiz"][str(uid)] = "custom"
         save()
-        say(uid, "Пришлите текст поста (тикеры — как $SBER). Добавлю график первого тикера, хэштеги, дисклеймер и ссылку на канал.")
-    elif text.startswith("🔗"):
-        kb = {"inline_keyboard": [[{"text": ("✅ " if ST.get("mode") == k else "") + lab, "callback_data": "pm:" + k}]
-                                  for k, lab in (("text", "Ссылка в тексте поста и на картинке"), ("profile", "«Ссылка в профиле» (без ссылки в посте)"), ("none", "Без упоминания канала"))]}
-        say(uid, "Где указывать канал. Ссылки в постах Пульс допускает, если пост не выглядит рекламой; самый безопасный вариант — "
-                 "ссылка в описании профиля и фраза «ссылка в профиле» в посте.", kb)
+        say(uid, "Пришлите текст поста (тикеры — как $SBER). Добавлю график первого тикера, хэштеги и дисклеймер; проверю правила Пульса (до 10 бумаг, без рекламы канала).")
+    elif text.startswith(("📏", "🔗")):
+        say(uid, html.escape(PULSE_RULES), KB)
     else:
         say(uid, "Выберите действие в меню.", KB)
 
@@ -744,9 +832,7 @@ def on_callback(q):
         return
     d = q.get("data") or ""
     if d.startswith("pm:"):
-        ST["mode"] = d[3:]
-        save()
-        return say(uid, "Готово: " + {"text": "ссылка в тексте и на картинке", "profile": "«ссылка в профиле»", "none": "без упоминания канала"}[ST["mode"]] + ".")
+        return say(uid, html.escape(PULSE_RULES))
     iid = d[3:]
     v = ideas().get(iid)
     if not v:
