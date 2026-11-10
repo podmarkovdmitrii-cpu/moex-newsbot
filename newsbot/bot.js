@@ -624,6 +624,17 @@ async function channelWait() { // перед завершением запуск
           { timeout: 600e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: 'anom_next', CHANNEL_STATE: path.join(STATE_DIR, 'channel'), NEWS_STATE: STATE_DIR }) });
       } catch (e) { log('прогноз на завтра: ошибка', e.message); }
     }
+    // после закрытия вечерней сессии (23:55–01:00 МСК) — пересчёт прогноза на завтра по полной свече дня (как утром и как
+    // в истории модели) и обновление блока прогноза в вечернем посте канала
+    const eve = new Date(), eday = eve.toISOString().slice(0, 10), ewd = eve.getUTCDay(); // МСК − 3 ч = UTC: после полуночи — ещё вчерашний вечер
+    const mm = msk.getUTCMinutes();
+    if (ewd >= 1 && ewd <= 5 && ((mh === 23 && mm >= 55) || mh === 0) && S.anomFinalDay !== eday) {
+      S.anomFinalDay = eday;
+      try {
+        require('child_process').execFileSync(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py'), 'anom_final'],
+          { timeout: 900e3, stdio: 'inherit', env: Object.assign({}, process.env, { MODE: 'anom_final', CHANNEL_STATE: path.join(STATE_DIR, 'channel'), NEWS_STATE: STATE_DIR }) });
+      } catch (e) { log('ночной прогноз на завтра: ошибка', e.message); }
+    }
     // агент «вынос стопов»: все акции Мосбиржи (доступны в Т-Инвестициях), идеи — только по подтверждённым на истории правилам
     if (process.env.SHAKE_EVERY_MIN && Date.now() - lastShake >= +process.env.SHAKE_EVERY_MIN * 60e3) {
       lastShake = Date.now();
