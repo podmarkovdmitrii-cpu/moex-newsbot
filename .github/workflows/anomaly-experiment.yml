@@ -7,7 +7,7 @@ on:
         description: 'Сколько последних лет проверять (обучение на всех предыдущих)'
         default: '10'
       exp:
-        description: 'Какая проверка: 1 — группы признаков (E1–E6), 2 — время публикации и способы обучения'
+        description: 'Какая проверка: 1 — группы признаков (E1–E6), 2 — время публикации и способы обучения, 3 — идеи из других областей'
         default: '1'
       parts:
         description: 'Только эти части проверки №2, JSON-список (например ["g"]); пусто — все'
@@ -25,7 +25,7 @@ jobs:
       fail-fast: false
       # проверка №2 — 6 параллельных частей (каждая со своей базой), иначе 18 лет истории не помещаются в лимит 6 часов
       matrix:
-        part: ${{ fromJSON(inputs.parts != '' && inputs.parts || (inputs.exp == '2' && '["a","b","c","d","e","f","g"]' || '["all"]')) }}
+        part: ${{ fromJSON(inputs.parts != '' && inputs.parts || (inputs.exp != '1' && '["a","b","c","d","e","f","g"]' || '["all"]')) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -54,7 +54,7 @@ jobs:
           EXP_YEARS: ${{ inputs.years }}
           EXP_BUDGET_MIN: '320'
           EXP_PART: ${{ matrix.part }}
-        run: python newsbot/anomaly/${{ inputs.exp == '2' && 'exp2.py' || 'experiment.py' }}
+        run: python newsbot/anomaly/${{ inputs.exp == '3' && 'exp3.py' || (inputs.exp == '2' && 'exp2.py' || 'experiment.py') }}
       - name: Отчёт (файл)
         if: always()
         uses: actions/upload-artifact@v4
@@ -63,7 +63,7 @@ jobs:
           path: anomaly-exp/exp*.json
           if-no-files-found: ignore
       - name: Сохранить свечи и историю срочного рынка
-        if: ${{ always() && (matrix.part == 'all' || matrix.part == 'g') }}
+        if: ${{ always() && (matrix.part == 'all' || (matrix.part == 'g' && inputs.exp == '2')) }}
         uses: actions/cache/save@v4
         with:
           path: anomaly-data
