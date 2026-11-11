@@ -9,6 +9,9 @@ on:
       exp:
         description: 'Какая проверка: 1 — группы признаков (E1–E6), 2 — время публикации и способы обучения'
         default: '1'
+      parts:
+        description: 'Только эти части проверки №2, JSON-список (например ["g"]); пусто — все'
+        default: ''
 
 concurrency:
   group: anomaly-model
@@ -22,7 +25,7 @@ jobs:
       fail-fast: false
       # проверка №2 — 6 параллельных частей (каждая со своей базой), иначе 18 лет истории не помещаются в лимит 6 часов
       matrix:
-        part: ${{ fromJSON(inputs.exp == '2' && '["a","b","c","d","e","f"]' || '["all"]') }}
+        part: ${{ fromJSON(inputs.parts != '' && inputs.parts || (inputs.exp == '2' && '["a","b","c","d","e","f","g"]' || '["all"]')) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -57,10 +60,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: exp-report-${{ matrix.part }}
-          path: anomaly-exp/exp*_report.json
+          path: anomaly-exp/exp*.json
           if-no-files-found: ignore
       - name: Сохранить свечи и историю срочного рынка
-        if: ${{ always() && (matrix.part == 'all' || matrix.part == 'd') }}
+        if: ${{ always() && (matrix.part == 'all' || matrix.part == 'g') }}
         uses: actions/cache/save@v4
         with:
           path: anomaly-data
