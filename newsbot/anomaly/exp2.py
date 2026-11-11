@@ -42,7 +42,7 @@ BUDGET = float(os.environ.get("EXP_BUDGET_MIN", "320")) * 60
 YEARS_BACK = int(os.environ.get("EXP_YEARS", "6"))
 SNEG = float(os.environ.get("EXP_SAMPLE_NEG", "0.3"))
 # часть проверки (для параллельных задач workflow): a — шум и утро, b — вечер, c — свежие годы и ранги, d — розница,
-# e — LambdaRank, f — бэггинг; all — всё подряд. База считается в каждой части одинаково (тот же seed) — дельты сравнимы.
+# e — LambdaRank, f — бэггинг, g — связки лучших; all — всё подряд. База считается в каждой части одинаково (тот же seed) — дельты сравнимы.
 PART = os.environ.get("EXP_PART", "all")
 
 
@@ -319,6 +319,16 @@ def main():
             traceback.print_exc()
     if on("f"):
         keep(add(walk2(X, X, FD, years, f"M5 бэггинг {os.environ.get('EXP_BAG', '3')} моделей", model="bag", base=base)), "bag")
+    if on("g"):  # связки прошедших отбор на 2009–2026: свежие годы + бэггинг (и с розницей)
+        add(walk2(X, X, FD, years, "M7 свежие годы + бэггинг 3", model="bag", recency=3, base=base))
+        os.environ["EXP_BAG"] = "5"
+        add(walk2(X, X, FD, years, "M8 свежие годы + бэггинг 5", model="bag", recency=3, base=base))
+        try:
+            nc = g_retail(X, numtrades(sorted(X.t.unique())))
+            add(walk2(X, X, FD + nc, years, "M9 свежие годы + бэггинг 5 + розница", model="bag", recency=3, base=base))
+        except Exception as e:  # noqa: BLE001
+            log("розница: ошибка", e)
+        add(walk2(X, X, FD, years, "M10 свежие годы, полураспад 5 лет + бэггинг 5", model="bag", recency=5, base=base))
     if good and PART == "all":
         feats = FD + (rc if "rank_feats" in good else []) + (nc if "retail" in good else [])
         mdl = "rank" if "lambdarank" in good else ("bag" if "bag" in good else "hgb")
