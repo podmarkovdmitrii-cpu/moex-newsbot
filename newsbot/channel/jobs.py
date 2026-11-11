@@ -164,12 +164,30 @@ def fetch_fut_trades(secid, last=None, max_pages=150):
     return out
 
 
+def flows_archive(stt):
+    """История потоков денег по дням (покупки/продажи по ленте сделок, ₽) — для проверки на истории, как перевес
+    покупателей и доля денег в бумаге связаны с аномалиями. До сих пор хранился только текущий день; ленты прошлых дней
+    без подписки ALGOPACK не получить, поэтому копим свою историю (до 500 торговых дней)."""
+    if not stt.get("date") or not stt.get("tk"):
+        return
+    try:
+        hist = load_json("flows_hist.json", {})
+        hist[stt["date"]] = {t: [round(v.get("vb") or 0), round(v.get("vs") or 0)] for t, v in stt["tk"].items() if (v.get("vb") or 0) + (v.get("vs") or 0) > 0}
+        for d in sorted(hist)[:-500]:
+            hist.pop(d, None)
+        save_json("flows_hist.json", hist)
+        log("потоки денег: день", stt["date"], "сохранён в историю,", len(hist[stt["date"]]), "бумаг, всего дней", len(hist))
+    except Exception as e:  # noqa: BLE001
+        log("история потоков: ошибка", e)
+
+
 def flows():
     """Перевес покупателей/продавцов и сделки китов: акции (1–3 эшелон по обороту) и сырьевые фьючерсы. Каждые 30 минут."""
     now = now_msk()
     today = now.date().isoformat()
     stt = load_json("flows.json", {})
     if stt.get("date") != today:
+        flows_archive(stt)
         stt = {"date": today, "tk": {}}
     md_all = liquid_shares(2000)  # все акции TQBR — для общего объёма денег за день
     md = md_all[:int(os.environ.get("FLOWS_N", "60"))]
