@@ -18,6 +18,11 @@ jobs:
   experiment:
     runs-on: ubuntu-latest
     timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      # проверка №2 — 6 параллельных частей (каждая со своей базой), иначе 18 лет истории не помещаются в лимит 6 часов
+      matrix:
+        part: ${{ fromJSON(inputs.exp == '2' && '["a","b","c","d","e","f"]' || '["all"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -45,16 +50,17 @@ jobs:
           CHANNEL_STATE: ${{ github.workspace }}/tmp-state
           EXP_YEARS: ${{ inputs.years }}
           EXP_BUDGET_MIN: '320'
+          EXP_PART: ${{ matrix.part }}
         run: python newsbot/anomaly/${{ inputs.exp == '2' && 'exp2.py' || 'experiment.py' }}
       - name: Отчёт (файл)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: exp-report
+          name: exp-report-${{ matrix.part }}
           path: anomaly-exp/exp*_report.json
           if-no-files-found: ignore
       - name: Сохранить свечи и историю срочного рынка
-        if: always()
+        if: ${{ always() && (matrix.part == 'all' || matrix.part == 'd') }}
         uses: actions/cache/save@v4
         with:
           path: anomaly-data
