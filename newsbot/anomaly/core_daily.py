@@ -253,6 +253,12 @@ def build(H, divhist, events, tier_of=None, news_tickers=None, weights=None, hou
         out["sec_an1"] = (g.transform("sum") - out["_yp"]) / (g.transform("count") - 1).clip(lower=1)
         out = out.drop(columns="_sec")
     out = out.drop(columns="_yp")
+    # ---- доля бумаги в деньгах рынка (поток денег в % от всего оборота акций): проверка №4 на 2009–2026 — с бэггингом
+    # «топ-5 дня» 24,99% → 25,06%, топ-10 и AUC тоже выше боевой; без бэггинга +0,06 п.п., лучше в 10 из 18 лет
+    try:
+        out = money_share(out, H["sh"], sec_of)
+    except Exception as e:  # noqa: BLE001
+        print("доля денег: ошибка", e, flush=True)
     # ---- вечерняя сессия индекса накануне
     if ix_hourly:
         hx = hourly_daily({"IMOEX": ix_hourly})
@@ -262,6 +268,32 @@ def build(H, divhist, events, tier_of=None, news_tickers=None, weights=None, hou
             prev = pd.Series(days[:-1], index=days[1:])
             out["ix_ev_ret"] = out["d"].map(prev).map(hx).values
     return out
+
+
+MONEY_COLS = ["mf_share", "mf_share_z", "mf_share_ch1", "mf_share_ch5", "mf_share_rk", "mf_sec_z"]
+
+
+def money_share(out, sh, sec_of=None):
+    """Какую долю всего оборота акций забирает бумага (в %) и как эта доля меняется — только по дням до D (сдвиг на 1)."""
+    V = pd.DataFrame({t: series(a).drop_duplicates("d", keep="last").set_index("d")["v"] for t, a in sh.items()}).sort_index()
+    V = V.apply(pd.to_numeric, errors="coerce")
+    tot = V.sum(axis=1, min_count=1)
+    S = V.div(tot, axis=0) * 100
+    m20, s20 = S.rolling(20, min_periods=10).mean(), S.rolling(20, min_periods=10).std()
+    with np.errstate(all="ignore"):
+        feats = {"mf_share": S.shift(1), "mf_share_z": ((S - m20) / s20).shift(1),
+                 "mf_share_ch1": np.log(S / S.shift(1)).shift(1),
+                 "mf_share_ch5": np.log(S.rolling(5).mean() / S.rolling(60, min_periods=30).mean()).shift(1)}
+    feats["mf_share_rk"] = feats["mf_share_ch1"].rank(axis=1, pct=True)
+    sec = pd.Series({t: (sec_of or {}).get(t, "other") for t in V.columns})
+    SS = V.T.groupby(sec).sum(min_count=1).T.div(tot, axis=0)
+    secz = ((SS - SS.rolling(20, min_periods=10).mean()) / SS.rolling(20, min_periods=10).std()).shift(1)
+    feats["mf_sec_z"] = pd.DataFrame({t: secz[sec[t]] for t in V.columns}, index=V.index)
+    F = pd.concat([M.replace([np.inf, -np.inf], np.nan).stack(future_stack=True).rename(k) for k, M in feats.items()], axis=1)
+    F.index.names = ["d", "t"]
+    F = F.reset_index()
+    out = out.drop(columns=[c for c in MONEY_COLS if c in out.columns])
+    return out.merge(F, on=["t", "d"], how="left")
 
 
 def hourly_daily(HH):
