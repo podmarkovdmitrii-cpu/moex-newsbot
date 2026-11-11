@@ -206,6 +206,14 @@ def walk2(Xtr, Xte, feats, years, name, target="y", recency=None, model="hgb", b
                 sub = tr.sample(frac=0.8, random_state=10 + s)
                 ws = np.where(sub[target] == 1, 1.0, 1.0 / SNEG) * (0.5 ** ((Y - 1 - sub.d.dt.year.values) / recency) if recency else 1.0)
                 p += fit_hgb(sub, feats, target, ws, seed=s).predict_proba(te[feats])[:, 1] / nb
+        elif model == "ens":  # ансамбль разных семейств моделей (как в прогнозе погоды): бустинг + случайный лес, среднее рангов
+            from scipy.stats import rankdata
+            from sklearn.ensemble import RandomForestClassifier
+            p1 = fit_hgb(tr, feats, target, w).predict_proba(te[feats])[:, 1]
+            rf = RandomForestClassifier(n_estimators=150, min_samples_leaf=100, max_features="sqrt", max_samples=0.5, n_jobs=-1, random_state=0)
+            rf.fit(tr[feats].fillna(-999).values, tr[target].values, sample_weight=w)
+            p2 = rf.predict_proba(te[feats].fillna(-999).values)[:, 1]
+            p = (rankdata(p1) + rankdata(p2)) / (2 * len(p1))
         elif model == "rank":
             import lightgbm as lgb
             trs = tr.sort_values("d")
