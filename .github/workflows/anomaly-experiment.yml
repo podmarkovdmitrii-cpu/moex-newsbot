@@ -6,6 +6,9 @@ on:
       years:
         description: 'Сколько последних лет проверять (обучение на всех предыдущих)'
         default: '10'
+      exp:
+        description: 'Какая проверка: 1 — группы признаков (E1–E6), 2 — время публикации и способы обучения'
+        default: '1'
 
 concurrency:
   group: anomaly-model
@@ -21,7 +24,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Библиотеки
-        run: pip install --quiet "scikit-learn==1.5.2" pandas numpy matplotlib
+        run: pip install --quiet "scikit-learn==1.5.2" pandas numpy matplotlib lightgbm
       - name: Кэш исторических свечей (тот же, что у обучения модели)
         uses: actions/cache/restore@v4
         with:
@@ -42,13 +45,13 @@ jobs:
           CHANNEL_STATE: ${{ github.workspace }}/tmp-state
           EXP_YEARS: ${{ inputs.years }}
           EXP_BUDGET_MIN: '320'
-        run: python newsbot/anomaly/experiment.py
+        run: python newsbot/anomaly/${{ inputs.exp == '2' && 'exp2.py' || 'experiment.py' }}
       - name: Отчёт (файл)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: exp-report
-          path: anomaly-exp/exp_report.json
+          path: anomaly-exp/exp*_report.json
           if-no-files-found: ignore
       - name: Сохранить свечи и историю срочного рынка
         if: always()

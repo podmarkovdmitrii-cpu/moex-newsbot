@@ -66,6 +66,7 @@ jobs:
           restore-keys: research-stats-
       - name: Новости, сделки и посты паблика по расписанию
         env:
+          GH_TOKEN: ${{ github.token }}   # bot.js: подтягивает свежие модели аномалий сразу после обучения
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_PUBLIC_TOKEN: ${{ secrets.TG_PUBLIC_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
