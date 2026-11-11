@@ -207,7 +207,31 @@ def over_budget(t0):
     return time.time() - t0 > float(os.environ.get("ANOM_BUDGET_MIN", "200")) * 60
 
 
-def walk(X, feats, target, years, sample_neg=1.0, weight_col=None):
+# Дневные модели «до открытия»: свежие годы весомее (полураспад DAILY_HALF лет) и среднее DAILY_BAG моделей — по проверке
+# на 2009–2026 (exp2.py, части c, f, g) это поднимает точность «топ-5 дня» сильнее случайного разброса и в большинстве лет.
+DAILY_HALF = float(os.environ.get("ANOM_HALF", "3") or 0)
+DAILY_BAG = int(os.environ.get("ANOM_BAG", "5") or 1)
+
+
+def fit_daily(tr, feats, target, w, last_year):
+    """Обучение дневной модели: веса по свежести и бэггинг (DAILY_BAG > 1) → CD.Bag; иначе одна HGB."""
+    if DAILY_HALF:
+        w = w * 0.5 ** ((last_year - tr.d.dt.year.values) / DAILY_HALF)
+    if DAILY_BAG <= 1:
+        return hgb().fit(tr[feats], tr[target], sample_weight=w)
+    ms = []
+    for s in range(DAILY_BAG):
+        idx = np.random.RandomState(10 + s).rand(len(tr)) < 0.8
+        m = hgb()
+        try:
+            m.set_params(random_state=s)
+        except Exception:  # noqa: BLE001
+            pass
+        ms.append(m.fit(tr[feats][idx], tr[target][idx], sample_weight=w[idx]))
+    return CD.Bag(ms)
+
+
+def walk(X, feats, target, years, sample_neg=1.0, weight_col=None, daily=False):
     preds = []
     rep = []
     for Y in years:
@@ -218,7 +242,7 @@ def walk(X, feats, target, years, sample_neg=1.0, weight_col=None):
         if sample_neg < 1:
             tr = pd.concat([tr[tr[target] == 1], tr[tr[target] == 0].sample(frac=sample_neg, random_state=1)])
         w = np.where(tr[target] == 1, 1.0, 1.0 / sample_neg)
-        clf = hgb().fit(tr[feats], tr[target], sample_weight=w)
+        clf = fit_daily(tr, feats, target, w, Y - 1) if daily else hgb().fit(tr[feats], tr[target], sample_weight=w)
         p = clf.predict_proba(te[feats])[:, 1]
         rep.append(dict(year=Y, **metrics(te[target].values, p)))
         preds.append(te[["d", "t"]].assign(p=p, y=te[target].values))
@@ -298,11 +322,13 @@ def scenarios(Dd, divh, X, IX, yr, meta):
     json.dump(meta, open(os.path.join(MODELS, "meta.json"), "w"), ensure_ascii=False)
 
 
-def fit_final(X, feats, target, sample_neg=1.0):
+def fit_final(X, feats, target, sample_neg=1.0, daily=False):
     tr = X.dropna(subset=[target])
     if sample_neg < 1:
         tr = pd.concat([tr[tr[target] == 1], tr[tr[target] == 0].sample(frac=sample_neg, random_state=1)])
     w = np.where(tr[target] == 1, 1.0, 1.0 / sample_neg)
+    if daily:
+        return fit_daily(tr, feats, target, w, int(tr.d.dt.year.max()))
     return hgb().fit(tr[feats], tr[target], sample_weight=w)
 
 
@@ -340,7 +366,7 @@ def main():
     X = X[X.d >= FROM].reset_index(drop=True)
     FD = CD.feature_cols(X)
     log("признаки дня:", X.shape, "база аномалий", round(X.y.mean(), 4), round(time.time() - t0), "с")
-    meta = dict(trained=dt.datetime.utcnow().isoformat(timespec="minutes"), feat_daily=FD, feat_intra=CI.FEAT, covered=covered, report={}, calib={},
+    meta = dict(trained=dt.datetime.utcnow().isoformat(timespec="minutes"), daily_half=DAILY_HALF, daily_bag=DAILY_BAG, feat_daily=FD, feat_intra=CI.FEAT, covered=covered, report={}, calib={},
                 data_from=str(X.d.min().date()), rows=int(len(X)), tickers=int(X.t.nunique()),
                 linkcheck=dict(total=lrep["total"], dropped=lrep["dropped"], drop_pairs=lrep["drop_pairs"], review=lrep["review"][:20]))
     yr = X.d.dt.year.max()
@@ -350,10 +376,10 @@ def main():
         years = list(range(yr - 5, yr + 1)) if target == "y" else list(range(yr - 2, yr + 1))
         if over_budget(t0):
             years = []
-        P, rep = walk(X, FD, target, years, sample_neg=0.5) if years else (None, [])
+        P, rep = walk(X, FD, target, years, sample_neg=0.5, daily=True) if years else (None, [])
         meta["report"]["daily_" + target] = rep
         # калибровка «до открытия» не нужна: на проверке по годам сырые вероятности точнее (logloss 0,1151 против 0,1158)
-        clf = fit_final(X, FD, target, sample_neg=0.5)
+        clf = fit_final(X, FD, target, sample_neg=0.5, daily=True)
         if target == "y":
             # прогноз «до открытия» для внутридневной модели: вне выборки там, где он есть, иначе финальной моделью
             pre_all = X[["d", "t"]].assign(p_pre=clf.predict_proba(X[FD])[:, 1])

@@ -308,6 +308,16 @@ def news_weight(e, impact):
     return abs(v.get("a5", 0)) * min(1, z / 2)
 
 
+class Bag:
+    """Среднее нескольких моделей (бэггинг): обучены на разных 80%-подвыборках и с разным seed. Хранится в .pkl как одна модель."""
+
+    def __init__(self, models):
+        self.models = models
+
+    def predict_proba(self, X):
+        return np.mean([m.predict_proba(X) for m in self.models], axis=0)
+
+
 LABELS = ["y", "y_px", "y_up", "y_dn", "y_vol"]
 NONFEAT = set(LABELS + ["d", "t", "x", "vr", "ex"])
 
