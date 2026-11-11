@@ -557,6 +557,76 @@ function channelRun(S) {
   }
   saveState(S);
 }
+// ---------- обновления без перезапуска цепочки: код с GitHub (git) и свежие модели аномалий (артефакт обучения) ----------
+// Каждые HOT_EVERY_MIN минут: git fetch → если в main новые коммиты — fast-forward рабочей копии. Python-задачи (jobs.py,
+// модель аномалий) запускаются заново каждый раз и сразу берут новый код; бот закрытых идей и бот для Пульса сами
+// перезапускаются, увидев новые файлы (channel/hotreload.py). Если изменился код самого бота (newsbot/*.js) — он
+// дожидается текущих задач, сохраняет состояние и продолжает работу на новом коде в том же запуске.
+// Модели: после обучения (workflow «Модель аномалий») их артефакт скачивается сюда же, в ANOM_MODELS, без ожидания нового запуска.
+let lastHot = Date.now(), lastModelCheck = 0;
+function git(args) {
+  return require('child_process').execFileSync('git', args, { cwd: path.join(HERE, '..'), encoding: 'utf8', timeout: 90e3, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+}
+function hotModels() {
+  const dir = process.env.ANOM_MODELS;
+  if (!dir || !process.env.GH_TOKEN || !process.env.GITHUB_REPOSITORY || Date.now() - lastModelCheck < 10 * 60e3) return;
+  lastModelCheck = Date.now();
+  try {
+    const cp = require('child_process');
+    const js = JSON.parse(cp.execFileSync('gh', ['api', `repos/${process.env.GITHUB_REPOSITORY}/actions/artifacts?name=anomaly-models&per_page=1`],
+      { encoding: 'utf8', timeout: 60e3, stdio: ['ignore', 'pipe', 'pipe'] }));
+    const a = (js.artifacts || [])[0];
+    if (!a || a.expired) return;
+    const mark = path.join(dir, '.artifact_id');
+    const have = fs.existsSync(mark) ? fs.readFileSync(mark, 'utf8').trim() : '';
+    if (have === String(a.id)) return;
+    if (!have && fs.existsSync(path.join(dir, 'meta.json'))) {
+      // модели из кэша запуска: сравниваем время обучения с временем артефакта
+      const tr = (JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8')).trained || '').replace(' ', 'T');
+      if (tr && new Date(tr + (tr.length <= 16 ? ':00Z' : 'Z')) >= new Date(a.created_at) - 3 * 3600e3) { fs.writeFileSync(mark, String(a.id)); return; }
+    }
+    const tmp = path.join(HERE, '..', '.models_new');
+    fs.rmSync(tmp, { recursive: true, force: true });
+    cp.execFileSync('gh', ['run', 'download', String(a.workflow_run.id), '-n', 'anomaly-models', '-D', tmp, '-R', process.env.GITHUB_REPOSITORY],
+      { timeout: 300e3, stdio: ['ignore', 'pipe', 'pipe'] });
+    if (!fs.existsSync(path.join(tmp, 'meta.json'))) { log('модели аномалий: в артефакте нет meta.json — пропуск'); return; }
+    fs.mkdirSync(dir, { recursive: true });
+    for (const f of fs.readdirSync(tmp)) fs.renameSync(path.join(tmp, f), path.join(dir, f));
+    fs.writeFileSync(mark, String(a.id));
+    log('модели аномалий обновлены из обучения', a.created_at, '— новые прогнозы считаются уже на них');
+  } catch (e) { log('модели аномалий: обновление не удалось', (e.stderr || e.message || '').toString().slice(0, 200)); }
+}
+async function hotReload(S, t0, LOOP_MIN) {
+  hotModels();
+  const every = +(process.env.HOT_EVERY_MIN || 3);
+  if (process.env.HOT_RELOAD === '0' || Date.now() - lastHot < every * 60e3) return false;
+  lastHot = Date.now();
+  let files = [];
+  try {
+    const br = process.env.GITHUB_REF_NAME || 'main';
+    git(['fetch', '-q', 'origin', br]);
+    const cur = git(['rev-parse', 'HEAD']), rem = git(['rev-parse', 'FETCH_HEAD']);
+    if (cur === rem) return false;
+    try { git(['merge-base', '--is-ancestor', cur, rem]); } catch (e) { log('обновление кода: история разошлась — жду следующего запуска'); return false; }
+    files = git(['diff', '--name-only', cur, rem]).split('\n').filter(Boolean);
+    try { git(['merge', '--ff-only', '-q', rem]); } catch (e) {
+      // в рабочей копии бот сам меняет некоторые файлы — берём из GitHub только изменённые там файлы и сдвигаем HEAD
+      git(['checkout', rem, '--', ...files.filter(f => { try { git(['cat-file', '-e', `${rem}:${f}`]); return true; } catch (_) { return false; } })]);
+      git(['reset', '--soft', rem]);
+    }
+    log('код обновлён с GitHub без перезапуска:', cur.slice(0, 7), '→', rem.slice(0, 7), '|', files.slice(0, 12).join(', ') + (files.length > 12 ? ' …' : ''));
+  } catch (e) { log('обновление кода: ошибка', (e.stderr || e.message || '').toString().slice(0, 200)); return false; }
+  if (!files.some(f => /^newsbot\/[^/]+\.(js|json)$/.test(f))) return false;  // Python и модели подхватываются сами
+  const leftMin = LOOP_MIN - (Date.now() - t0) / 60e3;
+  if (leftMin < 4) return false;  // до конца запуска мало — новый код возьмёт следующий запуск
+  log('изменился код бота — продолжаю на новом коде (осталось', leftMin.toFixed(0), 'мин запуска)');
+  await channelWait();
+  saveState(S);
+  const r = require('child_process').spawnSync(process.execPath, [path.join(HERE, 'bot.js'), ...process.argv.slice(2)],
+    { stdio: 'inherit', env: Object.assign({}, process.env, { NEWS_LOOP_MIN: leftMin.toFixed(1) }) });
+  process.exit(r.status == null ? 1 : r.status);
+}
+
 async function channelWait() { // перед завершением запуска дождаться поста, который ещё публикуется
   const t = Date.now();
   while (CH_PROC && Date.now() - t < 20 * 60e3) await sleep(5000);
@@ -597,6 +667,7 @@ async function channelWait() { // перед завершением запуск
   let lastAn = 0, lastPulse = 0, lastShake = 0;
   channelTick(S);
   while (LOOP_MIN && Date.now() - t0 < LOOP_MIN * 60e3) {
+    if (!DRY) await hotReload(S, t0, LOOP_MIN);
     channelTick(S);
     // аномалии цен/объёмов — каждые ~5 минут
     if (process.env.ANOMALY_EVERY_MIN && Date.now() - lastAn >= +process.env.ANOMALY_EVERY_MIN * 60e3) {
