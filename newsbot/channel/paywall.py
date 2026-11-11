@@ -764,7 +764,14 @@ def main():
         log("setMyCommands:", e)
     end = time.time() + RUN_MIN * 60
     last_save = last_remind = 0
+    import hotreload
+    hot = hotreload.Watcher()
     while not STOP and time.time() < end:
+        if hot.changed():  # bot.js подтянул новый код/модели с GitHub — продолжаем на новой версии
+            save()
+            if DIRTY_SUBS:
+                backup()
+            hotreload.restart(log, {"PAYWALL_MIN": round(max(1.0, (end - time.time()) / 60), 1)})
         try:
             ups = tg("getUpdates", {"offset": S["offset"], "timeout": 20,
                                     "allowed_updates": ["message", "callback_query", "pre_checkout_query"]}, timeout=40)

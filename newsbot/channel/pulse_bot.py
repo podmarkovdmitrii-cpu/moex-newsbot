@@ -877,7 +877,12 @@ def main():
     run_min = float(os.environ.get("PULSE_RUN_MIN", "0") or 0)
     stop_at = time.time() + run_min * 60 if run_min else 0
     last = 0
+    import hotreload
+    hot = hotreload.Watcher()
     while True:
+        if hot.changed():  # bot.js подтянул новый код/модели с GitHub — продолжаем на новой версии
+            save()
+            hotreload.restart(log, {"PULSE_RUN_MIN": round(max(1.0, (stop_at - time.time()) / 60), 1)} if stop_at else None)
         if time.time() - last > 60:
             last = time.time()
             check_schedule()
