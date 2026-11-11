@@ -41,6 +41,13 @@ T0 = time.time()
 BUDGET = float(os.environ.get("EXP_BUDGET_MIN", "320")) * 60
 YEARS_BACK = int(os.environ.get("EXP_YEARS", "6"))
 SNEG = float(os.environ.get("EXP_SAMPLE_NEG", "0.3"))
+# часть проверки (для параллельных задач workflow): a — шум и утро, b — вечер, c — свежие годы и ранги, d — розница,
+# e — LambdaRank, f — бэггинг; all — всё подряд. База считается в каждой части одинаково (тот же seed) — дельты сравнимы.
+PART = os.environ.get("EXP_PART", "all")
+
+
+def on(p):
+    return PART == "all" or PART == p
 MSK = dt.timedelta(hours=3)
 NEWS_COLS_N = ["n", "night", "rum", "off", "w", "wmax"] + ["n_" + g for g in list(CD.TYPES_GROUPS) + ["other"]]
 
@@ -85,7 +92,7 @@ def news_view(X, Dd, IX, ev, W, mode):
 
 
 # ------------------------------------------------------------------ активность розницы (ISS history)
-def numtrades(tickers, start="2016-01-01"):
+def numtrades(tickers, start=os.environ.get("EXP_NT_FROM", "2008-01-01")):
     from common import iss, table
     os.makedirs(os.path.join(DATA, "nt"), exist_ok=True)
 
@@ -194,10 +201,11 @@ def walk2(Xtr, Xte, feats, years, name, target="y", recency=None, model="hgb", b
             p = fit_hgb(tr, feats, target, w).predict_proba(te[feats])[:, 1]
         elif model == "bag":
             p = np.zeros(len(te))
-            for s in range(5):
+            nb = int(os.environ.get("EXP_BAG", "3"))
+            for s in range(nb):
                 sub = tr.sample(frac=0.8, random_state=10 + s)
                 ws = np.where(sub[target] == 1, 1.0, 1.0 / SNEG) * (0.5 ** ((Y - 1 - sub.d.dt.year.values) / recency) if recency else 1.0)
-                p += fit_hgb(sub, feats, target, ws, seed=s).predict_proba(te[feats])[:, 1] / 5
+                p += fit_hgb(sub, feats, target, ws, seed=s).predict_proba(te[feats])[:, 1] / nb
         elif model == "rank":
             import lightgbm as lgb
             trs = tr.sort_values("d")
@@ -237,9 +245,10 @@ def main():
     W = [CD.news_weight(e, impact) for e in ev]
     FD = CD.feature_cols(X)
     yr = int(X.d.dt.year.max())
-    years = list(range(yr - YEARS_BACK + 1, yr + 1))
+    years = [y for y in range(yr - YEARS_BACK + 1, yr + 1) if y > int(X.d.dt.year.min())]  # первый год истории — только обучение
     out = dict(started=dt.datetime.utcnow().isoformat(timespec="minutes"), rows=int(len(X)), years=years, runs=[])
-    path = os.path.join(MODELS, "exp2_report.json")
+    path = os.path.join(MODELS, f"exp2_report{'' if PART == 'all' else '_' + PART}.json")
+    out["part"] = PART
 
     def add(r):
         if r:
@@ -249,24 +258,27 @@ def main():
     base = add(walk2(X, X, FD, years, "T0 база: учёба и проверка на новостях до 09:55"))
     # шум: та же база с другим seed модели — разница меньше этой не считается улучшением
     noise = None
-    try:
-        fit_hgb.__defaults__ = (1,)
-        noise = add(walk2(X, X, FD, years, "шум: база с другим seed", base=base))
-    except Exception as e:  # noqa: BLE001
-        log("шум: ошибка", e)
-    finally:
-        fit_hgb.__defaults__ = (0,)
+    if on("a"):
+        try:
+            fit_hgb.__defaults__ = (1,)
+            noise = add(walk2(X, X, FD, years, "шум: база с другим seed", base=base))
+        except Exception as e:  # noqa: BLE001
+            log("шум: ошибка", e)
+        finally:
+            fit_hgb.__defaults__ = (0,)
     out["noise_day5"] = abs(noise["d_day5"]) if noise else None
     # ---- часть 1: время публикации
     try:
-        Xm = news_view(X, Dd, IX, ev, W, "m06")
-        add(walk2(X, Xm, FD, years, "T1 как сейчас утром: учёба 09:55, прогноз в 06:00", base=base))
-        add(walk2(Xm, Xm, FD, years, "T2 утро честно: учёба и прогноз на новостях до 06:00", base=base))
-        del Xm
-        Xe = news_view(X, Dd, IX, ev, W, "e19")
-        add(walk2(X, Xe, FD, years, "T3 как сейчас вечером: учёба 09:55, прогноз в 19:00 накануне", base=base))
-        add(walk2(Xe, Xe, FD, years, "T4 вечер честно: учёба и прогноз на новостях до 19:00 накануне", base=base))
-        del Xe
+        if on("a"):
+            Xm = news_view(X, Dd, IX, ev, W, "m06")
+            add(walk2(X, Xm, FD, years, "T1 как сейчас утром: учёба 09:55, прогноз в 06:00", base=base))
+            add(walk2(Xm, Xm, FD, years, "T2 утро честно: учёба и прогноз на новостях до 06:00", base=base))
+            del Xm
+        if on("b"):
+            Xe = news_view(X, Dd, IX, ev, W, "e19")
+            add(walk2(X, Xe, FD, years, "T3 как сейчас вечером: учёба 09:55, прогноз в 19:00 накануне", base=base))
+            add(walk2(Xe, Xe, FD, years, "T4 вечер честно: учёба и прогноз на новостях до 19:00 накануне", base=base))
+            del Xe
     except Exception as e:  # noqa: BLE001
         log("время публикации: ошибка", e)
         traceback.print_exc()
@@ -277,29 +289,37 @@ def main():
     def keep(r, tag):
         if r and r.get("d_day5", 0) > nz and r.get("yrs_better", 0) * 2 >= r.get("yrs", 1):
             good.append(tag)
-    keep(add(walk2(X, X, FD, years, "M1 свежие годы весомее (полураспад 3 года)", recency=3, base=base)), "recency")
+    rc, nc = [], []
+    if on("c"):
+        keep(add(walk2(X, X, FD, years, "M1 свежие годы весомее (полураспад 3 года)", recency=3, base=base)), "recency")
+        try:
+            rc = g_rank(X, FD)
+            keep(add(walk2(X, X, FD + rc, years, "M2 + ранги признаков внутри дня", base=base)), "rank_feats")
+        except Exception as e:  # noqa: BLE001
+            rc = []
+            log("ранги: ошибка", e)
     try:
-        rc = g_rank(X, FD)
-        keep(add(walk2(X, X, FD + rc, years, "M2 + ранги признаков внутри дня", base=base)), "rank_feats")
-    except Exception as e:  # noqa: BLE001
-        rc = []
-        log("ранги: ошибка", e)
-    try:
+        if not on("d"):
+            raise StopIteration
         NT = numtrades(sorted(X.t.unique()))
         nc = g_retail(X, NT)
         log("розница: заполнено", {c: round(float(X[c].notna().mean()), 3) for c in nc})
         keep(add(walk2(X, X, FD + nc, years, "M3 + активность розницы (число и размер сделок)", base=base)), "retail")
+    except StopIteration:
+        pass
     except Exception as e:  # noqa: BLE001
         nc = []
         log("розница: ошибка", e)
         traceback.print_exc()
-    try:
-        keep(add(walk2(X, X, FD, years, "M4 LightGBM LambdaRank по дням", model="rank", base=base)), "lambdarank")
-    except Exception as e:  # noqa: BLE001
-        log("lambdarank: ошибка", e)
-        traceback.print_exc()
-    keep(add(walk2(X, X, FD, years, "M5 бэггинг 5 моделей", model="bag", base=base)), "bag")
-    if good:
+    if on("e"):
+        try:
+            keep(add(walk2(X, X, FD, years, "M4 LightGBM LambdaRank по дням", model="rank", base=base)), "lambdarank")
+        except Exception as e:  # noqa: BLE001
+            log("lambdarank: ошибка", e)
+            traceback.print_exc()
+    if on("f"):
+        keep(add(walk2(X, X, FD, years, f"M5 бэггинг {os.environ.get('EXP_BAG', '3')} моделей", model="bag", base=base)), "bag")
+    if good and PART == "all":
         feats = FD + (rc if "rank_feats" in good else []) + (nc if "retail" in good else [])
         mdl = "rank" if "lambdarank" in good else ("bag" if "bag" in good else "hgb")
         add(walk2(X, X, feats, years, "M6 связка лучших: " + ", ".join(good), model=mdl, recency=3 if "recency" in good else None, base=base))
