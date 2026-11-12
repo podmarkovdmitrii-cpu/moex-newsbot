@@ -65,7 +65,8 @@ def events(news_state):
                 e = json.loads(line)
             except ValueError:
                 continue
-            if e.get("ts", 0) > last and e.get("tk") != "MOEX":
+            # запись без типа новости (бывает, если ключ события без «|») роняла весь прогноз (KeyError 'ty') — пропускаем
+            if e.get("ts", 0) > last and e.get("tk") != "MOEX" and (e.get("ty") or str(e.get("tk", "")).startswith("@")):
                 ev.append(e)
     # ревизор связей: те же правила, что при обучении (текст, если есть, и пары «бумага — тип», снятые на истории)
     pairs = set(((meta().get("linkcheck") or {}).get("drop_pairs")) or []) if ready() else set()
