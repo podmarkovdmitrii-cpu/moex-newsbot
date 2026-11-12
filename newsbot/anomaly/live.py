@@ -119,7 +119,7 @@ def daily_probs(tickers, today, divh, upcoming, news_state, impact):
             while ex.weekday() >= 5:
                 ex += dt.timedelta(days=1)
             dv.setdefault(r["t"], []).append([ex.isoformat(), r.get("amount", 0)])
-    ev = [e for e in events(news_state) if e.get("tk") != "@REG"]
+    ev = [e for e in events(news_state) if e.get("tk") != "@REG" and e.get("ty")]  # служебные записи «@…» без типа новости — не события
     RE = RG.company_events(RG.load_events(news_state))
     W = [CD.news_weight(e, impact) for e in ev]
     hd = CD.hourly_daily({t: v for t, v in Hh.items() if t != "IMOEX"})
