@@ -87,8 +87,8 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: anomaly-data/algopack/${{ matrix.year }}
-          key: algopack-v1-${{ matrix.year }}-${{ github.run_id }}
-          restore-keys: algopack-v1-${{ matrix.year }}-
+          key: algopack-v2-${{ matrix.year }}-${{ github.run_id }}
+          restore-keys: algopack-v2-${{ matrix.year }}-
       - name: Сертификаты НУЦ Минцифры (apim.moex.com подписан ими)
         run: |
           for f in russian_trusted_root_ca_pem.crt russian_trusted_sub_ca_pem.crt; do
@@ -107,13 +107,15 @@ jobs:
           ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
           ANOM_DATA: ${{ github.workspace }}/anomaly-data
           RU_CA: ${{ runner.temp }}/ru_ca.pem
+          ALGOPACK_BUDGET_MIN: '300'
         run: python newsbot/anomaly/algopack.py download ${{ matrix.year }}
       - if: always()
         uses: actions/cache/save@v4
         with:
           path: anomaly-data/algopack/${{ matrix.year }}
-          key: algopack-v1-${{ matrix.year }}-${{ github.run_id }}
-      - uses: actions/upload-artifact@v4
+          key: algopack-v2-${{ matrix.year }}-${{ github.run_id }}
+      - if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: algopack-${{ matrix.year }}
           path: anomaly-data/algopack/${{ matrix.year }}
