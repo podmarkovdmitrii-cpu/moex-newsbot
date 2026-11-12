@@ -243,6 +243,19 @@ def flows():
         if rows:
             s["last"] = rows[-1]["TRADENO"]
         time.sleep(0.05)
+    # покупки/продажи за день по данным биржи (ALGOPACK, если подключён): точнее своей суммы по ленте сделок —
+    # лента нужна теперь только для сделок китов
+    try:
+        import algopack_live as AL
+        apf = AL.day_flows([r["SECID"] for r in md]) if AL.enabled() and not DEMO else {}
+        for t, v in apf.items():
+            s = stt["tk"].get(t)
+            if s is not None and v["vb"] + v["vs"] > 0:
+                s["vb"], s["vs"], s["src"] = v["vb"], v["vs"], "algopack"
+        if apf:
+            log("потоки: покупки/продажи по данным ALGOPACK —", len(apf), "бумаг")
+    except Exception as e:  # noqa: BLE001
+        log("ALGOPACK потоки:", e)
 
     def stat(kind, t, r):
         s = stt["tk"].get(t)
@@ -2797,6 +2810,14 @@ def anomaly():
         pass
     found = []
     by_sec = {}
+    # сигналы самой биржи об аномальных событиях (ALGOPACK MEGA ALERTS) — подтверждение в посте
+    alr = {}
+    try:
+        import algopack_live as AL
+        if AL.enabled() and not DEMO:
+            alr = AL.alerts(today)
+    except Exception as e:  # noqa: BLE001
+        log("ALGOPACK сигналы:", e)
     for r in md:
         by_sec.setdefault(secs.get(r["SECID"], "?"), []).append((r["SECID"], (r.get("LASTTOPREVPRICE") or 0) / 100))
     for r in md:
@@ -2822,6 +2843,12 @@ def anomaly():
         if vx and vx >= (4 if tier < 3 else 6) and val >= (300e6 if tier == 1 else 50e6 if tier == 2 else 30e6):
             why.append(f"оборот {fmt(vx, 1)}× к обычному на это время ({bln(val)})")
         stt["snap"][t] = [last, val, time.time()]
+        if why and alr.get(t):
+            lim = (now - dt.timedelta(minutes=40)).strftime("%H:%M")
+            fresh = [a_ for a_ in alr[t] if a_["time"] >= lim]
+            if fresh:
+                a_ = fresh[-1]
+                why.append(f"сигнал Мосбиржи в {a_['time']}: {a_['text']}" + (f" (за 40 мин сигналов: {len(fresh)})" if len(fresh) > 1 else ""))
         if why:
             lvl = max(abs(exc), abs(jump)) + (vx or 0) / 100
             old = stt["sent"].get(t)

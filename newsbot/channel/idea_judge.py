@@ -409,11 +409,47 @@ def analyze(ticker, side, E, S, T, data=None, last=None):
         elif p_final - be >= 0.03 and edge < 0:
             flags_an.append(("✅", f"С учётом модели аномалий вероятность цели {p_final:.0%} — выше безубыточной ({be:.0%}): история бумаги пессимистичнее текущей ситуации."))
             score += 1
+    book = book_info(ticker, side, E)
     verdict = ("Сильная идея" if score >= 3 else "Приемлемая идея" if score >= 1 else
                "Слабая идея" if score >= -1 else "Не рекомендую публиковать")
     return dict(term=term, potential=path / E, ticker=ticker, side=side, E=E, S=S, T=T, last=last, atr=A, rr=rr, a_s=a_s, a_t=a_t, p=p, be=be, P=P, tf=tf, H=Hz,
                 takes=takes, rules=rules, confirm=confirm, between=between[:6], obstacles=obstacles, flags=flags, score=score,
-                verdict=verdict, levels=lv, anom=an, p_final=p_final)
+                verdict=verdict, levels=lv, anom=an, p_final=p_final, book=book)
+
+
+def book_info(ticker, side, E):
+    """Стакан и потоки за день по данным биржи (ALGOPACK): насколько легко войти и выйти, кто сейчас сильнее.
+    Только справка — в оценку идеи не входит: на истории 2021–2026 эти данные не улучшили прогноз (проверка №6)."""
+    try:
+        import algopack_live as AL
+        if not AL.enabled():
+            return None
+        b = AL.book(ticker)
+        f = AL.day_flows([ticker]).get(ticker)
+    except Exception as e:  # noqa: BLE001
+        print("[разбор идеи] ALGOPACK:", e, flush=True)
+        return None
+    if not b and not f:
+        return None
+    L, fl = [], []
+    if b:
+        sp = b.get("spread_bp")
+        s1 = b.get("spread_1m_bp")
+        L.append(f"Стакан на {b.get('time')}{'' if str(b.get('date')) == (dt.datetime.utcnow() + dt.timedelta(hours=3)).date().isoformat() else ' ' + str(b.get('date'))}: "
+                 + (f"спред {sp / 100:.2f}%".replace(".", ",") if sp is not None else "спред —")
+                 + (f", покупка/продажа на 1 млн ₽ — со спредом {s1 / 100:.2f}%".replace(".", ",") if s1 is not None else ""))
+        im = b.get("imb_hour") if b.get("imb_hour") is not None else b.get("imb")
+        if im is not None:
+            who = "заявок на покупку больше" if im > 0.1 else "заявок на продажу больше" if im < -0.1 else "заявки на покупку и продажу примерно равны"
+            L.append(f"Дисбаланс заявок за последний час: {im:+.2f} ({who})".replace(".", ","))
+            if (im < -0.25 and side > 0) or (im > 0.25 and side < 0):
+                fl.append(("⚠️", "В стакане перевес заявок против идеи."))
+        if s1 is not None and s1 > 50:
+            fl.append(("⚠️", f"Низкая ликвидность: сделка на 1 млн ₽ обходится примерно в {s1 / 100:.2f}% спреда — учитывайте проскальзывание.".replace(".", ",", 1)))
+    if f and f["vb"] + f["vs"] > 0:
+        sh = f["vb"] / (f["vb"] + f["vs"])
+        L.append(f"Сделки за день по инициатору: покупки {sh:.0%}, продажи {1 - sh:.0%}")
+    return dict(lines=L, flags=fl)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -594,6 +630,13 @@ def report(r):
             L.append(f"{ic} {t}")
     else:
         L.append("Прогноза модели по бумаге нет (бумага вне 250 самых ликвидных или бот канала ещё не посчитал прогноз дня) — заключение только по истории.")
+    bk = r.get("book")
+    if bk and (bk.get("lines") or bk.get("flags")):
+        L.append("")
+        L.append("<b>3. Стакан и потоки</b> (данные Мосбиржи ALGOPACK; справка, в оценку не входит)")
+        L += bk.get("lines") or []
+        for ic, t in bk.get("flags") or []:
+            L.append(f"{ic} {t}")
     L.append("")
     L.append(f"<b>Заключение: {r['verdict']}</b>")
     pf = r.get("p_final", r["p"])
