@@ -1,0 +1,71 @@
+name: Проверка №7 — «толпа» на фьючерсах (FUTOI) для модели аномалий
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: anomaly-futoi
+  cancel-in-progress: false
+
+jobs:
+  futoi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet "scikit-learn==1.5.2" pandas numpy scipy matplotlib
+      - name: Сертификаты НУЦ Минцифры (apim.moex.com подписан ими)
+        run: |
+          for f in russian_trusted_root_ca_pem.crt russian_trusted_sub_ca_pem.crt; do
+            curl -sSfL --max-time 30 "https://gu-st.ru/content/lending/$f" >> "$RUNNER_TEMP/ru_ca.pem" && echo >> "$RUNNER_TEMP/ru_ca.pem"
+          done
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
+          restore-keys: anomaly-data-
+      - uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/futoi
+          key: futoi-v1-${{ github.run_id }}
+          restore-keys: futoi-v1-
+      - name: Проверка доступа и полей FUTOI
+        env:
+          ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          RU_CA: ${{ runner.temp }}/ru_ca.pem
+        run: python newsbot/anomaly/futoi.py probe
+      - name: Загрузка позиций физлиц и юрлиц с 2020 г.
+        env:
+          ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          RU_CA: ${{ runner.temp }}/ru_ca.pem
+          ALGOPACK_BUDGET_MIN: '120'
+        run: python newsbot/anomaly/futoi.py download
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: anomaly-data/futoi
+          key: futoi-v1-${{ github.run_id }}
+      - name: Проверка на истории
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-exp
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          EXP_PART: fu
+        run: python newsbot/anomaly/exp6.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp6-report-fu
+          path: anomaly-exp/exp*.json
+          if-no-files-found: ignore
