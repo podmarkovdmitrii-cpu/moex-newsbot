@@ -12,7 +12,9 @@
           перевес по числу сделок, размер сделки покупателя к продавцу («крупный покупатель»), дисбаланс disb;
      AP-O заявки: перевес выставленных заявок на покупку, доля снятых заявок (и её всплеск), перевес снятых;
      AP-B стакан: спред и его всплеск, спред на 1 млн ₽, дисбаланс стакана (средний и на закрытии), глубина покупок к продажам,
-          изменение суммарной глубины.
+          изменение суммарной глубины;
+     AP-H концентрация участников (HI2, индекс Херфиндаля по агрессивным сделкам и др.) и его всплеск;
+     AP-A сигналы биржи об аномальных событиях (MEGA ALERTS): число сигналов вчера и за 5 дней, вверх/вниз, по цене/объёму.
 Все признаки — по данным до D−1 включительно. База — боевая модель (свежие 3 г., среднее 5 моделей, доля денег).
 Части: a — L1, b — L2, c — L1+L2, d — таблицы зависимости (L1, L2); ap — ALGOPACK (модель + таблицы).
 """
@@ -165,6 +167,25 @@ def g_algopack(X, A):
             f["ap_depth_z"] = _z(np.log((ob_b + ob_s).where((ob_b + ob_s) > 0)), 20).shift(1)
             f["ap_ob_imb5"] = f.get("ap_ob_imb", f["ap_depth_net"]).rolling(5, min_periods=3).mean()
         groups["AP-B стакан: спред, глубина, дисбаланс"] = f
+    hcols = [c for c in A.columns if c.startswith("hi2_")]
+    if hcols:
+        f = {}
+        for c in hcols:
+            M = piv(c)
+            k = "ap_" + c
+            f[k] = M.shift(1)
+            f[k + "_z"] = _z(M, 20).shift(1)
+        groups["AP-H концентрация участников (HI2)"] = f
+    if "al_n" in A.columns:
+        f = {}
+        for c in ("al_n", "al_up", "al_dn", "al_pr", "al_vol"):
+            M = piv(c)
+            if M is None:
+                continue
+            M = M.reindex(index=vb.index if vb is not None else M.index).fillna(0)   # нет сигнала — 0
+            f["ap_" + c] = M.shift(1)
+            f["ap_" + c + "5"] = M.rolling(5, min_periods=1).sum().shift(1)
+        groups["AP-A сигналы биржи об аномалиях (MEGA ALERTS)"] = f
     out = {}
     for name, f in groups.items():
         out[name] = E3._put(X, _stack(f), list(f))

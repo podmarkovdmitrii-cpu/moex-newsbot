@@ -32,7 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("ANOM_DATA") or os.path.join(HERE, "data")
 ROOT = os.path.join(DATA, "algopack")
 BASE = "https://apim.moex.com/iss/datashop/algopack/eq"
-DATASETS = ("tradestats", "orderstats", "obstats")
+DATASETS = ("tradestats", "orderstats", "obstats", "hi2", "alerts")
 
 
 def log(*a):
@@ -67,10 +67,8 @@ def _get(url, token, tries=6):
                 raise RuntimeError(f"ALGOPACK отказал в доступе ({e.code}): проверьте токен и подписку") from e
             if k == tries - 1:
                 raise
-        except ssl.SSLError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            if isinstance(getattr(e, "reason", None), ssl.SSLError) or k == tries - 1:
+        except Exception:  # noqa: BLE001  (сеть, тайм-аут; изредка узел отдаёт другую цепочку сертификатов — повтор)
+            if k == tries - 1:
                 raise
         time.sleep(2 * (k + 1))
 
@@ -102,9 +100,20 @@ def _n(df, c):
     return pd.to_numeric(df[c], errors="coerce") if c in df.columns else pd.Series(np.nan, index=df.index)
 
 
-def daily(tr, od, ob):
+def daily(tr, od, ob, hi=None, al=None):
     """Сжатие 5-минутных строк до одной строки на бумагу за день."""
     out = []
+    if hi is not None and len(hi) and {"metric", "value"} <= set(hi.columns):
+        hi = hi.copy()
+        hi["value"] = pd.to_numeric(hi["value"], errors="coerce")
+        hi = hi.sort_values(["secid", "tradetime"]) if "tradetime" in hi else hi
+        out.append(hi.groupby(["secid", "metric"])["value"].last().unstack().add_prefix("hi2_"))
+    if al is not None and len(al) and "alert_type" in al.columns:
+        at = al["alert_type"].astype(str)
+        a = pd.DataFrame({"secid": al["secid"], "al_n": 1, "al_up": at.str.endswith("+").astype(int),
+                          "al_dn": at.str.endswith("-").astype(int),
+                          "al_pr": at.str.startswith("pr_").astype(int), "al_vol": at.str.contains("vol|val|trades").astype(int)})
+        out.append(a.groupby("secid").sum())
     if len(tr):
         tr = tr.copy()
         tm = tr["tradetime"].astype(str).str[:5] if "tradetime" in tr else pd.Series("", index=tr.index)
@@ -149,7 +158,9 @@ def trading_days(year):
     return [d0 + dt.timedelta(days=i) for i in range((d1 - d0).days + 1) if (d0 + dt.timedelta(days=i)).weekday() < 5]
 
 
-def download(year, workers=6):
+def download(year, workers=None):
+    workers = workers or int(os.environ.get("ALGOPACK_WORKERS", "12"))
+    deadline = time.time() + 60 * float(os.environ.get("ALGOPACK_BUDGET_MIN", "300"))
     token = os.environ.get("ALGOPACK_TOKEN", "").strip()
     if not token:
         raise SystemExit("нет ALGOPACK_TOKEN — добавьте секрет репозитория (Settings → Secrets and variables → Actions)")
@@ -160,7 +171,12 @@ def download(year, workers=6):
     t0 = time.time()
 
     def one(d):
-        parts = [fetch(ds, d.isoformat(), token) for ds in DATASETS]
+        if time.time() > deadline:
+            return d, -1, "время вышло — продолжу в следующем запуске"
+        try:
+            parts = [fetch(ds, d.isoformat(), token) for ds in DATASETS]
+        except Exception as e:  # noqa: BLE001  день пропускаем, следующий запуск докачает
+            return d, -1, f"ошибка: {str(e)[:200]}"
         D = daily(*parts)
         p = os.path.join(folder, f"{d}.csv.gz")
         if len(D):
@@ -168,12 +184,17 @@ def download(year, workers=6):
         else:
             open(p, "wb").write(gzip.compress(b""))      # выходной/праздник — пустой файл, чтобы не качать снова
         return d, len(D), [len(x) for x in parts]
-    done = 0
+    done = bad = 0
     with cf.ThreadPoolExecutor(workers) as ex:
         for d, n, sz in ex.map(one, days):
             done += 1
-            if done % 20 == 0 or done == len(days):
-                log(f"  {d}: бумаг {n}, строк {sz}; {done}/{len(days)}, {round(time.time() - t0)} с")
+            bad += n < 0
+            if n < 0 and bad <= 10:
+                log(f"  {d}: {sz}")
+            if done <= 3 or done % 10 == 0 or done == len(days):
+                log(f"  {d}: бумаг {n}, строк {sz}; {done}/{len(days)}, пропущено {bad}, {round(time.time() - t0)} с")
+    if bad == len(days) and days:
+        raise SystemExit("ни один день не загрузился")
 
 
 def load():
@@ -198,13 +219,13 @@ if __name__ == "__main__":
         # проверка токена и названий полей на одном недавнем дне (только первая страница)
         tok = os.environ.get("ALGOPACK_TOKEN", "").strip()
         day = trading_days(dt.date.today().year)[-3].isoformat()
-        for ds in DATASETS + ("hi2", "alerts"):
+        for ds in DATASETS:
             try:
                 c, data = _table(_get(f"{BASE}/{ds}.json?" + urllib.parse.urlencode({"date": day, "start": 0}), tok))
                 log(f"{ds} {day}: строк на странице {len(data)}; поля: {', '.join(c)}; пример: {data[0] if data else '-'}")
             except Exception as e:  # noqa: BLE001
                 log(f"{ds}: ошибка {e}")
-                if ds in DATASETS:
+                if ds in DATASETS[:3]:
                     raise
     else:
         print(__doc__)
