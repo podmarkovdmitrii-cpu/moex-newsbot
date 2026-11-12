@@ -1,0 +1,153 @@
+name: Проверка №6 — покупки/продажи и стакан для модели аномалий
+
+# Ветка 1 (без токена): оценки спреда и ликвидности по свечам, годы 2009–2026.
+# Ветка 2 (нужен секрет ALGOPACK_TOKEN): настоящие покупки/продажи, заявки и стакан ALGOPACK с 2020 г.
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: 'Сколько последних лет проверять в ветке по свечам'
+        default: '18'
+      candles:
+        description: 'Ветка по свечам (L1, L2): yes/no'
+        default: 'yes'
+
+concurrency:
+  group: anomaly-orderbook
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.t.outputs.ok }}
+    steps:
+      - id: t
+        env:
+          HAS: ${{ secrets.ALGOPACK_TOKEN != '' }}
+        run: |
+          echo "ok=$HAS" >> "$GITHUB_OUTPUT"
+          if [ "$HAS" != "true" ]; then echo "::warning::Секрета ALGOPACK_TOKEN нет — ветка ALGOPACK пропущена"; fi
+
+  candles:
+    if: ${{ inputs.candles != 'no' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [a, b, c, d]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet "scikit-learn==1.5.2" pandas numpy scipy matplotlib
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
+          restore-keys: anomaly-data-
+      - uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - name: Оценки спреда и ликвидности по свечам
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-exp
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          EXP_YEARS: ${{ inputs.years }}
+          EXP_PART: ${{ matrix.part }}
+        run: python newsbot/anomaly/exp6.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp6-report-${{ matrix.part }}
+          path: anomaly-exp/exp*.json
+          if-no-files-found: ignore
+
+  download:
+    needs: check
+    if: ${{ needs.check.outputs.ok == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        year: [2020, 2021, 2022, 2023, 2024, 2025, 2026]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet pandas numpy
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/${{ matrix.year }}
+          key: algopack-v1-${{ matrix.year }}-${{ github.run_id }}
+          restore-keys: algopack-v1-${{ matrix.year }}-
+      - name: Проверка токена и полей
+        if: ${{ matrix.year == 2026 }}
+        env:
+          ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+        run: python newsbot/anomaly/algopack.py probe
+      - name: Загрузка ALGOPACK за год
+        env:
+          ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+        run: python newsbot/anomaly/algopack.py download ${{ matrix.year }}
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: anomaly-data/algopack/${{ matrix.year }}
+          key: algopack-v1-${{ matrix.year }}-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: algopack-${{ matrix.year }}
+          path: anomaly-data/algopack/${{ matrix.year }}
+          retention-days: 7
+
+  algopack:
+    needs: download
+    if: ${{ !cancelled() && needs.download.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet "scikit-learn==1.5.2" pandas numpy scipy matplotlib
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
+          restore-keys: anomaly-data-
+      - uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: algopack-*
+          path: anomaly-data/algopack
+          merge-multiple: true
+      - name: Покупки/продажи, заявки и стакан ALGOPACK
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-exp
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          EXP_PART: ap
+        run: python newsbot/anomaly/exp6.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp6-report-ap
+          path: anomaly-exp/exp*.json
+          if-no-files-found: ignore
