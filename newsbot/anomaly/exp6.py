@@ -192,6 +192,39 @@ def g_algopack(X, A):
     return out
 
 
+def g_futoi(X, F):
+    """«Толпа» на фьючерсах на акции (FUTOI): позиции физлиц и юрлиц на конец дня D−1."""
+    if F is None or not len(F):
+        return []
+    F = F.copy()
+    F["d"] = pd.to_datetime(F["tradedate"].astype(str).str[:10])
+    F["clgroup"] = F["clgroup"].astype(str).str.upper()
+    for c in ("pos_long", "pos_short", "pos_long_num", "pos_short_num"):
+        F[c] = pd.to_numeric(F.get(c), errors="coerce").abs()
+    G = F.groupby(["stock", "d", "clgroup"])[["pos_long", "pos_short", "pos_long_num", "pos_short_num"]].sum().unstack("clgroup")
+    G.columns = [f"{a}_{b}" for a, b in G.columns]
+    G = G.reset_index()
+    feats = {}
+
+    def P(col):
+        return G.pivot_table(index="d", columns="stock", values=col).sort_index() if col in G.columns else None
+    fl, fs, yl, ys = P("pos_long_FIZ"), P("pos_short_FIZ"), P("pos_long_YUR"), P("pos_short_YUR")
+    if fl is None or yl is None:
+        return []
+    fnet = (fl - fs) / (fl + fs).where((fl + fs) > 0)
+    ynet = (yl - ys) / (yl + ys).where((yl + ys) > 0)
+    fsh = (fl + fs) / (fl + fs + yl + ys).where((fl + fs + yl + ys) > 0)
+    feats = {"fo_fiz_net": fnet, "fo_yur_net": ynet, "fo_gap": fnet - ynet, "fo_fiz_share": fsh,
+             "fo_fiz_net_ch1": fnet.diff(), "fo_fiz_net_ch5": fnet.diff(5), "fo_fiz_net_z": _z(fnet, 20),
+             "fo_fiz_share_z": _z(fsh, 20), "fo_oi_ch5": np.log((fl + fs + yl + ys) / (fl + fs + yl + ys).shift(5))}
+    nl, ns = P("pos_long_num_FIZ"), P("pos_short_num_FIZ")
+    if nl is not None and ns is not None:
+        feats["fo_fiz_crowd"] = np.log(nl.where(nl > 0) / ns.where(ns > 0))
+        feats["fo_fiz_crowd_z"] = _z(feats["fo_fiz_crowd"], 20)
+    feats = {k: v.shift(1) for k, v in feats.items()}
+    return E3._put(X, _stack(feats), list(feats))
+
+
 def main():
     os.makedirs(MODELS, exist_ok=True)
     X, Dd, IX, ev, impact = EX.load_all()
@@ -206,7 +239,27 @@ def main():
         json.dump(out, open(path, "w"), ensure_ascii=False, indent=1)
         return r
 
-    if PART == "ap":
+    if PART == "fu":
+        import futoi as FU
+        F = FU.load()
+        log("FUTOI: строк", len(F), "кодов", F.code.nunique() if len(F) else 0)
+        if not len(F):
+            raise SystemExit("нет данных FUTOI")
+        cols = g_futoi(X, F)
+        first = int(pd.to_datetime(F["tradedate"].astype(str).str[:10]).dt.year.min())
+        years = list(range(first + 1, yr + 1))
+        out["years"] = years
+        out["groups"]["FU толпа на фьючерсах"] = {c: round(float(X.loc[X.d.dt.year > first, c].notna().mean()), 3) for c in cols}
+        log("группа FU", out["groups"]["FU толпа на фьючерсах"])
+        sub = X[X.d.dt.year >= first].copy()
+        out["lift"] = E4.lift_tables(sub, cols)
+        add(None)
+        base = add(E5.walk(X, FD, years, "база = боевая, обучение с 2008 г."))
+        add(E5.walk(X, FD, years, "шум: другие seed", seed0=100, base=base))
+        add(E5.walk(X, FD + cols, years, "с 2008 г. + толпа на фьючерсах (FUTOI)", base=base))
+        base2 = add(E5.walk(sub, FD, years, f"база, обучение только с {first} г."))
+        add(E5.walk(sub, FD + cols, years, f"с {first} г. + толпа на фьючерсах (FUTOI)", base=base2))
+    elif PART == "ap":
         import algopack as AP
         A = AP.load()
         log("ALGOPACK: строк", len(A), "дней", A.d.nunique() if len(A) else 0, "бумаг", A.t.nunique() if len(A) else 0)
