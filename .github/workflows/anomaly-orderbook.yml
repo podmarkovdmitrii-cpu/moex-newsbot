@@ -89,16 +89,24 @@ jobs:
           path: anomaly-data/algopack/${{ matrix.year }}
           key: algopack-v1-${{ matrix.year }}-${{ github.run_id }}
           restore-keys: algopack-v1-${{ matrix.year }}-
+      - name: Сертификаты НУЦ Минцифры (apim.moex.com подписан ими)
+        run: |
+          for f in russian_trusted_root_ca_pem.crt russian_trusted_sub_ca_pem.crt; do
+            curl -sSfL --max-time 30 "https://gu-st.ru/content/lending/$f" >> "$RUNNER_TEMP/ru_ca.pem" && echo >> "$RUNNER_TEMP/ru_ca.pem"
+          done
+          grep -c "BEGIN CERTIFICATE" "$RUNNER_TEMP/ru_ca.pem"
       - name: Проверка токена и полей
         if: ${{ matrix.year == 2026 }}
         env:
           ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
           ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          RU_CA: ${{ runner.temp }}/ru_ca.pem
         run: python newsbot/anomaly/algopack.py probe
       - name: Загрузка ALGOPACK за год
         env:
           ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
           ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          RU_CA: ${{ runner.temp }}/ru_ca.pem
         run: python newsbot/anomaly/algopack.py download ${{ matrix.year }}
       - if: always()
         uses: actions/cache/save@v4
