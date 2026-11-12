@@ -18,6 +18,7 @@ import gzip
 import io
 import json
 import os
+import ssl
 import sys
 import time
 import urllib.error
@@ -38,19 +39,38 @@ def log(*a):
     print(dt.datetime.utcnow().strftime("%H:%M:%S"), *a, flush=True)
 
 
+_CTX = None
+
+
+def _ctx():
+    """apim.moex.com подписан сертификатом НУЦ Минцифры (Russian Trusted Root CA) — его нет в стандартном наборе.
+    Сертификаты скачиваются в workflow с gu-st.ru в файл RU_CA (как у бота для API Т-Пульса); проверка остаётся включённой."""
+    global _CTX
+    if _CTX is None:
+        _CTX = ssl.create_default_context()
+        path = os.environ.get("RU_CA", "")
+        if path and os.path.exists(path):
+            _CTX.load_verify_locations(cafile=path)
+        else:
+            log("RU_CA: нет файла сертификатов НУЦ Минцифры —", path or "(не задан)")
+    return _CTX
+
+
 def _get(url, token, tries=6):
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": "moex-newsbot-research"})
     for k in range(tries):
         try:
-            with urllib.request.urlopen(req, timeout=90) as r:
+            with urllib.request.urlopen(req, timeout=90, context=_ctx()) as r:
                 return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 raise RuntimeError(f"ALGOPACK отказал в доступе ({e.code}): проверьте токен и подписку") from e
             if k == tries - 1:
                 raise
-        except Exception:  # noqa: BLE001
-            if k == tries - 1:
+        except ssl.SSLError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            if isinstance(getattr(e, "reason", None), ssl.SSLError) or k == tries - 1:
                 raise
         time.sleep(2 * (k + 1))
 
@@ -178,8 +198,13 @@ if __name__ == "__main__":
         # проверка токена и названий полей на одном недавнем дне (только первая страница)
         tok = os.environ.get("ALGOPACK_TOKEN", "").strip()
         day = trading_days(dt.date.today().year)[-3].isoformat()
-        for ds in DATASETS:
-            c, data = _table(_get(f"{BASE}/{ds}.json?" + urllib.parse.urlencode({"date": day, "start": 0}), tok))
-            log(f"{ds} {day}: строк на странице {len(data)}; поля: {', '.join(c)}")
+        for ds in DATASETS + ("hi2", "alerts"):
+            try:
+                c, data = _table(_get(f"{BASE}/{ds}.json?" + urllib.parse.urlencode({"date": day, "start": 0}), tok))
+                log(f"{ds} {day}: строк на странице {len(data)}; поля: {', '.join(c)}; пример: {data[0] if data else '-'}")
+            except Exception as e:  # noqa: BLE001
+                log(f"{ds}: ошибка {e}")
+                if ds in DATASETS:
+                    raise
     else:
         print(__doc__)
