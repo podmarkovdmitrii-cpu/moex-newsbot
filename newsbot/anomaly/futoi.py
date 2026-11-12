@@ -33,17 +33,19 @@ def _get(url, tok):
 
 
 def fetch(code, d0, d1, tok):
-    rows, cols, off = [], None, 0
+    """Ответ — блок «futoi» (а не «data»), страницы — параметром start (как в moexalgo.features.futoi)."""
+    rows, cols, start = [], None, 0
     while True:
-        q = urllib.parse.urlencode({"from": d0, "till": d1, "offset": off, "limit": 10000})
+        q = urllib.parse.urlencode({"from": d0, "till": d1, "start": start})
         js = _get(f"{BASE}/{code}.json?{q}", tok)
-        c, data = AP._table(js)
+        blk = js.get("futoi") or js.get("data") or {}
+        c, data = (blk.get("columns") or [], blk.get("data") or []) if isinstance(blk, dict) else ([], [])
         if not data:
             break
         cols = cols or c
         rows += data
-        off += len(data)
-        if len(data) < 10000:
+        start += len(data)
+        if len(data) % 100:
             break
     return pd.DataFrame(rows, columns=cols) if cols else pd.DataFrame()
 
