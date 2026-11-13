@@ -1,0 +1,86 @@
+name: Проверка №8 — всё из ALGOPACK вместе против боевой модели аномалий
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: anomaly-all
+  cancel-in-progress: false
+
+jobs:
+  all:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet "scikit-learn==1.5.2" pandas numpy scipy matplotlib
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
+          restore-keys: anomaly-data-
+      - uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/futoi
+          key: futoi-v2-${{ github.run_id }}
+          restore-keys: futoi-v2-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2020
+          key: algopack-v2-2020-${{ github.run_id }}
+          restore-keys: algopack-v2-2020-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2021
+          key: algopack-v2-2021-${{ github.run_id }}
+          restore-keys: algopack-v2-2021-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2022
+          key: algopack-v2-2022-${{ github.run_id }}
+          restore-keys: algopack-v2-2022-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2023
+          key: algopack-v2-2023-${{ github.run_id }}
+          restore-keys: algopack-v2-2023-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2024
+          key: algopack-v2-2024-${{ github.run_id }}
+          restore-keys: algopack-v2-2024-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2025
+          key: algopack-v2-2025-${{ github.run_id }}
+          restore-keys: algopack-v2-2025-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2026
+          key: algopack-v2-2026-${{ github.run_id }}
+          restore-keys: algopack-v2-2026-
+      - name: Что есть в кэше
+        run: |
+          for d in anomaly-data/algopack/* anomaly-data/futoi; do echo "$d: $(ls $d 2>/dev/null | wc -l) файлов"; done
+      - name: Боевая модель против всего из ALGOPACK
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-exp
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          EXP_PART: all
+        run: python newsbot/anomaly/exp6.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp6-report-all
+          path: anomaly-exp/exp*.json
+          if-no-files-found: ignore

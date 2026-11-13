@@ -1,0 +1,24 @@
+name: ALGOPACK — что даёт подписка (проверка без публикаций)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Сертификаты НУЦ Минцифры (apim.moex.com подписан ими)
+        run: |
+          for f in russian_trusted_root_ca_pem.crt russian_trusted_sub_ca_pem.crt; do
+            curl -sSfL --max-time 30 "https://gu-st.ru/content/lending/$f" >> "$RUNNER_TEMP/ru_ca.pem" && echo >> "$RUNNER_TEMP/ru_ca.pem"
+          done
+      - name: Проверка
+        env:
+          ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
+          RU_CA: ${{ runner.temp }}/ru_ca.pem
+        run: python newsbot/channel/algopack_probe.py
