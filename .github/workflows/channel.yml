@@ -10,7 +10,7 @@ on:
         required: true
         default: 'morning'
         type: choice
-        options: [tg_check, test_post, aitest, anom_test, anom_pre, morning_dry, evening_dry, trader_prep_dry, trader_open_dry, trader_week_dry, anomaly, commod, morning, flows, ofz, pulse_deals, evening, weekly, trader_prep, trader_open, trader_week, stock_review, stock_review_dry, weekend_review, weekend_review_dry, flows_dry]
+        options: [tg_check, test_post, aitest, anom_test, anom_pre, morning_dry, evening_dry, trader_prep_dry, trader_open_dry, trader_week_dry, anomaly, commod, morning, flows, ofz, pulse_deals, evening, weekly, trader_prep, trader_open, trader_week, stock_review, stock_review_dry, weekend_review, weekend_review_dry, monday_anom, monday_anom_dry, flows_dry]
 
 concurrency:
   group: channel
@@ -65,6 +65,7 @@ jobs:
           TG_PUBLIC_TOKEN: ${{ secrets.TG_PUBLIC_TOKEN }}
           TG_PUBLIC_CHAT: ${{ vars.TG_PUBLIC_CHAT }}
           MODE: ${{ github.event.inputs.mode }}
+          MONDAY_ANOM_ANYDAY: ${{ github.event.inputs.mode == 'monday_anom_dry' && '1' || '' }}
           SCHED: ${{ github.event.schedule }}
           NEWS_STATE: ${{ github.workspace }}/newsbot-state
           CHANNEL_STATE: ${{ github.workspace }}/channel-state
