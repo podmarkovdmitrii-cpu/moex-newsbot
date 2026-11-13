@@ -44,12 +44,12 @@ def _ctx():
         return c
 
 
-def _get(path, tries=4, market="eq", **params):
+def _get(path, tries=2, market="eq", **params):
     url = f"{ROOT}/{market}/{path}.json" + ("?" + urllib.parse.urlencode(params) if params else "")
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token()}", "User-Agent": "moex-newsbot"})
     for k in range(tries):
         try:
-            with urllib.request.urlopen(req, timeout=40, context=_ctx()) as r:
+            with urllib.request.urlopen(req, timeout=15, context=_ctx()) as r:
                 js = json.loads(r.read().decode("utf-8"))
             d = js.get("data", js)
             if isinstance(d, dict) and "columns" in d:
@@ -78,6 +78,15 @@ def _rows(path, market="eq", **params):
     return out
 
 
+def _paused():
+    """apim на паузе после зависаний (common.iss) — суперсвечи не запрашиваем."""
+    try:
+        from common import _apim_until
+        return time.time() < _apim_until()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _today():
     return (dt.datetime.utcnow() + dt.timedelta(hours=3)).date().isoformat()
 
@@ -85,11 +94,14 @@ def _today():
 def day_flows(tickers, day=None, workers=8, market="eq"):
     """{тикер: {"vb": покупки ₽, "vs": продажи ₽, "tb": сделок покупателей, "ts": продавцов, "last": время последнего бара}}.
     market: eq — акции, fo — фьючерсы (код контракта, например BRZ6), fx — валюта."""
-    if not enabled():
+    if not enabled() or _paused():
         return {}
     day = day or _today()
+    t_end = time.time() + 240  # весь сбор не дольше 4 минут: при зависании apim пост выйдет с оценкой по ленте сделок
 
     def one(t):
+        if time.time() > t_end:
+            return t, None
         try:
             R = _rows(f"tradestats/{t}", market=market, **{"from": day, "till": day})
         except Exception:  # noqa: BLE001

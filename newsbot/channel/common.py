@@ -118,28 +118,52 @@ def http_get(url, timeout=30, tries=3, headers=None):
 
 APIM = "https://apim.moex.com/iss/"
 _APIM = {"fail": 0, "until": 0.0, "said": False}
+_APIM_OFF = os.path.join(os.environ.get("RUNNER_TEMP") or "/tmp", "apim_off_until")  # пауза общая для всех процессов постов
+
+
+def _apim_until():
+    try:
+        return max(_APIM["until"], float(open(_APIM_OFF).read().strip() or 0))
+    except Exception:  # noqa: BLE001
+        return _APIM["until"]
+APIM_TIMEOUT = float(os.environ.get("APIM_TIMEOUT", "8"))   # apim иногда «висит» (13.11 после 19:10 МСК — по 30–60 с на запрос)
+APIM_SLOW = 6.0                                             # ответ дольше — считаем сбоем: бесплатный ISS отвечает за 1–2 с
 
 
 def iss(path, **params):
     """ISS Мосбиржи. С подпиской ALGOPACK (ALGOPACK_TOKEN) торговые данные engines/… берутся через apim.moex.com — в реальном
-    времени (бесплатный iss.moex.com отдаёт их с задержкой 15 минут, проверено 13.11.2026). При ошибках — бесплатный ISS,
-    после 5 ошибок подряд apim не трогаем 10 минут."""
+    времени (бесплатный iss.moex.com отдаёт их с задержкой 15 минут, проверено 13.11.2026). Один запрос к apim ждём не дольше
+    8 с; ошибка или медленный ответ — сразу бесплатный ISS; после 3 таких подряд apim не трогаем 15 минут (13.11 зависания apim
+    растянули «Итоги дня» больше чем на 20 минут, и пост не вышел)."""
     params.setdefault("iss.meta", "off")
     q = "?" + urllib.parse.urlencode(params) if params else ""
     tok = (os.environ.get("ALGOPACK_TOKEN") or "").strip()
-    if tok and path.startswith("engines/") and time.time() >= _APIM["until"]:
+    if tok and path.startswith("engines/") and time.time() >= _apim_until():
+        t0 = time.time()
+        err = None
         try:
-            js = json.loads(http_get(APIM + path + q, tries=2, headers={"Authorization": f"Bearer {tok}"}).decode("utf-8"))
+            js = json.loads(http_get(APIM + path + q, timeout=APIM_TIMEOUT, tries=1, headers={"Authorization": f"Bearer {tok}"}).decode("utf-8"))
+        except Exception as e:  # noqa: BLE001
+            js, err = None, e
+        slow = time.time() - t0 > APIM_SLOW
+        if js is not None and not slow:
             _APIM["fail"] = 0
             if not _APIM["said"]:
                 _APIM["said"] = True
                 log("ISS: данные Мосбиржи в реальном времени через ALGOPACK (без 15-минутной задержки)")
             return js
-        except Exception as e:  # noqa: BLE001
-            _APIM["fail"] += 1
-            if _APIM["fail"] >= 5:
-                _APIM["until"], _APIM["fail"] = time.time() + 600, 0
-                log("ISS реального времени (ALGOPACK) недоступен — 10 минут беру бесплатный ISS с задержкой:", str(e)[:150])
+        _APIM["fail"] += 1
+        if _APIM["fail"] >= 3:
+            _APIM["until"], _APIM["fail"] = time.time() + 900, 0
+            try:
+                with open(_APIM_OFF, "w") as f:
+                    f.write(str(_APIM["until"]))
+            except Exception:  # noqa: BLE001
+                pass
+            log("ISS реального времени (ALGOPACK) " + ("отвечает медленно" if js is not None else "недоступен")
+                + " — 15 минут беру бесплатный ISS с задержкой" + (": " + str(err)[:120] if err else ""))
+        if js is not None:  # медленный, но ответ есть — используем
+            return js
     return json.loads(http_get(ISS + path + q).decode("utf-8"))
 
 

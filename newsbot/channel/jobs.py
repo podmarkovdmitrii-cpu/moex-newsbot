@@ -37,7 +37,7 @@ FAM_RU = {"mom": "импульс", "pull": "откат к EMA 20", "sbrk": "шо
 SEC_RU = {"bank": "банки", "oil": "нефтегаз", "metal": "металлурги", "retail": "ритейл", "tech": "IT и связь", "power": "энергетика", "chem": "химия", "devel": "девелоперы", "transport": "транспорт"}
 SCHED = {"40 3 * * 1-5": "morning", "30 5 * * 1": "calendar_week", "35 16 * * 5": "weekly", "5 16 * * 5": "poll", "50 * * * *": "nav", "*/30 7-15 * * 1-5": "flows", "50 15 * * 1-5": "flows",
          "45 7-15 * * 1-5": "ofz", "10 16 * * 1-5": "ofz", "25 16 * * 1-5": "evening",
-         "15 9 * * 1-5": "stock_review", "30 16 * * 0": "weekend_review", "55 15 * * 1-5": "strong_moves"}
+         "15 9 * * 1-5": "stock_review", "30 16 * * 0": "weekend_review", "0 16 * * 0": "monday_anom", "55 15 * * 1-5": "strong_moves"}
 PUB = Publisher()
 DISCLAIMER_TXT = DISCLAIMER
 # Бот-трейдер в канале выключен: нет постов модельного портфеля и рубрики «Трейдер» (сделки ведёт администратор).
@@ -2159,7 +2159,10 @@ def anom_next_block(nxt):
     ntop = sorted(nr, key=lambda t: -(nr[t].get("p_y") or 0))[:8]
     when = ("пересчитано после вечерней сессии, " + str(nxt.get("made", ""))[11:16] if nxt.get("final")
             else "предварительно: торги дня ещё идут, после закрытия вечерней сессии блок обновится")
-    L = [f"{ANB_HEAD} {dt.date.fromisoformat(nxt['date']).strftime('%d.%m')}</b> (модель; {when}; утром в плане дня — уточнение с ночными новостями):"]
+    tgt = dt.date.fromisoformat(nxt["date"])
+    if tgt.weekday() == 0 and not nxt.get("sunday"):
+        when += "; в воскресенье в 19:00 — пересчёт с торгами и новостями выходных"
+    L = [f"{ANB_HEAD} {tgt.strftime('%d.%m')}</b> (модель; {when}; утром в плане дня — уточнение с ночными новостями):"]
     for t in ntop:
         r = nr[t]
         why = "; ".join((r.get("why") or [])[:3])
@@ -2237,6 +2240,50 @@ def anom_final():
         log("ночной прогноз на завтра: блок в вечернем посте обновлён; топ:", ", ".join(f"{t} {nr[t]['p_y']:.0%}" for t in sorted(nr, key=lambda t: -nr[t]["p_y"])[:5]))
     except Exception as e:  # noqa: BLE001
         log("ночной прогноз на завтра: пост не обновлён —", e)
+
+
+def monday_anom():
+    """Воскресенье 19:00 МСК: прогноз аномалий на понедельник с новостями выходных и торгами выходного дня.
+
+    Модель та же, что утром и вечером в будни (сессии выходных в обучении не участвуют); новости выходных она видит как
+    новости до открытия понедельника, ход и оборот торгов выходного дня показаны в причинах по каждой бумаге. Результат
+    сохраняется как прогноз «на завтра» (anom_next.json) — его берут Пульс и сценарии сделок."""
+    now = now_msk()
+    if now.weekday() != 6 and not os.environ.get("MONDAY_ANOM_ANYDAY"):
+        log("прогноз на понедельник: сегодня не воскресенье — пропуск")
+        return
+    mon = next_wd(now.date())
+    out = anom_pre(force=True, day=mon.isoformat())
+    if not out or not out.get("rows"):
+        log("прогноз на понедельник: не посчитан")
+        return
+    out.update(made=now.isoformat(), eve=now.date().isoformat(), final=True, sunday=True)
+    save_json("anom_next.json", out)
+    nr = out["rows"]
+    ntop = sorted(nr, key=lambda t: -(nr[t].get("p_y") or 0))[:8]
+    txt = [f"🔮 <b>Вероятные аномалии в понедельник, {mon.strftime('%d.%m')}</b>",
+           f"<i>Модель; посчитано в воскресенье в {now.strftime('%H:%M')} МСК — с новостями выходных и итогами торгов выходного дня. "
+           "Утром в плане дня — уточнение с ночными новостями.</i>", ""]
+    for t in ntop:
+        r = nr[t]
+        why = "; ".join((r.get("why") or [])[:3]).replace("вчера", "в пятницу")
+        txt.append(f"• <b>${t}</b> — {r['p_y']:.0%} (ценовая {r.get('p_y_px') or 0:.0%}), {anom_dir_word(r)}" + (": " + why if why else ""))
+    base = sum((r.get("p_y") or 0) for r in nr.values()) / max(1, len(nr))
+    wk = [(t, r) for t, r in nr.items() if r.get("w_days")]
+    if wk:
+        tot = sum(r.get("w_val") or 0 for _, r in wk)
+        mv = sorted([x for x in wk if (x[1].get("w_val") or 0) >= 1e6], key=lambda x: -abs(x[1].get("w_ret") or 0))[:6]
+        txt += ["", f"📅 <b>Торги выходного дня</b>: оборот {bln(tot)} по {len(wk)} бумагам"
+                + (" · сильнее всего к закрытию пятницы: " + ", ".join(f"${t} {pc(r['w_ret'], 1)}" for t, r in mv) if mv else "")]
+        hot = [t for t in ntop if abs(nr[t].get("w_ret") or 0) >= 0.015]
+        if hot:
+            txt.append("<i>У " + ", ".join("$" + t for t in hot) + " ход выходных заметный: основная сессия понедельника может его отыграть или откатить.</i>")
+    else:
+        txt += ["", "📅 <i>Торгов выходного дня не было или данные недоступны — прогноз по итогам пятницы и новостям выходных.</i>"]
+    txt += ["", f"<i>В среднем по {len(nr)} бумагам — {pc(base, 1, False)}. " + anom_dir_note("daily_dir", "утром") + "</i>",
+            "#аномалии #прогноз #выходные"]
+    PUB.post("\n".join(txt))
+    log("прогноз на понедельник опубликован; топ:", ", ".join(f"{t} {nr[t]['p_y']:.0%}" for t in ntop[:5]))
 
 
 # =============================================================================================
@@ -3531,7 +3578,7 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "anom_next": anom_next, "anom_final": anom_final, "telegraph_check": telegraph_check, "shakeout_scan": shakeout_scan, "pattern_scan": shakeout_scan, "strong_moves": strong_moves, "nav": nav, "calendar_week": calendar_week, "poll": poll,
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "monday_anom": monday_anom, "anom_next": anom_next, "anom_final": anom_final, "telegraph_check": telegraph_check, "shakeout_scan": shakeout_scan, "pattern_scan": shakeout_scan, "strong_moves": strong_moves, "nav": nav, "calendar_week": calendar_week, "poll": poll,
      "trader_prep": lambda: trader_off() or trader_mod().prep(PUB), "trader_open": lambda: trader_off() or trader_mod().open_(PUB),
      "trader_week": lambda: trader_off() or trader_mod().week(PUB)}[mode]()
 
