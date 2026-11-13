@@ -92,6 +92,7 @@ jobs:
           PULSE_EVERY_MIN: '15'
           SHAKE_EVERY_MIN: '10'
           RU_CA: ${{ runner.temp }}/ru_ca.pem
+          NODE_EXTRA_CA_CERTS: ${{ runner.temp }}/ru_ca.pem   # Node: доверять сертификату НУЦ Минцифры (apim.moex.com)
           ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}   # ALGOPACK: покупки/продажи, стакан, сигналы биржи (newsbot/channel/algopack_live.py)
           LLM_NEWS_PER_DAY: '45'
           # закрытые идеи с оплатой доступа (newsbot/channel/paywall.py); значения берутся из Variables или Secrets
