@@ -248,12 +248,14 @@ def flows():
     try:
         import algopack_live as AL
         apf = AL.day_flows([r["SECID"] for r in md]) if AL.enabled() and not DEMO else {}
+        if AL.enabled() and not DEMO and fut:  # сырьевые и валютные фьючерсы — тоже по данным биржи
+            apf.update(AL.day_flows([f["secid"] for f in fut.values()], market="fo"))
         for t, v in apf.items():
             s = stt["tk"].get(t)
             if s is not None and v["vb"] + v["vs"] > 0:
                 s["vb"], s["vs"], s["src"] = v["vb"], v["vs"], "algopack"
         if apf:
-            log("потоки: покупки/продажи по данным ALGOPACK —", len(apf), "бумаг")
+            log("потоки: покупки/продажи по данным ALGOPACK —", len(apf), "бумаг и фьючерсов")
     except Exception as e:  # noqa: BLE001
         log("ALGOPACK потоки:", e)
 

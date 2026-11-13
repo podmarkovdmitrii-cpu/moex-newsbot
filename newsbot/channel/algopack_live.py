@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 
 BASE = "https://apim.moex.com/iss/datashop/algopack/eq"
+ROOT = "https://apim.moex.com/iss/datashop/algopack"
 
 
 def token():
@@ -43,8 +44,8 @@ def _ctx():
         return c
 
 
-def _get(path, tries=4, **params):
-    url = f"{BASE}/{path}.json" + ("?" + urllib.parse.urlencode(params) if params else "")
+def _get(path, tries=4, market="eq", **params):
+    url = f"{ROOT}/{market}/{path}.json" + ("?" + urllib.parse.urlencode(params) if params else "")
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token()}", "User-Agent": "moex-newsbot"})
     for k in range(tries):
         try:
@@ -64,10 +65,10 @@ def _get(path, tries=4, **params):
     return []
 
 
-def _rows(path, **params):
+def _rows(path, market="eq", **params):
     out, start = [], 0
     while True:
-        part = _get(path, start=start, **params)
+        part = _get(path, start=start, market=market, **params)
         out += part
         if not part or len(part) % 100:
             break
@@ -81,15 +82,16 @@ def _today():
     return (dt.datetime.utcnow() + dt.timedelta(hours=3)).date().isoformat()
 
 
-def day_flows(tickers, day=None, workers=8):
-    """{тикер: {"vb": покупки ₽, "vs": продажи ₽, "tb": сделок покупателей, "ts": продавцов, "last": время последнего бара}}."""
+def day_flows(tickers, day=None, workers=8, market="eq"):
+    """{тикер: {"vb": покупки ₽, "vs": продажи ₽, "tb": сделок покупателей, "ts": продавцов, "last": время последнего бара}}.
+    market: eq — акции, fo — фьючерсы (код контракта, например BRZ6), fx — валюта."""
     if not enabled():
         return {}
     day = day or _today()
 
     def one(t):
         try:
-            R = _rows(f"tradestats/{t}", **{"from": day, "till": day})
+            R = _rows(f"tradestats/{t}", market=market, **{"from": day, "till": day})
         except Exception:  # noqa: BLE001
             return t, None
         if not R:
@@ -157,3 +159,25 @@ def alert_text(ty):
             pct = f" — реже, чем в {('%g' % round(100 - val, 2)).replace('.', ',')}% обычных 5-минутных интервалов"
     d = " вверх" if ty.endswith("+") else " вниз" if ty.endswith("-") else ""
     return f"{what}{d}{pct}"
+
+
+def orderbook(ticker):
+    """Стакан сейчас (ISS реального времени через ALGOPACK): лучшие цены, спред, объём заявок в пределах ±1% от середины."""
+    if not enabled():
+        return None
+    try:
+        from common import iss, table
+        R = table(iss(f"engines/stock/markets/shares/boards/TQBR/securities/{ticker}/orderbook.json"), "orderbook")
+    except Exception:  # noqa: BLE001
+        return None
+    bids = [(float(r["PRICE"]), float(r["QUANTITY"])) for r in R if r.get("BUYSELL") == "B" and r.get("PRICE")]
+    asks = [(float(r["PRICE"]), float(r["QUANTITY"])) for r in R if r.get("BUYSELL") == "S" and r.get("PRICE")]
+    if not bids or not asks:
+        return None
+    bb, ba = max(p for p, _ in bids), min(p for p, _ in asks)
+    mid = (bb + ba) / 2
+    vb = sum(p * q for p, q in bids if p >= mid * 0.99)
+    va = sum(p * q for p, q in asks if p <= mid * 1.01)
+    return dict(bid=bb, ask=ba, spread=(ba - bb) / mid, depth_b=vb, depth_s=va, imb=(vb - va) / (vb + va) if vb + va > 0 else None,
+                time=str(max((r.get("UPDATETIME") or "") for r in R))[:8])
+

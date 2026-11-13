@@ -212,11 +212,10 @@ def fmt(p):
 
 def moex_quote(ticker):
     """Последняя цена и название с Мосбиржи; None — если ISS недоступен."""
-    url = (f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{urllib.parse.quote(ticker)}.json"
-           "?iss.meta=off&iss.only=securities,marketdata&securities.columns=SECID,SHORTNAME,PREVPRICE&marketdata.columns=LAST")
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "moex-newsbot"}), timeout=15) as r:
-            j = json.loads(r.read().decode())
+    try:  # через common.iss: с подпиской ALGOPACK — цена в реальном времени, без 15-минутной задержки
+        from common import iss
+        j = iss(f"engines/stock/markets/shares/boards/TQBR/securities/{urllib.parse.quote(ticker)}.json",
+                **{"iss.only": "securities,marketdata", "securities.columns": "SECID,SHORTNAME,PREVPRICE", "marketdata.columns": "LAST"})
     except Exception:  # noqa: BLE001
         return None
     sec = j.get("securities", {}).get("data") or []

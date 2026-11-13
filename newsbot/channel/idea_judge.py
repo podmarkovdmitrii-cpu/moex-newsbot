@@ -426,12 +426,16 @@ def book_info(ticker, side, E):
             return None
         b = AL.book(ticker)
         f = AL.day_flows([ticker]).get(ticker)
+        ob = AL.orderbook(ticker)
     except Exception as e:  # noqa: BLE001
         print("[разбор идеи] ALGOPACK:", e, flush=True)
         return None
-    if not b and not f:
+    if not b and not f and not ob:
         return None
     L, fl = [], []
+    if ob:  # стакан прямо сейчас (реальное время), до 10 уровней с каждой стороны
+        L.append(f"Стакан сейчас ({ob['time']}): покупка {fmtp(ob['bid'])}, продажа {fmtp(ob['ask'])}, спред {ob['spread'] * 100:.2f}%".replace(".", ",", 1)
+                 + (f"; заявок в пределах 1% от цены: на покупку {ob['depth_b'] / 1e6:.1f} млн ₽, на продажу {ob['depth_s'] / 1e6:.1f} млн ₽".replace(".", ",") if ob["depth_b"] + ob["depth_s"] else ""))
     if b:
         sp = b.get("spread_bp")
         s1 = b.get("spread_1m_bp")

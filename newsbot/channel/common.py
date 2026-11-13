@@ -104,7 +104,7 @@ def ru_ctx():
 
 def http_get(url, timeout=30, tries=3, headers=None):
     last = None
-    ctx = ru_ctx() if "tbank.ru" in url or "tinkoff.ru" in url else None
+    ctx = ru_ctx() if "tbank.ru" in url or "tinkoff.ru" in url or "apim.moex.com" in url else None
     for k in range(tries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "ru,en;q=0.8", **(headers or {})})
@@ -116,10 +116,31 @@ def http_get(url, timeout=30, tries=3, headers=None):
     raise last
 
 
+APIM = "https://apim.moex.com/iss/"
+_APIM = {"fail": 0, "until": 0.0, "said": False}
+
+
 def iss(path, **params):
+    """ISS Мосбиржи. С подпиской ALGOPACK (ALGOPACK_TOKEN) торговые данные engines/… берутся через apim.moex.com — в реальном
+    времени (бесплатный iss.moex.com отдаёт их с задержкой 15 минут, проверено 13.11.2026). При ошибках — бесплатный ISS,
+    после 5 ошибок подряд apim не трогаем 10 минут."""
     params.setdefault("iss.meta", "off")
-    url = ISS + path + ("?" + urllib.parse.urlencode(params) if params else "")
-    return json.loads(http_get(url).decode("utf-8"))
+    q = "?" + urllib.parse.urlencode(params) if params else ""
+    tok = (os.environ.get("ALGOPACK_TOKEN") or "").strip()
+    if tok and path.startswith("engines/") and time.time() >= _APIM["until"]:
+        try:
+            js = json.loads(http_get(APIM + path + q, tries=2, headers={"Authorization": f"Bearer {tok}"}).decode("utf-8"))
+            _APIM["fail"] = 0
+            if not _APIM["said"]:
+                _APIM["said"] = True
+                log("ISS: данные Мосбиржи в реальном времени через ALGOPACK (без 15-минутной задержки)")
+            return js
+        except Exception as e:  # noqa: BLE001
+            _APIM["fail"] += 1
+            if _APIM["fail"] >= 5:
+                _APIM["until"], _APIM["fail"] = time.time() + 600, 0
+                log("ISS реального времени (ALGOPACK) недоступен — 10 минут беру бесплатный ISS с задержкой:", str(e)[:150])
+    return json.loads(http_get(ISS + path + q).decode("utf-8"))
 
 
 def table(js, name):
