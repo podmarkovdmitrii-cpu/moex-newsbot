@@ -35,8 +35,8 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: anomaly-data/futoi
-          key: futoi-v1-${{ github.run_id }}
-          restore-keys: futoi-v1-
+          key: futoi-v2-${{ github.run_id }}
+          restore-keys: futoi-v2-
       - name: Проверка доступа и полей FUTOI
         env:
           ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
@@ -54,7 +54,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: anomaly-data/futoi
-          key: futoi-v1-${{ github.run_id }}
+          key: futoi-v2-${{ github.run_id }}
       - name: Проверка на истории
         env:
           ANOM_DATA: ${{ github.workspace }}/anomaly-data
