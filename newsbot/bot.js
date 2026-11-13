@@ -6,7 +6,7 @@
 //   • Ранние (непроверенные) новости и слухи → отдельные сообщения со ссылкой и бумагами, на которые влияют;
 //     при подтверждении другими каналами — сообщение «подтверждено».
 //   • Важные официальные новости (ЦБ, Минфин, Правительство, Мосбиржа, компании) → сообщение с оценкой влияния.
-// Виртуальный счёт, не инвестиционная рекомендация. Цены ISS Мосбиржи без подписки — с задержкой до 15 минут.
+// Виртуальный счёт, не инвестиционная рекомендация. Цены ISS Мосбиржи без подписки — с задержкой до 15 минут (с ALGOPACK — реальное время).
 // =====================================================================================================
 'use strict';
 const fs = require('fs');
@@ -74,8 +74,24 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 // ---------- сеть ----------
 let FIX = null;
+// ISS реального времени через подписку ALGOPACK (apim.moex.com): бесплатный iss.moex.com отдаёт торговые данные с задержкой 15 минут.
+// Сертификат apim — НУЦ Минцифры (NODE_EXTRA_CA_CERTS в workflow). При ошибках — бесплатный ISS, после 5 ошибок подряд пауза 10 минут.
+const APIM = { fail: 0, until: 0, said: false };
 async function http(url, asJson = true) {
   if (FIXTURE) { FIX = FIX || JSON.parse(fs.readFileSync(FIXTURE, 'utf8')); const k = Object.keys(FIX).find(k => url.startsWith(k)); if (!k) throw new Error('нет в фикстуре: ' + url); return asJson ? FIX[k] : FIX[k]; }
+  const tok = (process.env.ALGOPACK_TOKEN || '').trim();
+  if (tok && url.startsWith(ISS + 'engines/') && Date.now() >= APIM.until) {
+    try {
+      const r = await fetch('https://apim.moex.com/iss/' + url.slice(ISS.length), { headers: { 'user-agent': 'moex-newsbot', authorization: 'Bearer ' + tok }, signal: AbortSignal.timeout(20000) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const out = asJson ? await r.json() : await r.text();
+      APIM.fail = 0;
+      if (!APIM.said) { APIM.said = true; log('ISS: данные Мосбиржи в реальном времени через ALGOPACK (без 15-минутной задержки)'); }
+      return out;
+    } catch (e) {
+      if (++APIM.fail >= 5) { APIM.until = Date.now() + 600e3; APIM.fail = 0; log('ISS реального времени (ALGOPACK) недоступен — 10 минут беру бесплатный ISS:', (e.cause && e.cause.code) || e.message); }
+    }
+  }
   for (let k = 0; k < 3; k++) {
     try {
       const r = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0 (moex-newsbot)' }, signal: AbortSignal.timeout(20000) });
