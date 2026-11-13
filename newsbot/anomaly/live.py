@@ -140,6 +140,10 @@ def daily_probs(tickers, today, divh, upcoming, news_state, impact):
         atrs[t] = float(np.mean(tr[-14:]) / c[-1]) if len(tr) >= 14 else np.nan
     X["beta"] = X["t"].map(bet)
     X["atr"] = X["t"].map(atrs)
+    # торги выходного дня перед днём today (сессии Мосбиржи по субботам и воскресеньям): ход к закрытию пятницы и оборот
+    WK = {t: weekend_feats(D[t], today) for t in X["t"]}
+    for k in WEEKEND_COLS:
+        X[k] = X["t"].map(lambda t: (WK.get(t) or {}).get(k, np.nan))
     FD = meta()["feat_daily"]
     for c in FD:
         if c not in X.columns:
@@ -153,6 +157,29 @@ def daily_probs(tickers, today, divh, upcoming, news_state, impact):
 
 def dir_acc(name):
     return (meta().get("dir_acc") or {}).get(name) or {}
+
+
+WEEKEND_COLS = ("w_ret", "w_max", "w_val", "w_vr", "w_days")
+
+
+def weekend_feats(rows, today):
+    """Торги выходного дня между последним будним днём и днём today: w_ret — закрытие выходных к закрытию пятницы,
+    w_max — самый большой ход внутри выходных (по максимуму/минимуму, со знаком), w_val — оборот за выходные, ₽,
+    w_vr — оборот выходных к среднему обороту будних дней за 20 дней, w_days — сколько дней выходных была торговля."""
+    R = [r for r in rows if r[0] < today and r[4] == r[4] and r[4]]
+    wd = [r for r in R if dt.date.fromisoformat(r[0][:10]).weekday() < 5]
+    if not wd:
+        return None
+    last = wd[-1][0][:10]
+    we = [r for r in R if r[0][:10] > last and dt.date.fromisoformat(r[0][:10]).weekday() >= 5]
+    if not we:
+        return None
+    F = float(wd[-1][4])
+    hi, lo, c = max(float(r[2]) for r in we), min(float(r[3]) for r in we), float(we[-1][4])
+    up, dn = hi / F - 1, lo / F - 1
+    val = sum(float(r[5] or 0) for r in we)
+    avg = np.mean([float(r[5] or 0) for r in wd[-20:]]) if wd else 0
+    return dict(w_ret=c / F - 1, w_max=up if abs(up) >= abs(dn) else dn, w_val=val, w_vr=val / avg if avg else np.nan, w_days=len(we))
 
 
 def reasons(r):
@@ -175,6 +202,8 @@ def reasons(r):
         out.append("затишье перед движением (волатильность сжата)")
     if r.get("tier") == 3:
         out.append("3-й эшелон")
+    if r.get("w_days") and abs(r.get("w_ret") or 0) >= 0.015:
+        out.insert(0, f"торги выходных {r['w_ret'] * 100:+.1f}% к пятнице" + (f", оборот ×{r['w_vr']:.1f} к будням" if (r.get("w_vr") or 0) >= 0.3 else ""))
     return out
 
 
