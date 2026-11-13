@@ -33,21 +33,15 @@ def _get(url, tok):
 
 
 def fetch(code, d0, d1, tok):
-    """Ответ — блок «futoi» (а не «data»), страницы — параметром start (как в moexalgo.features.futoi)."""
-    rows, cols, start = [], None, 0
-    while True:
-        q = urllib.parse.urlencode({"from": d0, "till": d1, "start": start})
-        js = _get(f"{BASE}/{code}.json?{q}", tok)
-        blk = js.get("futoi") or js.get("data") or {}
-        c, data = (blk.get("columns") or [], blk.get("data") or []) if isinstance(blk, dict) else ([], [])
-        if not data:
-            break
-        cols = cols or c
-        rows += data
-        start += len(data)
-        if len(data) % 100:
-            break
-    return pd.DataFrame(rows, columns=cols) if cols else pd.DataFrame()
+    """Один запрос за период. Ответ — блок «futoi»; сервер отдаёт не больше 1000 строк и параметр start не листает
+    (в moexalgo тоже берётся одна страница), поэтому период держим коротким (3 дня ≈ 840 строк)."""
+    q = urllib.parse.urlencode({"from": d0, "till": d1})
+    js = _get(f"{BASE}/{code}.json?{q}", tok)
+    blk = js.get("futoi") or js.get("data") or {}
+    c, data = (blk.get("columns") or [], blk.get("data") or []) if isinstance(blk, dict) else ([], [])
+    if len(data) >= 1000:
+        log(f"FUTOI {code} {d0}…{d1}: ответ обрезан на {len(data)} строках")
+    return pd.DataFrame(data, columns=c) if c else pd.DataFrame()
 
 
 def codes():
@@ -73,7 +67,8 @@ def daily_last(df):
     return df.groupby(["tradedate", "clgroup"]).last().reset_index()[keep]
 
 
-def download(start="2020-01-01"):
+def download(start="2020-01-01", step=3, workers=8):
+    import concurrent.futures as cf
     tok = os.environ.get("ALGOPACK_TOKEN", "").strip()
     os.makedirs(ROOT, exist_ok=True)
     mp = codes()
@@ -82,27 +77,37 @@ def download(start="2020-01-01"):
     log("FUTOI: кодов фьючерсов на акции", len(todo))
     deadline = time.time() + 60 * float(os.environ.get("ALGOPACK_BUDGET_MIN", "300"))
     today = dt.date.today()
-    for code, tk in sorted(todo.items()):
+
+    def one(item):
+        code, tk = item
         p = os.path.join(ROOT, f"{code}.csv.gz")
         old = pd.read_csv(p) if os.path.exists(p) else pd.DataFrame()
         d0 = dt.date.fromisoformat(start)
         if len(old):
             d0 = dt.date.fromisoformat(str(old.tradedate.max())[:10]) + dt.timedelta(days=1)
-        parts = [old] if len(old) else []
+        parts, err = ([old] if len(old) else []), 0
         while d0 < today and time.time() < deadline:
-            d1 = min(today, d0 + dt.timedelta(days=90))
+            d1 = min(today, d0 + dt.timedelta(days=step - 1))
             try:
                 parts.append(daily_last(fetch(code.lower(), d0.isoformat(), d1.isoformat(), tok)))
+                err = 0
             except Exception as e:  # noqa: BLE001
-                log(f"FUTOI {code}: {d0}: {str(e)[:150]}")
-                break
+                err += 1
+                if err >= 5:
+                    log(f"FUTOI {code}: {d0}: {str(e)[:150]} — остановка по коду")
+                    break
+                time.sleep(3)
+                continue
             d0 = d1 + dt.timedelta(days=1)
         D = pd.concat([x for x in parts if len(x)], ignore_index=True) if any(len(x) for x in parts) else pd.DataFrame()
         if len(D):
             D = D.drop_duplicates(["tradedate", "clgroup"], keep="last")
             D["stock"] = tk
             D.to_csv(p, index=False, compression="gzip")
-        log(f"FUTOI {code} → {tk}: дней {D.tradedate.nunique() if len(D) else 0}")
+        return code, tk, (D.tradedate.nunique() if len(D) else 0)
+    with cf.ThreadPoolExecutor(workers) as ex:
+        for code, tk, n in ex.map(one, sorted(todo.items())):
+            log(f"FUTOI {code} → {tk}: дней {n}")
 
 
 def load():
