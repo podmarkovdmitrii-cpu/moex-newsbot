@@ -75,22 +75,29 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 // ---------- сеть ----------
 let FIX = null;
 // ISS реального времени через подписку ALGOPACK (apim.moex.com): бесплатный iss.moex.com отдаёт торговые данные с задержкой 15 минут.
-// Сертификат apim — НУЦ Минцифры (NODE_EXTRA_CA_CERTS в workflow). При ошибках — бесплатный ISS, после 5 ошибок подряд пауза 10 минут.
+// Сертификат apim — НУЦ Минцифры (NODE_EXTRA_CA_CERTS в workflow). При ошибках и медленных ответах — бесплатный ISS, после 3 подряд пауза 15 минут.
 const APIM = { fail: 0, until: 0, said: false };
 async function http(url, asJson = true) {
   if (FIXTURE) { FIX = FIX || JSON.parse(fs.readFileSync(FIXTURE, 'utf8')); const k = Object.keys(FIX).find(k => url.startsWith(k)); if (!k) throw new Error('нет в фикстуре: ' + url); return asJson ? FIX[k] : FIX[k]; }
   const tok = (process.env.ALGOPACK_TOKEN || '').trim();
   if (tok && url.startsWith(ISS + 'engines/') && Date.now() >= APIM.until) {
+    // один запрос к apim — не дольше 8 с; ошибка или ответ дольше 6 с — сбой; 3 сбоя подряд — 15 минут бесплатный ISS
+    // (13.11 apim зависал по 30–60 с на запрос, и посты не укладывались в 20 минут)
+    const t0 = Date.now();
+    let out = null, err = null;
     try {
-      const r = await fetch('https://apim.moex.com/iss/' + url.slice(ISS.length), { headers: { 'user-agent': 'moex-newsbot', authorization: 'Bearer ' + tok }, signal: AbortSignal.timeout(20000) });
+      const r = await fetch('https://apim.moex.com/iss/' + url.slice(ISS.length), { headers: { 'user-agent': 'moex-newsbot', authorization: 'Bearer ' + tok }, signal: AbortSignal.timeout(8000) });
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      const out = asJson ? await r.json() : await r.text();
+      out = asJson ? await r.json() : await r.text();
+    } catch (e) { err = e; }
+    const slow = Date.now() - t0 > 6000;
+    if (out !== null && !slow) {
       APIM.fail = 0;
       if (!APIM.said) { APIM.said = true; log('ISS: данные Мосбиржи в реальном времени через ALGOPACK (без 15-минутной задержки)'); }
       return out;
-    } catch (e) {
-      if (++APIM.fail >= 5) { APIM.until = Date.now() + 600e3; APIM.fail = 0; log('ISS реального времени (ALGOPACK) недоступен — 10 минут беру бесплатный ISS:', (e.cause && e.cause.code) || e.message); }
     }
+    if (++APIM.fail >= 3) { APIM.until = Date.now() + 900e3; APIM.fail = 0; log('ISS реального времени (ALGOPACK)', out !== null ? 'отвечает медленно' : 'недоступен', '— 15 минут беру бесплатный ISS', err ? ((err.cause && err.cause.code) || err.message) : ''); }
+    if (out !== null) return out;
   }
   for (let k = 0; k < 3; k++) {
     try {
@@ -524,7 +531,7 @@ function cronMatch(cron, d) {
   return cronField(mi, d.getUTCMinutes(), 0) && cronField(h, d.getUTCHours(), 0) && cronField(dom, d.getUTCDate(), 1) &&
     cronField(mon, d.getUTCMonth() + 1, 1) && cronField(dow, d.getUTCDay(), 0);
 }
-const CH_GRACE = { morning: 70, trader_prep: 50, trader_open: 30, weekly: 120, flows: 20, ofz: 40, evening: 60, trader_week: 90, stock_review: 120, weekend_review: 120 };
+const CH_GRACE = { morning: 70, trader_prep: 50, trader_open: 30, weekly: 120, flows: 20, ofz: 40, evening: 60, trader_week: 90, stock_review: 120, weekend_review: 120, monday_anom: 90 };
 function channelTick(S) {
   if (process.env.CHANNEL_SCHED !== '1') return;
   const now = Math.floor(Date.now() / 60e3) * 60e3;
@@ -555,7 +562,17 @@ function channelTick(S) {
 let CH_PROC = null;
 function channelRun(S) {
   if (CH_PROC) {
-    if (Date.now() - CH_PROC.t0 > 20 * 60e3) { log('паблик:', CH_PROC.mode, 'идёт дольше 20 мин — остановлен'); try { CH_PROC.p.kill('SIGKILL'); } catch (e) { /* уже завершился */ } CH_PROC = null; }
+    if (Date.now() - CH_PROC.t0 > 20 * 60e3) {
+      const k = CH_PROC;
+      log('паблик:', k.mode, 'идёт дольше 20 мин — остановлен');
+      try { k.p.kill('SIGKILL'); } catch (e) { /* уже завершился */ }
+      CH_PROC = null;
+      // итоги дня и прогноз на понедельник (один пост в конце расчёта) — один повтор: 13.11 «Итоги дня» не вышли из-за зависаний apim
+      if (['evening', 'monday_anom'].includes(k.mode) && !k.x.retry) {
+        log('паблик:', k.mode, '— повторный запуск');
+        S.chQueue = [Object.assign({}, k.x, { t: Date.now(), retry: true })].concat(S.chQueue || []);
+      }
+    }
     else return;
   }
   while ((S.chQueue || []).length) {
@@ -565,7 +582,7 @@ function channelRun(S) {
     log('паблик: по расписанию', x.mode, '(слот', new Date(x.t).toISOString().slice(11, 16), 'UTC, опоздание', Math.round(late), 'мин)');
     const p = require('child_process').spawn(process.env.PYTHON || 'python3', [path.join(HERE, 'channel', 'jobs.py')],
       { stdio: 'inherit', env: Object.assign({}, process.env, { MODE: '', SCHED: x.cron, CHANNEL_STATE: process.env.CHANNEL_STATE_DIR || path.join(STATE_DIR, 'channel-pub'), NEWS_STATE: STATE_DIR }) });
-    const rec = { p, mode: x.mode, t0: Date.now() };
+    const rec = { p, mode: x.mode, t0: Date.now(), x };
     CH_PROC = rec;
     p.on('exit', code => { log('паблик:', x.mode, 'готово за', Math.round((Date.now() - rec.t0) / 1000), 'с', code ? '(код ' + code + ')' : ''); if (CH_PROC === rec) { CH_PROC = null; channelRun(S); } });
     p.on('error', e => { log('паблик:', x.mode, 'не запустился:', e.message); if (CH_PROC === rec) CH_PROC = null; });
