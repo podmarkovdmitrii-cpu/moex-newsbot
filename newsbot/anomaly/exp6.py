@@ -239,7 +239,41 @@ def main():
         json.dump(out, open(path, "w"), ensure_ascii=False, indent=1)
         return r
 
-    if PART == "fu":
+    if PART == "all":
+        # всё, что даёт подписка и есть в истории: суперсвечи акций (сделки, заявки, стакан), HI2, MEGA ALERTS, FUTOI —
+        # против текущей боевой модели; два режима обучения (вся история и только годы с данными ALGOPACK)
+        import algopack as AP
+        import futoi as FU
+        A = AP.load()
+        F = FU.load()
+        log("ALGOPACK: строк", len(A), "| FUTOI: строк", len(F), "кодов", F.code.nunique() if len(F) else 0)
+        if not len(A):
+            raise SystemExit("нет данных ALGOPACK")
+        groups = g_algopack(X, A)
+        fcols = g_futoi(X, F) if len(F) else []
+        if fcols:
+            groups["FU толпа на фьючерсах (FUTOI)"] = fcols
+        first = int(A.d.dt.year.min())
+        years = list(range(first + 1, yr + 1))
+        out["years"] = years
+        for name, cols in groups.items():
+            out["groups"][name] = {c: round(float(X.loc[X.d.dt.year > first, c].notna().mean()), 3) for c in cols}
+            log("группа", name, "заполнено в среднем", round(float(np.mean(list(out["groups"][name].values()))), 3))
+        allc = [c for v in groups.values() for c in v]
+        sub = X[X.d.dt.year >= first].copy()
+        if fcols:
+            out["lift"] = E4.lift_tables(sub, fcols)
+        add(None)
+        for tag, data in (("с 2008 г.", X), (f"только с {first} г.", sub)):
+            base = add(E5.walk(data, FD, years, f"база = боевая, обучение {tag}"))
+            add(E5.walk(data, FD, years, f"шум: другие seed, обучение {tag}", seed0=100, base=base))
+            add(E5.walk(data, FD + allc, years, f"боевая + ВСЁ из ALGOPACK (сделки, заявки, стакан, HI2, сигналы, FUTOI), обучение {tag}", base=base))
+            if fcols:
+                add(E5.walk(data, FD + fcols, years, f"боевая + только FUTOI, обучение {tag}", base=base))
+            best = [c for g, v in groups.items() if g.startswith(("AP-B", "AP-H")) for c in v]
+            if best:
+                add(E5.walk(data, FD + best, years, f"боевая + стакан и HI2 (лучшие по отдельности), обучение {tag}", base=base))
+    elif PART == "fu":
         import futoi as FU
         F = FU.load()
         log("FUTOI: строк", len(F), "кодов", F.code.nunique() if len(F) else 0)
