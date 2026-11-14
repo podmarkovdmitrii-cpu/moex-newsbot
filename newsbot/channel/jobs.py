@@ -68,7 +68,8 @@ def liquid_shares(n=30):
                                                                               "securities.columns": "SECID,SHORTNAME,PREVPRICE,DECIMALS,INSTRID"})
     # на TQBR теперь торгуются и биржевые фонды (INSTRID IFTF и др.) — оставляем только акции и расписки (EQIN)
     names = {r["SECID"]: r for r in table(js, "securities") if (r.get("INSTRID") or "EQIN") == "EQIN"}
-    md = [dict(r, NAME=names[r["SECID"]].get("SHORTNAME", r["SECID"])) for r in table(js, "marketdata") if r.get("VALTODAY") and r["SECID"] in names]
+    md = [dict(r, NAME=names[r["SECID"]].get("SHORTNAME", r["SECID"]), PREVPRICE=names[r["SECID"]].get("PREVPRICE"))
+          for r in table(js, "marketdata") if r.get("VALTODAY") and r["SECID"] in names]
     md.sort(key=lambda r: -(r["VALTODAY"] or 0))
     return md[:n]
 
@@ -2847,6 +2848,12 @@ def anomaly():
         fut = {}
     secs = sec_of()
     frac = day_volume_share(now)
+    try:  # виртуальный счёт: стратегия из проверок №12–13 на живых сигналах (без сделок и без публикаций)
+        import paper_anom
+        at = load_json("anom_today.json", {})
+        paper_anom.scan(md, ixc, now, (at.get("rows") or {}) if at.get("date") == today else {})
+    except Exception as e:  # noqa: BLE001
+        log("виртуальный счёт:", e)
     try:
         index_move(stt, md)
     except Exception as e:  # noqa: BLE001
@@ -3579,7 +3586,7 @@ def main():
         PUB.sink = open(os.path.join(OUT, "posts.txt"), "a", encoding="utf-8")
         mode = mode[:-4]
     log("режим", mode, "(без отправки)" if PUB.dry else "")
-    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "monday_anom": monday_anom, "anom_next": anom_next, "anom_final": anom_final, "telegraph_check": telegraph_check, "shakeout_scan": shakeout_scan, "pattern_scan": shakeout_scan, "strong_moves": strong_moves, "nav": nav, "calendar_week": calendar_week, "poll": poll,
+    {"morning": morning, "flows": flows, "ofz": ofz, "pulse": pulse, "evening": evening, "weekly": weekly, "aitest": aitest, "test_post": test_post, "tg_check": tg_check, "anomaly": anomaly, "commod": commod_plan, "pulse_deals": pulse_deals, "anom_pre": anom_pre, "anom_test": anom_test, "trade_prob": trade_prob_cli, "level": level_cli, "stock_review": stock_review, "weekend_review": weekend_review, "monday_anom": monday_anom, "paper_report": lambda: __import__("paper_anom").report(), "anom_next": anom_next, "anom_final": anom_final, "telegraph_check": telegraph_check, "shakeout_scan": shakeout_scan, "pattern_scan": shakeout_scan, "strong_moves": strong_moves, "nav": nav, "calendar_week": calendar_week, "poll": poll,
      "trader_prep": lambda: trader_off() or trader_mod().prep(PUB), "trader_open": lambda: trader_off() or trader_mod().open_(PUB),
      "trader_week": lambda: trader_off() or trader_mod().week(PUB)}[mode]()
 
