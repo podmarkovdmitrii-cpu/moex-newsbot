@@ -99,13 +99,20 @@ def load_paths(E, token):
     return res
 
 
-def simulate5(E, paths, strict=False, tp_k=0.25, pb=0.5, hold=5):
-    """→ таблица сделок по 5-минутным барам (NaN — лимит не исполнен / нет данных)."""
+def simulate5(E, paths, strict=False, tp_k=0.25, pb=0.5, hold=5, fallback=None):
+    """→ таблица сделок по 5-минутным барам. Если 5-минутных данных нет или после сигнала меньше 5 торговых дней (праздники,
+    закрытие биржи в 2022 г.) — берём результат той же стратегии по часовым/дневным свечам (fallback), чтобы не выкинуть
+    именно тяжёлые случаи; таких сигналов — отдельный счётчик."""
     rows = []
+    fb = fallback if fallback is not None else {}
+
+    def take_fb(i, why):
+        v = fb.get(i, np.nan)
+        rows.append(dict(i=i, status="сделка" if v == v else "не исполнен", ret=v, why="часовые", fill_val=np.nan, bad=0, fb=why))
     for i, r in E.iterrows():
         P = paths.get(i)
         if not P or not P["bars"]:
-            rows.append(dict(i=i, status="нет данных"))
+            take_fb(i, "нет данных")
             continue
         # чистка: нулевые/пустые цены и бары вне дневного диапазона Мосбиржи (±10%) — сбой данных или масштаб до дробления;
         # дневные свечи ISS скорректированы на дробления, настоящие обвалы в них есть и не отбрасываются
@@ -115,11 +122,11 @@ def simulate5(E, paths, strict=False, tp_k=0.25, pb=0.5, hold=5):
         band = {d0: (min([r.L0] + list(r.fl)), max([r.H0] + list(r.fh)))}
         for k, dd_ in enumerate(wdays[: len(r.nh)]):
             band[dd_] = (float(r.nl[k]), float(r.nh[k]))
-        B = [b for b in B0 if b[0][:10] not in band or (b[3] >= 0.9 * band[b[0][:10]][0] and b[2] <= 1.1 * band[b[0][:10]][1])]
+        B = [b for b in B0 if b[0][:10] not in band or (b[3] >= 0.7 * band[b[0][:10]][0] and b[2] <= 1.3 * band[b[0][:10]][1])]
         t0 = f"{d0} {int(r.c) + 1:02d}:05"           # первый 5-минутный бар, целиком после закрытия часа сигнала
         days = sorted({b[0][:10] for b in B if b[0][:10] > d0 and dt.date.fromisoformat(b[0][:10]).weekday() < 5})
         if len(days) < hold:
-            rows.append(dict(i=i, status="мало дней"))
+            take_fb(i, "мало дней")
             continue
         last_day = days[hold - 1]
         lim = r.p0 - pb * (r.p0 - r.prev)
@@ -132,7 +139,7 @@ def simulate5(E, paths, strict=False, tp_k=0.25, pb=0.5, hold=5):
                 fi = j
                 break
         if fi is None:
-            rows.append(dict(i=i, status="не исполнен"))
+            rows.append(dict(i=i, status="не исполнен", fb=""))
             continue
         fill_val = B[fi][5] or 0
         ex, why = None, None
@@ -148,12 +155,14 @@ def simulate5(E, paths, strict=False, tp_k=0.25, pb=0.5, hold=5):
             half = (spr / 1e4 / 2) if spr is not None and 0 <= spr < 2000 else 0.0015
             ex, why = lastb[4] * (1 - half), "срок"
         ret = ex / lim - 1 - 2 * COMM
-        rows.append(dict(i=i, status="сделка", ret=ret, why=why, fill_val=fill_val, bad=len(P["bars"]) - len(B)))
+        rows.append(dict(i=i, status="сделка", ret=ret, why=why, fill_val=fill_val, bad=len(P["bars"]) - len(B), fb=""))
     return pd.DataFrame(rows).set_index("i")
 
 
 def summary(E, T, name):
-    log(f"[{name}] статусы: " + ", ".join(f"{k} {v}" for k, v in T.status.value_counts().items()))
+    log(f"[{name}] статусы: " + ", ".join(f"{k} {v}" for k, v in T.status.value_counts().items())
+        + (f"; по часовым вместо 5 минут: {int((T.fb.fillna('') != '').sum())} сигналов, из них сделок {int(((T.fb.fillna('') != '') & (T.status == 'сделка')).sum())}"
+           if "fb" in T.columns else ""))
     m = T.status == "сделка"
     if "ret" not in T.columns or not m.any():
         log(f"[{name}] сделок нет")
@@ -206,14 +215,19 @@ def main():
     rh = E12.simulate(E, Ph, "follow", "0.5", "0.25", None, 5)
     Th = pd.DataFrame({"status": np.where(np.isfinite(rh), "сделка", "не исполнен"), "ret": rh, "why": "?"}, index=E.index)
     out["runs"].append(summary(E, Th, "ЧАСОВЫЕ свечи (как в №12), издержки 0,1/0,2/0,3%"))
+    fbs = {}
+    for pb_, tp_ in ((0.5, 0.25), (0.5, 0.5), (0.382, 0.25)):
+        rr = E12.simulate(E, Ph, "follow", str(pb_) if pb_ != 0.5 else "0.5", str(tp_), None, 5)
+        rr = rr + E.tier.map(E12.COST_T).values - 2 * COMM          # издержки — как в 5-минутном варианте (комиссия 0,05%×2)
+        fbs[(pb_, tp_)] = dict(enumerate(rr))
     for strict in (False, True):
-        T = simulate5(E, P, strict=strict)
+        T = simulate5(E, P, strict=strict, fallback=fbs[(0.5, 0.25)])
         out["runs"].append(summary(E, T, f"5 МИНУТ ALGOPACK{' строго (цена прошла уровень)' if strict else ''}, комиссия 0,05%×2 + полспреда на выходе"))
     for tp_k in (0.5,):
-        T = simulate5(E, P, tp_k=tp_k)
+        T = simulate5(E, P, tp_k=tp_k, fallback=fbs[(0.5, tp_k)])
         out["runs"].append(summary(E, T, f"5 МИНУТ, тейк {tp_k:.0%} хода"))
     for pb in (0.382,):
-        T = simulate5(E, P, pb=pb)
+        T = simulate5(E, P, pb=pb, fallback=fbs[(pb, 0.25)])
         out["runs"].append(summary(E, T, f"5 МИНУТ, откат {pb:.0%}"))
     json.dump(out, open(os.path.join(TR.MODELS, "exp14_report.json"), "w"), ensure_ascii=False, indent=1, default=str)
     log("===== ИТОГ ПРОВЕРКИ №14 =====", round(time.time() - t0), "с")
