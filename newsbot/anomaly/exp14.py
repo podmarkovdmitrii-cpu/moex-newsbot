@@ -107,8 +107,15 @@ def simulate5(E, paths, strict=False, tp_k=0.25, pb=0.5, hold=5):
         if not P or not P["bars"]:
             rows.append(dict(i=i, status="нет данных"))
             continue
-        B = [b for b in P["bars"] if b[2] is not None and b[3] is not None and b[4] is not None]
+        # чистка: нулевые/пустые цены и бары вне дневного диапазона Мосбиржи (±10%) — сбой данных или масштаб до дробления;
+        # дневные свечи ISS скорректированы на дробления, настоящие обвалы в них есть и не отбрасываются
         d0 = r.d.strftime("%Y-%m-%d")
+        B0 = [b for b in P["bars"] if all(x is not None and x == x and x > 0 for x in b[1:5])]
+        wdays = sorted({b[0][:10] for b in B0 if b[0][:10] > d0 and dt.date.fromisoformat(b[0][:10]).weekday() < 5})
+        band = {d0: (min([r.L0] + list(r.fl)), max([r.H0] + list(r.fh)))}
+        for k, dd_ in enumerate(wdays[: len(r.nh)]):
+            band[dd_] = (float(r.nl[k]), float(r.nh[k]))
+        B = [b for b in B0 if b[0][:10] not in band or (b[3] >= 0.9 * band[b[0][:10]][0] and b[2] <= 1.1 * band[b[0][:10]][1])]
         t0 = f"{d0} {int(r.c) + 1:02d}:05"           # первый 5-минутный бар, целиком после закрытия часа сигнала
         days = sorted({b[0][:10] for b in B if b[0][:10] > d0 and dt.date.fromisoformat(b[0][:10]).weekday() < 5})
         if len(days) < hold:
@@ -141,7 +148,7 @@ def simulate5(E, paths, strict=False, tp_k=0.25, pb=0.5, hold=5):
             half = (spr / 1e4 / 2) if spr is not None and 0 <= spr < 2000 else 0.0015
             ex, why = lastb[4] * (1 - half), "срок"
         ret = ex / lim - 1 - 2 * COMM
-        rows.append(dict(i=i, status="сделка", ret=ret, why=why, fill_val=fill_val))
+        rows.append(dict(i=i, status="сделка", ret=ret, why=why, fill_val=fill_val, bad=len(P["bars"]) - len(B)))
     return pd.DataFrame(rows).set_index("i")
 
 
@@ -170,6 +177,10 @@ def summary(E, T, name):
         f"{out['mean']:+.2%}/сделку (медиана {out['med']:+.2%}), прибыльных {out['win']:.0%}, PF {out['pf']}, тейк {out['tp']:.0%}, "
         f"капитал {out['cap_year']:+.1%}/год, просадка {out['dd']:.0%}, худшая сделка {out['worst']:+.1%}")
     log(f"[{name}] по годам: " + "; ".join(f"{y}: {v['n']} сд, {v['mean']:+.2%}, кап {v['cap']:+.1%}" for y, v in out["by_year"].items()))
+    w = x.sort_values().head(8)
+    log(f"[{name}] худшие сделки: " + "; ".join(f"{E.loc[k, 't']} {E.loc[k, 'd'].date()} {v:+.1%}" for k, v in w.items()))
+    if "bad" in T.columns:
+        log(f"[{name}] отброшено ошибочных 5-минутных баров: {int(T.bad[m].sum())} в {int((T.bad[m] > 0).sum())} сделках")
     if "capacity" in out:
         log(f"[{name}] оборот в баре исполнения хватил бы на заявку: " + ", ".join(f"{k} — {v:.0%}" for k, v in out["capacity"].items()))
     return out
