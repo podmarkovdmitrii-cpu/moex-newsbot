@@ -1,0 +1,55 @@
+name: Проверка №13 — стратегия на аномалиях с 2008 года
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: anomaly-long
+  cancel-in-progress: false
+
+jobs:
+  long:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet "scikit-learn==1.5.2" pandas numpy scipy matplotlib
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
+          restore-keys: anomaly-data-
+      - uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - name: Часовые свечи до 2020 года (кэш)
+        uses: actions/cache/restore@v4
+        with:
+          path: h-old
+          key: h-old-v1-${{ github.run_id }}
+          restore-keys: h-old-v1-
+      - name: "Стратегия из проверки №12 — по годам с 2008"
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-exp
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          EXP_H_DIR: ${{ github.workspace }}/h-old
+          EXP_H_BUDGET_MIN: '180'
+        run: python newsbot/anomaly/exp13.py
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: h-old
+          key: h-old-v1-${{ github.run_id }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp13-report
+          path: anomaly-exp/exp13_report.json
+          if-no-files-found: ignore
