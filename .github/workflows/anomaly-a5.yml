@@ -1,0 +1,61 @@
+name: Проверка №14 — стратегия на 5-минутных свечах ALGOPACK
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: anomaly-a5
+  cancel-in-progress: false
+
+jobs:
+  a5:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet "scikit-learn==1.5.2" pandas numpy scipy matplotlib
+      - name: Сертификаты НУЦ Минцифры (apim.moex.com подписан ими)
+        run: |
+          for f in russian_trusted_root_ca_pem.crt russian_trusted_sub_ca_pem.crt; do
+            curl -sSfL --max-time 30 "https://gu-st.ru/content/lending/$f" >> "$RUNNER_TEMP/ru_ca.pem" && echo >> "$RUNNER_TEMP/ru_ca.pem"
+          done
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
+          restore-keys: anomaly-data-
+      - uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - name: 5-минутные свечи ALGOPACK по сигналам (кэш)
+        uses: actions/cache/restore@v4
+        with:
+          path: a5
+          key: a5-v1-${{ github.run_id }}
+          restore-keys: a5-v1-
+      - name: "Стратегия S1 — 5 минут, реальный спред, 2020–2026"
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-exp
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
+          RU_CA: ${{ runner.temp }}/ru_ca.pem
+          EXP_A5_DIR: ${{ github.workspace }}/a5
+        run: python newsbot/anomaly/exp14.py
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: a5
+          key: a5-v1-${{ github.run_id }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp14-report
+          path: anomaly-exp/exp14_report.json
+          if-no-files-found: ignore
