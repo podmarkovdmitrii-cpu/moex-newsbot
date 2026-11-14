@@ -10,7 +10,7 @@ on:
         required: true
         default: 'morning'
         type: choice
-        options: [tg_check, test_post, aitest, anom_test, anom_pre, morning_dry, evening_dry, trader_prep_dry, trader_open_dry, trader_week_dry, anomaly, commod, morning, flows, ofz, pulse_deals, evening, weekly, trader_prep, trader_open, trader_week, stock_review, stock_review_dry, weekend_review, weekend_review_dry, monday_anom, monday_anom_dry, flows_dry]
+        options: [tg_check, test_post, aitest, anom_test, anom_pre, morning_dry, evening_dry, trader_prep_dry, trader_open_dry, trader_week_dry, anomaly, commod, morning, flows, ofz, pulse_deals, evening, weekly, trader_prep, trader_open, trader_week, stock_review, stock_review_dry, weekend_review, weekend_review_dry, monday_anom, monday_anom_dry, paper_report, flows_dry]
 
 concurrency:
   group: channel
