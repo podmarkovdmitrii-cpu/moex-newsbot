@@ -41,6 +41,13 @@ STRATS = {
     "S4 = S1 + стоп 50% хода": (("follow", "0.5", "0.25", "0.5", 5), "все", "рост"),
     "S5 шорт роста 3-го эшелона, сразу, тейк 50%, до закрытия дня": (("fade", "sig", "0.5", None, 0), "эшелон 3", "все"),
     "БАЗА: по движению, сразу, до закрытия дня": (("follow", "sig", None, None, 0), "все", "все"),
+    # ликвидность: lval — десятичный логарифм медианного дневного оборота (7 = 10 млн ₽, 7,5 ≈ 30 млн ₽, 8 = 100 млн ₽)
+    "S1 | оборот ≥ 10 млн ₽/день": (("follow", "0.5", "0.25", None, 5), "ликв 10", "рост"),
+    "S1 | оборот ≥ 30 млн ₽/день": (("follow", "0.5", "0.25", None, 5), "ликв 30", "рост"),
+    "S1 | оборот ≥ 100 млн ₽/день": (("follow", "0.5", "0.25", None, 5), "ликв 100", "рост"),
+    "S5 | 3-й эшелон, оборот ≥ 10 млн ₽/день": (("fade", "sig", "0.5", None, 0), "эшелон 3 ликв 10", "все"),
+    "S5 | 3-й эшелон, оборот ≥ 30 млн ₽/день": (("fade", "sig", "0.5", None, 0), "эшелон 3 ликв 30", "все"),
+    "БАЗА | оборот ≥ 30 млн ₽/день": (("follow", "sig", None, None, 0), "ликв 30", "все"),
 }
 
 
@@ -127,7 +134,11 @@ def main():
     E = E[E.d >= pd.Timestamp(TR.FROM)].reset_index(drop=True)
     P = E12.paths(E)
     log("сигналов по годам:", ", ".join(f"{y}: {n}" for y, n in E.d.dt.year.value_counts().sort_index().items()))
-    fil = {"все": np.ones(len(E), bool), "эшелон 3": E.tier.values == 3}
+    lv = E.lval.values
+    fil = {"все": np.ones(len(E), bool), "эшелон 3": E.tier.values == 3, "ликв 10": lv >= 7, "ликв 30": lv >= 7.477, "ликв 100": lv >= 8,
+           "эшелон 3 ликв 10": (E.tier.values == 3) & (lv >= 7), "эшелон 3 ликв 30": (E.tier.values == 3) & (lv >= 7.477)}
+    log("доля сигналов по обороту: ≥10 млн", round(float((lv >= 7).mean()), 3), "≥30 млн", round(float((lv >= 7.477).mean()), 3),
+        "≥100 млн", round(float((lv >= 8).mean()), 3))
     dr = {"все": np.ones(len(E), bool), "рост": E.s.values > 0}
     out = dict(started=dt.datetime.utcnow().isoformat(timespec="minutes"), n=int(len(E)), strategies={})
     periods = [(2008, 2013), (2014, 2019), (2020, 2021), (2022, 2024), (2025, 2026), (2008, 2021), (2008, 2026)]
@@ -135,7 +146,7 @@ def main():
         E12.COST_T = {k: v * cost_mult for k, v in {1: 0.001, 2: 0.002, 3: 0.003}.items()}
         log(f"===== ИЗДЕРЖКИ ×{cost_mult:g}: {E12.COST_T} =====")
         for nm, (g, fn, dn) in STRATS.items():
-            if cost_mult > 1 and not nm.startswith(("S1", "S2", "БАЗА")):
+            if cost_mult > 1 and not nm.startswith(("S1 главная", "S1 | оборот ≥ 30", "S5 | 3-й эшелон, оборот ≥ 30", "БАЗА")):
                 continue
             r = E12.simulate(E, P, *g)
             m = fil[fn] & dr[dn]
