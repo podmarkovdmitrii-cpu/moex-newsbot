@@ -126,6 +126,29 @@ def day_flows(tickers, day=None, workers=8, market="eq"):
     return out
 
 
+def window_flows(tickers, t0, t1, day=None, workers=6):
+    """Покупки/продажи по бумагам за окно времени дня (бары, закончившиеся в (t0, t1], время ЧЧ:ММ): {тикер: (покупки ₽, продажи ₽)}."""
+    if not enabled() or _paused():
+        return {}
+    day = day or _today()
+
+    def one(t):
+        try:
+            R = _rows(f"tradestats/{t}", **{"from": day, "till": day})
+        except Exception:  # noqa: BLE001
+            return t, None
+        W = [r for r in R if t0 < str(r.get("tradetime") or "")[:5] <= t1]
+        if not W:
+            return t, None
+        return t, (sum(float(r.get("val_b") or 0) for r in W), sum(float(r.get("val_s") or 0) for r in W))
+    out = {}
+    with cf.ThreadPoolExecutor(workers) as ex:
+        for t, v in ex.map(one, list(tickers)):
+            if v:
+                out[t] = v
+    return out
+
+
 def book(ticker, day=None):
     """Стакан на последний бар дня: спред (б.п. и %), спред на 1 млн ₽, дисбаланс объёма заявок, глубина покупок/продаж."""
     if not enabled():

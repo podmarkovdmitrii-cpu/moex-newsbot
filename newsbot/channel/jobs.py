@@ -3002,7 +3002,17 @@ def anomaly():
     try:  # виртуальный счёт: стратегия из проверок №12–13 на живых сигналах (без сделок и без публикаций)
         import paper_anom
         at = load_json("anom_today.json", {})
-        paper_anom.scan(md, ixc, now, (at.get("rows") or {}) if at.get("date") == today else {})
+        nh = {}  # новости дня по бумагам (часы МСК) — признак модели-фильтра F4/F2
+        for c_ in (load_json("newsbot.json", {}, NEWS_STATE).get("cl") or {}).values():
+            w_ = dt.datetime.fromtimestamp(c_.get("ts", 0), MSKTZ)
+            if w_.date() == now.date():
+                nh.setdefault(c_["key"].split("|")[0], []).append(w_.hour + w_.minute / 60)
+        try:
+            import algopack_live as AL_
+            al_ = AL_ if AL_.enabled() and not DEMO else None
+        except Exception:  # noqa: BLE001
+            al_ = None
+        paper_anom.scan(md, ixc, now, (at.get("rows") or {}) if at.get("date") == today else {}, dict(secs=secs, news=nh, al=al_))
     except Exception as e:  # noqa: BLE001
         log("виртуальный счёт:", e)
     try:
