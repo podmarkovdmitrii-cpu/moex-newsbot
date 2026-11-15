@@ -124,7 +124,7 @@ def sim5(E, Dd, bars, way, cost):
     """Сделка по 5-минутным барам; NaN — нет данных (меньше дней с барами, чем нужно, или нет бара входа)."""
     res = np.full(len(E), np.nan)
     why = {"нет бара входа": 0, "нет 5-мин данных за срок": 0}
-    for i, r in E.iterrows():
+    for j, (i, r) in enumerate(E.iterrows()):  # i — номер сигнала в общей таблице (для издержек), j — позиция в ответе
         d0 = r.d.strftime("%Y-%m-%d")
         days = trading_days(Dd, r.t, d0, way["hold"])
         if len(days) < way["hold"]:
@@ -169,7 +169,7 @@ def sim5(E, Dd, bars, way, cost):
         if ex is None:
             lb = [x for x in seq if x[0] <= last]
             ex = lb[-1][5]
-        res[i] = ex / e - 1 - cost[i]
+        res[j] = ex / e - 1 - cost[i]
     return res, why
 
 
