@@ -55,6 +55,20 @@ WF_FROM = int(os.environ.get("EXP_WF_FROM", "2016"))
 MIN_TR = int(os.environ.get("EXP_MIN_TRADES", "100"))
 
 
+def bad_path(c0, nh, nl, nc):
+    """Сбой данных: скачок закрытия за день > +80% / −45% (дробление/консолидация без поправки), бар с max/min > 2,
+    или цена ушла в 3+ раза от входа — такие сигналы не считаем (иначе одна ошибка даёт «+100% на сделку»)."""
+    c = np.r_[c0, np.asarray(nc, float)]
+    c = c[np.isfinite(c) & (c > 0)]
+    if len(c) < 2:
+        return True
+    r = c[1:] / c[:-1]
+    h, l = np.asarray(nh, float), np.asarray(nl, float)
+    ok = np.isfinite(h) & np.isfinite(l) & (l > 0)
+    return bool((r > 1.8).any() or (r < 0.55).any() or (ok.any() and (h[ok] / l[ok] > 2).any())
+                or c.max() / c[0] > 3 or c.min() / c[0] < 1 / 3)
+
+
 def cost_of(lval):
     return np.where(lval >= 8, 0.001, np.where(lval >= 7, 0.002, 0.005))
 
@@ -65,7 +79,10 @@ def events_a(X, H2, IX2, Dd):
     E = E12.events(X, H2, IX2, Dd)
     E = E[E.d >= pd.Timestamp("2011-11-18")].reset_index(drop=True)
     E12.NDAYS = 5
-    return E
+    bad = np.array([bad_path(r.close, r.nh, r.nl, r.nc) or (len(r.fh) and (max(r.fh) / r.p0 > 2 or min(r.fl) / r.p0 < 0.5))
+                    for r in E.itertuples()])
+    log(f"A: отброшено сигналов со сбоем данных (скачки после дроблений и т. п.): {int(bad.sum())} из {len(E)}")
+    return E[~bad].reset_index(drop=True)
 
 
 def paths_a(E):
@@ -100,6 +117,9 @@ def events_b(X, Dd):
                              lval=float(r.lval) if r.lval == r.lval else 6.0, no=o[j + 1:j + 1 + ND], nh=h[j + 1:j + 1 + ND],
                              nl=l[j + 1:j + 1 + ND], nc=c[j + 1:j + 1 + ND]))
     B = pd.DataFrame(rows)
+    bad = np.array([bad_path(r.c0, r.nh, r.nl, r.nc) or abs(r.mv) > 0.8 for r in B.itertuples()])
+    log(f"B: отброшено сигналов со сбоем данных: {int(bad.sum())} из {len(B)}")
+    B = B[~bad].reset_index(drop=True)
     log("дневных сигналов B:", len(B), "| по годам", B.d.dt.year.value_counts().sort_index().to_dict())
     return B
 
