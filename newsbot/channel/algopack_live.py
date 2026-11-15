@@ -92,7 +92,8 @@ def _today():
 
 
 def day_flows(tickers, day=None, workers=8, market="eq"):
-    """{тикер: {"vb": покупки ₽, "vs": продажи ₽, "tb": сделок покупателей, "ts": продавцов, "last": время последнего бара}}.
+    """{тикер: {"vb": покупки ₽, "vs": продажи ₽, "tb": сделок покупателей, "ts": продавцов, "last": время последнего бара,
+    "hb"/"hs": покупки/продажи за последний час}}.
     market: eq — акции, fo — фьючерсы (код контракта, например BRZ6), fx — валюта."""
     if not enabled() or _paused():
         return {}
@@ -108,8 +109,15 @@ def day_flows(tickers, day=None, workers=8, market="eq"):
             return t, None
         if not R:
             return t, None
-        f = lambda k: sum(float(r.get(k) or 0) for r in R)
-        return t, dict(vb=f("val_b"), vs=f("val_s"), tb=f("trades_b"), ts=f("trades_s"), last=max(str(r.get("tradetime") or "") for r in R))
+        f = lambda k, rows=R: sum(float(r.get(k) or 0) for r in rows)
+        last = max(str(r.get("tradetime") or "") for r in R)
+        try:  # последний час: бары, закончившиеся позже чем за 60 минут до последнего (время бара — его конец)
+            lh, lm = int(last[:2]), int(last[3:5])
+            cut = f"{(lh * 60 + lm - 60) // 60:02d}:{(lh * 60 + lm - 60) % 60:02d}"
+        except ValueError:
+            cut = last
+        H = [r for r in R if str(r.get("tradetime") or "")[:5] > cut]
+        return t, dict(vb=f("val_b"), vs=f("val_s"), tb=f("trades_b"), ts=f("trades_s"), last=last, hb=f("val_b", H), hs=f("val_s", H))
     out = {}
     with cf.ThreadPoolExecutor(workers) as ex:
         for t, v in ex.map(one, list(tickers)):

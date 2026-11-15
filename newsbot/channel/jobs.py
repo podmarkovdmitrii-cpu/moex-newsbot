@@ -2535,6 +2535,121 @@ def anom_intraday(stt, md, ixc, now):
     PUB.post("\n".join(txt))
 
 
+# Статус идей из утреннего прогноза аномалий (проверка №16, newsbot/anomaly/exp16.py, run 43712939667): кандидаты — топ-10 утреннего
+# прогноза с уверенным направлением; правила выбраны по 2021–2023 гг., цифры — на 2024–2026 гг. (выбор их не видел).
+ST_CONF = dict(a=0.5, fl=0.0, v=1.3, fp=0.05)     # ход ≥ 50% порога в свою сторону, деньги за день ≥ 0, оборот ≥ ×1,3, деньги за 3 дня ≥ +5%
+ST_CANC = dict(a=-0.1, fl=-0.10, flh=0.0)         # ход против ≥ 10% порога, деньги за день ≤ −10%, за последний час ≤ 0
+ST_HIST = dict(conf="На истории 2024–2026 гг. после таких признаков ценовая аномалия в эту сторону случалась в 26% случаев за 2 дня "
+                    "(чаще всего в тот же день — 19%), у остальных бумаг прогноза — в 3,5%; любая аномалия (по цене или обороту) в тот же день — "
+                    "в половине случаев против 11%. С 3-го дня признак уже не действует.",
+               canc="На истории 2024–2026 гг. после такого шанс аномалии в предсказанную сторону сегодня — около 0,3% (у остальных бумаг прогноза 1,3%), "
+                    "за 2 дня — 2,2% против 3,5%; дальше — как у всех.")
+
+
+def anom_status(stt, md, ixc, now):
+    """Каждые 15 минут 11:00–16:00: бумаги утреннего топа, которые ещё не стали аномалией, — «признаки подтверждаются» или
+    «идея отменяется на сегодня». Пост — только при смене статуса (несколько смен за проход — одним постом), не больше
+    ANOM_STATUS_PER_DAY постов в день. Состояние — anomaly.json (ключ st), журнал для проверки на живых данных — anom_status.json."""
+    hm = now.strftime("%H:%M")
+    if not ("10:55" <= hm <= "16:05") or DEMO or time.time() - stt.get("st_ts", 0) < int(os.environ.get("ANOM_STATUS_MIN", "15")) * 60 - 30:
+        return
+    stt["st_ts"] = time.time()
+    today = anom_today_any()
+    if not today or not today.get("rows"):
+        return
+    rows = today["rows"]
+    top = [t for t in sorted(rows, key=lambda t: -(rows[t].get("p_y") or 0))[:10]
+           if rows[t].get("p_dir_up") is not None and abs(rows[t]["p_dir_up"] - 0.5) >= 0.1 and rows[t].get("sd60") is not None]
+    by = {r["SECID"]: r for r in md}
+    top = [t for t in top if t in by and by[t].get("LAST")]
+    if not top:
+        return
+    import algopack_live as AL
+    if not AL.enabled():
+        return
+    st_ = stt.setdefault("st", {})
+    fp = stt.get("st_fp")
+    if fp is None:  # деньги за 3 предыдущих торговых дня — один раз в день
+        acc = {}
+        d = now.date()
+        for _ in range(3):
+            d = prev_wd(d)
+            for t, f in AL.day_flows(top, day=d.isoformat()).items():
+                a = acc.setdefault(t, [0.0, 0.0])
+                a[0] += f["vb"]
+                a[1] += f["vs"]
+        fp = {t: (b - s_) / (b + s_) for t, (b, s_) in acc.items() if b + s_ > 0}
+        stt["st_fp"] = fp
+    fl = AL.day_flows(top)
+    try:
+        typ = anom_live().meta().get("typ", {})
+    except Exception:  # noqa: BLE001
+        typ = {}
+    c_hour = now.hour - 1 if now.minute < 50 else now.hour
+    lines, rec = [], []
+    for t in top:
+        r, d = by[t], rows[t]
+        s = 1.0 if d["p_dir_up"] >= 0.5 else -1.0
+        tier = int(d.get("tier") or 3)
+        thr = max({1: 0.04, 2: 0.06}.get(tier, 0.08), 3 * d["sd60"])
+        cx = (r.get("LASTTOPREVPRICE") or 0) / 100 - ixc
+        val = r.get("VALTODAY") or 0
+        med = 10 ** (d.get("lval") or 12)
+        if abs(cx) >= thr or (val / med >= (6 if tier == 3 else 4) and val >= 30e6) or t in stt.get("sent", {}):
+            continue  # уже аномалия — статус не нужен
+        f = fl.get(t)
+        if not f or f["vb"] + f["vs"] <= 0:
+            continue
+        a = s * cx / thr
+        fday = s * (f["vb"] - f["vs"]) / (f["vb"] + f["vs"])
+        fh = s * (f["hb"] - f["hs"]) / (f["hb"] + f["hs"]) if f.get("hb", 0) + f.get("hs", 0) > 0 else None
+        ts = (typ.get(t) or {}).get(str(c_hour))
+        v = val / med / ts if ts else None
+        f3 = s * fp[t] if t in fp else None
+        new = None
+        if a >= ST_CONF["a"] and fday >= ST_CONF["fl"] and v is not None and v >= ST_CONF["v"] and f3 is not None and f3 >= ST_CONF["fp"]:
+            new = "conf"
+        elif a <= ST_CANC["a"] and fday <= ST_CANC["fl"] and fh is not None and fh <= ST_CANC["flh"]:
+            new = "canc"
+        old = (st_.get(t) or {}).get("s")
+        if not new or new == old:
+            continue
+        arrow = "⬆️" if s > 0 else "⬇️"
+        side = "покупки" if s > 0 else "продажи"
+        anti = "продажи" if s > 0 else "покупки"
+        if new == "conf":
+            lines.append(f"✅ <b>${t}</b> — признаки подтверждаются, прогноз {arrow}: уже {pc(cx, 1)} к индексу ({a:.0%} порога аномалии), "
+                         f"{side} перевешивают ({pc(fday, 0, False)} перевеса с начала дня, {pc(f3, 0, False)} за 3 дня), оборот ×{fmt(v, 1)} к обычному "
+                         f"на это время. Резкого движения ещё не было — аномалия может случиться позже.")
+        else:
+            lines.append(f"❌ <b>${t}</b> — идея отменяется на сегодня: прогноз был {arrow}, а бумага {pc(cx, 1)} к индексу, "
+                         f"{anti} перевешивают ({pc(-fday, 0, False)} перевеса с начала дня, за последний час тоже).")
+        st_[t] = dict(s=new, at=hm, a=round(a, 3), fl=round(fday, 3), fh=None if fh is None else round(fh, 3), v=None if v is None else round(v, 2),
+                      fp=None if f3 is None else round(f3, 3), cx=round(cx, 4), dir=s)
+        rec.append(dict(t=t, **st_[t]))
+    if not rec:
+        return
+    log("статус идей:", ", ".join(f"{x['t']} {x['s']}" for x in rec))
+    track = load_json("anom_status.json", {"days": {}})
+    track["days"].setdefault(now.date().isoformat(), []).extend(rec)
+    track["days"] = dict(sorted(track["days"].items())[-120:])
+    save_json("anom_status.json", track)
+    if stt.get("st_n", 0) >= int(os.environ.get("ANOM_STATUS_PER_DAY", "4")):
+        log("статус идей: лимит постов на день исчерпан — только в журнал")
+        return
+    kinds = {x["s"] for x in rec}
+    txt = ["🧭 <b>Идеи из утреннего прогноза аномалий — статус на " + hm + "</b>", ""] + lines + [""]
+    if "conf" in kinds:
+        txt.append("<i>" + ST_HIST["conf"] + "</i>")
+    if "canc" in kinds:
+        txt.append("<i>" + ST_HIST["canc"] + "</i>")
+    txt += ["<i>Признаки: ход к индексу от вчерашнего закрытия, перевес покупок/продаж (Мосбиржа, ALGOPACK), оборот к обычному на это время. "
+            "Проверка №16 на истории 2021–2026 гг. Не является индивидуальной инвестиционной рекомендацией.</i>",
+            "#статус_идей " + " ".join("#" + x["t"] for x in rec)]
+    stt["st_n"] = stt.get("st_n", 0) + 1
+    PUB.post("\n".join(txt))
+
+
 def anom_score_day(md, ixc):
     """Итоги прогнозов дня: какие из утреннего топа и ранних предупреждений стали аномалией."""
     today = anom_today_any()
@@ -2936,6 +3051,10 @@ def anomaly():
         anom_intraday(stt, md, ixc, now)
     except Exception as e:  # noqa: BLE001
         log("ранние признаки аномалий", e)
+    try:
+        anom_status(stt, md, ixc, now)
+    except Exception as e:  # noqa: BLE001
+        log("статус идей", e)
     found.sort(key=lambda x: -x["lvl"])
     posted = 0
     for x in found:
