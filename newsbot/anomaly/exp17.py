@@ -238,6 +238,21 @@ def rules(E, R, feats, tr, te, label, qrows):
         log(f"  {nm}: до {SPLIT} {a['mean']:+.2%}/сд n={a['n']} → с {SPLIT} {b['mean']:+.2%}/сд n={b['n']}, прибыльных {b['win']:.0%}" if b["n"] else f"  {nm}: нет сделок с {SPLIT}")
         if len(out) >= 8:
             break
+    yrs = E.d.dt.year.values
+    masks = {}
+    for _sc, nm_, m_ in cand:
+        masks.setdefault(nm_, m_)
+    for o in out[:3]:
+        nm = o["rule"]
+        mt = masks[nm] & te
+        days = E.d.values[mt]
+        if not len(days):
+            continue
+        u, cnt = np.unique(days, return_counts=True)
+        o["days"], o["top_day_share"] = int(len(u)), float(cnt.max() / cnt.sum())
+        by = "; ".join(f"{y}: {np.nanmean(R[mt & (yrs == y)]):+.1%} ({int((mt & (yrs == y)).sum())})" for y in sorted(set(yrs[mt])))
+        log(f"  · «{nm}» по годам: {by}; разных дней {len(u)}, самый крупный день — {cnt.max() / cnt.sum():.0%} сделок "
+            f"({pd.Timestamp(u[cnt.argmax()]).date()})")
     if out:
         good = [o for o in out if o["test"]["n"] >= 30]
         better = sum(1 for o in good if o["test"]["mean"] > base_te["mean"])
@@ -319,17 +334,20 @@ def main():
         E[f"шум{k + 1}"] = rs.normal(size=len(E))
     feats = [f for f in feats if f in E.columns and E[f].notna().mean() > 0.05] + [f"шум{k + 1}" for k in range(5)]
     log(f"признаков: {len(feats)}; {round(time.time() - t0)} с")
+    global SPLIT
+    split0 = SPLIT
     yr = E.d.dt.year.values
-    tr, te = yr < SPLIT, yr >= SPLIT
     out = dict(started=dt.datetime.utcnow().isoformat(timespec="minutes"), split=SPLIT, n=int(len(E)), strategies={})
     for nm, R in RR.items():
+        SPLIT = int(os.environ.get("EXP_SPLIT_R1", "2023")) if nm.startswith("R1") else split0  # у S1 до 2021 г. мало сделок
+        tr, te = yr < SPLIT, yr >= SPLIT
         log(f"===================== {nm} =====================")
         b = st(R[np.isfinite(R)])
         log(f"всего сделок {b['n']}, {b['mean']:+.2%}/сд, прибыльных {b['win']:.0%}; до {SPLIT}: {st(R[tr])['mean']:+.2%}, с {SPLIT}: {st(R[te])['mean']:+.2%}")
         q = quint(E, R, feats, tr, te, nm)
         ru = rules(E, R, feats, tr, te, nm, q)
         mf = model_filter(E, R, feats, nm)
-        out["strategies"][nm] = dict(quint=[dict(f=x["f"], mtr=x["mtr"], mte=x["mte"], agree=bool(x["agree"])) for x in q[:30]], rules=ru, model=mf)
+        out["strategies"][nm] = dict(split=SPLIT, quint=[dict(f=x["f"], mtr=x["mtr"], mte=x["mte"], agree=bool(x["agree"])) for x in q[:30]], rules=ru, model=mf)
         json.dump(out, open(os.path.join(TR.MODELS, "exp17_report.json"), "w"), ensure_ascii=False, indent=1, default=str)
     # сводка
     log("===================== ИТОГ ПРОВЕРКИ №17 =====================")
@@ -337,7 +355,7 @@ def main():
         bt = o["rules"]["base_test"]
         best = (o["rules"]["top"] or [{}])[0]
         mf = o["model"]
-        log(f"{nm}: база с {SPLIT} {bt['mean']:+.2%} (n={bt['n']}); лучшее правило по прошлым годам «{best.get('rule', '—')}» → "
+        log(f"{nm}: база с {o['split']} {bt['mean']:+.2%} (n={bt['n']}); лучшее правило по прошлым годам «{best.get('rule', '—')}» → "
             + (f"{best['test']['mean']:+.2%} (n={best['test']['n']})" if best.get("test", {}).get("n") else "—")
             + (f"; модель-фильтр, верхние 30%: {mf['top30']['mean']:+.2%} против {mf['all']['mean']:+.2%} (лучше в {mf['lift_years']} из {len(mf['years'])} лет)" if mf else ""))
     log("время", round(time.time() - t0), "с")
