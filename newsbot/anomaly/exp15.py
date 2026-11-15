@@ -79,7 +79,7 @@ def events_a(X, H2, IX2, Dd):
     E = E12.events(X, H2, IX2, Dd)
     E = E[E.d >= pd.Timestamp("2011-11-18")].reset_index(drop=True)
     E12.NDAYS = 5
-    bad = np.array([bad_path(r.close, r.nh, r.nl, r.nc) or (len(r.fh) and (max(r.fh) / r.p0 > 2 or min(r.fl) / r.p0 < 0.5))
+    bad = np.array([bool(bad_path(r.close, r.nh, r.nl, r.nc) or (len(r.fh) > 0 and (max(r.fh) / r.p0 > 2 or min(r.fl) / r.p0 < 0.5)))
                     for r in E.itertuples()])
     log(f"A: отброшено сигналов со сбоем данных (скачки после дроблений и т. п.): {int(bad.sum())} из {len(E)}")
     return E[~bad].reset_index(drop=True)
