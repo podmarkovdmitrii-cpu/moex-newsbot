@@ -16,6 +16,7 @@
   срок:     A — тот же день, 1, 2, 3, 5, 7, 10, 15, 20 дней; B — 1, 2, 3, 5, 7, 10, 15, 20 дней;
   фильтры:  направление аномалии (рост/падение) × оборот (все / ≥10 млн ₽ / ≥100 млн ₽ в день).
 Порядок внутри бара неизвестен: тейк и стоп в одном баре — считаем стоп; в баре исполнения лимита тейк/стоп не проверяем.
+Гэп через стоп: если бар открылся уже за стопом, выход по цене открытия (а не по уровню стопа).
 Издержки за сделку (комиссия+спред): оборот ≥100 млн — 0,1%; 10–100 млн — 0,2%; <10 млн — 0,5% (неликвид, к тому же цены сигналов там
 часто нерыночные — см. №13).
 ВЫБОР БЕЗ ПОДГОНКИ: для каждого года 2016–2026 берём лучший вариант по прошлым годам (оценка = среднее/разброс×√сделок, ≥100 сделок)
@@ -87,7 +88,7 @@ def events_a(X, H2, IX2, Dd):
 
 def paths_a(E):
     n, K = len(E), KH + ND
-    Hm, Lm, Cm = (np.full((n, K), np.nan) for _ in range(3))
+    Hm, Lm, Cm, Om = (np.full((n, K), np.nan) for _ in range(4))
     O1 = np.full(n, np.nan)
     for i, r in enumerate(E.itertuples()):
         k = min(len(r.fh), KH)
@@ -95,8 +96,10 @@ def paths_a(E):
         m = min(len(r.nh), ND)
         Hm[i, KH:KH + m], Lm[i, KH:KH + m], Cm[i, KH:KH + m] = r.nh[:m], r.nl[:m], r.nc[:m]
         O1[i] = r.no[0] if len(r.no) else np.nan
+        Om[i, KH:KH + min(len(r.no), ND)] = np.asarray(r.no, float)[:ND]
+    Om[:, 1:KH] = Cm[:, :KH - 1]  # внутри дня открытие часа ≈ закрытие предыдущего часа
     day = np.r_[np.zeros(KH, int), np.arange(1, ND + 1)]
-    return Hm, Lm, Cm, day, O1
+    return Hm, Lm, Cm, day, O1, Om
 
 
 def events_b(X, Dd):
@@ -136,7 +139,7 @@ def levels(e, s, m, tp, sl):
     return tpl, sll
 
 
-def run_path(Hm, Lm, lastc, e, j0, last, s, tpl, sll, cost):
+def run_path(Hm, Lm, lastc, e, j0, last, s, tpl, sll, cost, Om=None):
     K = Hm.shape[1]
     idx = np.arange(K)[None, :]
     act = (idx >= j0[:, None]) & (idx <= last)
@@ -144,13 +147,17 @@ def run_path(Hm, Lm, lastc, e, j0, last, s, tpl, sll, cost):
     tp_hit = np.where(up, Hm >= tpl[:, None], Lm <= tpl[:, None]) & act & np.isfinite(tpl)[:, None]
     sl_hit = np.where(up, Lm <= sll[:, None], Hm >= sll[:, None]) & act & np.isfinite(sll)[:, None]
     jt, js = first_true(tp_hit), first_true(sl_hit)
-    xp = np.where((js < 10 ** 6) & (js <= jt), sll, np.where(jt < 10 ** 6, tpl, lastc))
+    sx = sll
+    if Om is not None:  # гэп через стоп: бар открылся уже за стопом — выход по цене открытия, а не по стопу
+        oj = Om[np.arange(len(e)), np.minimum(js, K - 1)]
+        sx = np.where(np.isfinite(oj), np.where(s > 0, np.minimum(sll, oj), np.maximum(sll, oj)), sll)
+    xp = np.where((js < 10 ** 6) & (js <= jt), sx, np.where(jt < 10 ** 6, tpl, lastc))
     r = s * (xp / e - 1) - cost
     return np.where(np.isfinite(e) & np.isfinite(xp), r, np.nan)
 
 
 def sim_a(E, P, side, ent, tp, sl, hold, cache):
-    Hm, Lm, Cm, day, O1 = P
+    Hm, Lm, Cm, day, O1, Om = P
     n, K = Hm.shape
     s = E.s.values * (1 if side == "follow" else -1)
     m = np.abs(E.mv.values)
@@ -179,11 +186,11 @@ def sim_a(E, P, side, ent, tp, sl, hold, cache):
     if lk not in cache:
         cache[lk] = E.close.values if hold == 0 else pd.DataFrame(Cm[:, : last + 1]).ffill(axis=1).iloc[:, -1].values
     tpl, sll = levels(e, s, m, tp, sl)
-    return run_path(Hm, Lm, cache[lk], e, j0, last, s, tpl, sll, cache["cost"])
+    return run_path(Hm, Lm, cache[lk], e, j0, last, s, tpl, sll, cache["cost"], Om)
 
 
 def sim_b(B, P, side, ent, tp, sl, hold, cache):
-    Hm, Lm, Cm, O1 = P
+    Hm, Lm, Cm, O1, Om = P
     n, K = Hm.shape
     s = B.s.values * (1 if side == "follow" else -1)
     m = np.abs(B.mv.values)
@@ -200,12 +207,12 @@ def sim_b(B, P, side, ent, tp, sl, hold, cache):
         e, j0 = cache[key]
     last = hold - 1
     tpl, sll = levels(e, s, m, tp, sl)
-    return run_path(Hm, Lm, Cm[:, last], e, j0, last, s, tpl, sll, cache["cost"])
+    return run_path(Hm, Lm, Cm[:, last], e, j0, last, s, tpl, sll, cache["cost"], Om)
 
 
 def paths_b(B):
     st = lambda k: np.vstack([np.r_[np.asarray(v, float), np.full(ND - len(v), np.nan)] for v in B[k]])
-    return st("nh"), st("nl"), st("nc"), np.array([v[0] if len(v) else np.nan for v in B["no"]])
+    return st("nh"), st("nl"), st("nc"), np.array([v[0] if len(v) else np.nan for v in B["no"]]), st("no")
 
 
 # ------------------------------------------------------------------ агрегаты и выбор
@@ -462,7 +469,7 @@ def validate_a5(E, AGGA, cfgA, namesA, out):
                 if b[0][:10] > last_day:
                     break
                 if sll is not None and b[3] <= sll:
-                    ex = sll
+                    ex = min(sll, b[1])  # гэп через стоп — по открытию бара
                     break
                 if tpl is not None and b[2] >= tpl:
                     ex = tpl
