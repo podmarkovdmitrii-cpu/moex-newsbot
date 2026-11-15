@@ -437,7 +437,14 @@ def validate_a5(E, AGGA, cfgA, namesA, out):
         p = os.path.join(a5, f"{r.t}_{r.d.date().isoformat()}.json.gz")
         if os.path.exists(p):
             with gzip.open(p, "rt") as f:
-                bars_of[_] = [b for b in json.load(f)["bars"] if all(x is not None and x == x and x > 0 for x in b[1:5])]
+                B0 = [b for b in json.load(f)["bars"] if all(x is not None and x == x and x > 0 for x in b[1:5])]
+            # чистка как в №14: бары вне дневного диапазона ISS (±30%) — сбой данных или масштаб до дробления
+            d0 = r.d.strftime("%Y-%m-%d")
+            wd = sorted({b[0][:10] for b in B0 if b[0][:10] > d0 and dt.date.fromisoformat(b[0][:10]).weekday() < 5})
+            band = {d0: (min([r.L0] + list(r.fl)), max([r.H0] + list(r.fh)))}
+            for k, dd_ in enumerate(wd[: len(r.nh)]):
+                band[dd_] = (float(r.nl[k]), float(r.nh[k]))
+            bars_of[_] = [b for b in B0 if b[0][:10] not in band or (b[3] >= 0.7 * band[b[0][:10]][0] and b[2] <= 1.3 * band[b[0][:10]][1])]
     log("5-минутные пути из кэша:", len(bars_of), "сигналов")
     for i in ok:
         side, ent, tp, sl, hold = cfgA[i]
@@ -482,7 +489,7 @@ def validate_a5(E, AGGA, cfgA, namesA, out):
         x = np.array(rr)
         if len(x):
             log(f"  {namesA[i]}\n     по часовым: {mean[i]:+.2%}/сд (n={int(n[i])}, все годы) | по 5 минутам: {x.mean():+.2%}/сд, прибыльных {(x > 0).mean():.0%}, "
-                f"PF {x[x > 0].sum() / max(1e-9, -x[x < 0].sum()):.2f}, сделок {len(x)} из {nh} сигналов с данными")
+                f"PF {x[x > 0].sum() / max(1e-9, -x[x < 0].sum()):.2f}, худшая {x.min():+.1%}, медиана {np.median(x):+.2%}, сделок {len(x)} из {nh} сигналов с данными")
             res.append(dict(name=namesA[i], hourly=float(mean[i]), a5=float(x.mean()), n=len(x)))
     out["a5"] = res
 
