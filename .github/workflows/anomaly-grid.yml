@@ -1,0 +1,56 @@
+name: Проверка №15 — полный перебор отработки аномалий (вход, тейк, стоп, срок) с 2008 года
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: anomaly-grid
+  cancel-in-progress: false
+
+jobs:
+  grid:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet "scikit-learn==1.5.2" pandas numpy scipy matplotlib
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
+          restore-keys: anomaly-data-
+      - uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - name: Часовые свечи до 2020 года (кэш проверки №13)
+        uses: actions/cache/restore@v4
+        with:
+          path: h-old
+          key: h-old-v1-${{ github.run_id }}
+          restore-keys: h-old-v1-
+      - name: 5-минутные свечи ALGOPACK (кэш проверки №14)
+        uses: actions/cache/restore@v4
+        with:
+          path: a5
+          key: a5-v1-${{ github.run_id }}
+          restore-keys: a5-v1-
+      - name: "Перебор: дневные сигналы с 2008, внутридневные с 2012, проверка без подгонки"
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-exp
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          EXP_H_DIR: ${{ github.workspace }}/h-old
+          EXP_A5_DIR: ${{ github.workspace }}/a5
+        run: python newsbot/anomaly/exp15.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp15-report
+          path: anomaly-exp/exp15_report.json
+          if-no-files-found: ignore
