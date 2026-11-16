@@ -54,6 +54,68 @@ jobs:
           CHANNEL_STATE: ${{ github.workspace }}/tmp-state
           ANOM_BUDGET_MIN: '180'
         run: python newsbot/anomaly/train.py
+      - name: Часовые свечи до 2020 года (для модели-фильтра)
+        if: ${{ success() && !inputs.report_only }}
+        uses: actions/cache/restore@v4
+        with:
+          path: h-old
+          key: h-old-v1-${{ github.run_id }}
+          restore-keys: h-old-v1-
+      - if: ${{ success() && !inputs.report_only }}
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2020
+          key: algopack-v2-2020-${{ github.run_id }}
+          restore-keys: algopack-v2-2020-
+      - if: ${{ success() && !inputs.report_only }}
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2021
+          key: algopack-v2-2021-${{ github.run_id }}
+          restore-keys: algopack-v2-2021-
+      - if: ${{ success() && !inputs.report_only }}
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2022
+          key: algopack-v2-2022-${{ github.run_id }}
+          restore-keys: algopack-v2-2022-
+      - if: ${{ success() && !inputs.report_only }}
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2023
+          key: algopack-v2-2023-${{ github.run_id }}
+          restore-keys: algopack-v2-2023-
+      - if: ${{ success() && !inputs.report_only }}
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2024
+          key: algopack-v2-2024-${{ github.run_id }}
+          restore-keys: algopack-v2-2024-
+      - if: ${{ success() && !inputs.report_only }}
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2025
+          key: algopack-v2-2025-${{ github.run_id }}
+          restore-keys: algopack-v2-2025-
+      - if: ${{ success() && !inputs.report_only }}
+        uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2026
+          key: algopack-v2-2026-${{ github.run_id }}
+          restore-keys: algopack-v2-2026-
+      - name: Модель-фильтр для виртуального счёта (F4, F2 — проверки №17–18)
+        if: ${{ success() && !inputs.report_only }}
+        continue-on-error: true
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-models
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          EXP_H_DIR: ${{ github.workspace }}/h-old
+        run: |
+          rc=0; python newsbot/anomaly/filter_fit.py || rc=$?
+          rm -rf anomaly-data/algopack   # дневные ALGOPACK хранятся в своих кэшах — в кэш свечей их не кладём
+          exit $rc
       - name: Модели — артефактом (новостной бот подхватит их сразу, не дожидаясь перезапуска)
         if: ${{ success() && !inputs.report_only }}
         uses: actions/upload-artifact@v4
