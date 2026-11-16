@@ -586,10 +586,20 @@ class Publisher:
             print("----- ПОСТ (без отправки) -----\n" + re.sub(r"<[^>]+>", "", text) + "\n" + "\n".join(f"[фото] {os.path.basename(p)}" for p, _ in photos) + (f"\n[документ] {os.path.basename(document[0])}" if document else ""), flush=True)
             return None
         if live and self.tg_chat:
-            try:
-                return self._live(live, text, photos[:1])
-            except Exception as e:  # noqa: BLE001
-                log("живой пост: ошибка, публикую обычным постом —", e)
+            # сбой сети при обновлении (обрыв соединения с Telegram) — повторяем; если пост за день уже есть, новый НЕ публикуем
+            # (раньше при обрыве выходил второй пост с картинкой и «продолжением» — в ленте получалось три сообщения)
+            err = None
+            for k in range(3):
+                try:
+                    return self._live(live, text, photos[:1])
+                except Exception as e:  # noqa: BLE001
+                    err = e
+                    time.sleep(5 * (k + 1))
+            rec = load_json("live_posts.json", {}).get(live) or {}
+            if rec.get("date") == now_msk().date().isoformat():
+                log(f"живой пост «{live}»: обновить не удалось ({err}) — пропуск, следующее обновление по расписанию")
+                return rec.get("link")
+            log("живой пост: ошибка, публикую обычным постом —", err)
         link = None
         photo_link = None
         if self.tg_chat and len(photos) == 1 and not document:
