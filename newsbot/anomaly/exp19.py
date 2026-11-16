@@ -153,13 +153,13 @@ def main():
     for k in NOISE:
         X[k] = rs.normal(size=len(X))
     out["A"] = {}
-    for nm, extra in (("боевые", []), ("боевые + Investing", TAF), ("боевые + случайные", NOISE)):
+    for nm, extra in ((("боевые", []), ("боевые + Investing", TAF), ("боевые + случайные", NOISE)) if not os.environ.get("EXP_SKIP_A") else ()):
         out["A"][nm] = score_compare(X, FD, extra, nm)
         out["A"][nm]["dir"] = dir_acc(X, FD + extra, nm)
         json.dump(out, open(os.path.join(TR.MODELS, "exp19_report.json"), "w"), ensure_ascii=False, indent=1, default=str)
     X = X.drop(columns=NOISE)
-    b = out["A"]["боевые"]
-    for nm in ("боевые + Investing", "боевые + случайные"):
+    b = out["A"].get("боевые")
+    for nm in (("боевые + Investing", "боевые + случайные") if b else ()):
         r = out["A"][nm]
         log(f"  {nm}: топ-5 {r['top5']:.2%} против {b['top5']:.2%} ({r['top5'] - b['top5']:+.2%}), AUC {r['auc']:.4f} против {b['auc']:.4f}; "
             f"по годам топ-5: " + ", ".join(f"{y}: {v - b['top5_by_year'].get(y, 0):+.1%}" for y, v in r["top5_by_year"].items())
@@ -224,11 +224,17 @@ def main():
             log(f"  {name} в сторону сигнала — " + "; ".join(parts))
         res["base"] = E17.model_filter(E, R, base, nm + " | боевые признаки")
         res["inv"] = E17.model_filter(E, R, base + inv, nm + " | боевые + Investing")
+        rs2 = np.random.RandomState(5)
+        nz = [f"шумB{k}" for k in range(len(inv))]
+        for k in nz:
+            E[k] = rs2.normal(size=len(E))
+        res["noise"] = E17.model_filter(E, R, base + nz, nm + " | боевые + столько же случайных")
+        E = E.drop(columns=nz)
         out["B"][nm] = res
         json.dump(out, open(os.path.join(TR.MODELS, "exp19_report.json"), "w"), ensure_ascii=False, indent=1, default=str)
     log("===== ИТОГ ПРОВЕРКИ №19 =====")
-    b = out["A"]["боевые"]
-    for nm in ("боевые + Investing", "боевые + случайные"):
+    b = out["A"].get("боевые")
+    for nm in (("боевые + Investing", "боевые + случайные") if b else ()):
         r = out["A"][nm]
         log(f"A {nm}: топ-5 {r['top5']:+.2%} ({r['top5'] - b['top5']:+.2%} к боевой), AUC {r['auc'] - b['auc']:+.4f}, направление {r['dir']['acc'] - b['dir']['acc']:+.1%}")
     for nm, res in out["B"].items():
@@ -236,8 +242,11 @@ def main():
             yb = {o["y"]: o["top30"]["mean"] for o in res["base"]["years"]}
             yi = {o["y"]: o["top30"]["mean"] for o in res["inv"]["years"]}
             better = sum(1 for y in yi if y in yb and yi[y] > yb[y])
-            log(f"B {nm}: модель-фильтр верхние 30% — без Investing {res['base']['top30']['mean']:+.2%}, с Investing {res['inv']['top30']['mean']:+.2%}; "
-                f"с Investing лучше в {better} из {len(yi)} лет")
+            yn = {o["y"]: o["top30"]["mean"] for o in (res.get("noise") or {}).get("years", [])}
+            bn = sum(1 for y in yn if y in yb and yn[y] > yb[y])
+            log(f"B {nm}: модель-фильтр верхние 30% — без Investing {res['base']['top30']['mean']:+.2%}, с Investing {res['inv']['top30']['mean']:+.2%} "
+                f"(лучше в {better} из {len(yi)} лет), со случайными {(res.get('noise') or {}).get('top30', {}).get('mean', float('nan')):+.2%} "
+                f"(лучше в {bn} из {len(yn)} лет)")
     log("время", round(time.time() - t0), "с")
     json.dump(out, open(os.path.join(TR.MODELS, "exp19_report.json"), "w"), ensure_ascii=False, indent=1, default=str)
 
