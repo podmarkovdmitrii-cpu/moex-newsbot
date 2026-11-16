@@ -82,6 +82,7 @@ jobs:
           ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
           RU_CA: ${{ runner.temp }}/ru_ca.pem
           EXP_H_DIR: ${{ github.workspace }}/h-old
+          EXP_SKIP_A: '1'   # часть A (прогноз) посчитана в run 43939161911; сейчас — контроль модели-фильтра случайными признаками
         run: python newsbot/anomaly/exp19.py
       - if: always()
         uses: actions/upload-artifact@v4
