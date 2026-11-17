@@ -262,6 +262,14 @@ def main():
         log("  топ-10 правил за весь период 2020–2026 (для справки, это «в выборке»):")
         for x in sorted(rows, key=lambda z: -z[3]["mean"])[:10]:
             log(f"    {x[0]}: {x[3]['mean']:+.2%}/сд, медиана {x[3]['med']:+.2%}, прибыльных {x[3]['win']:.0%} | до {SPLIT}: {x[1]['mean']:+.2%}, с {SPLIT}: {x[2]['mean']:+.2%}")
+        for nm in ("25% хода | до 5 дн.", "+2% | до 5 дн.", "без тейка | до 5 дн."):   # сверка с проверкой №14 и худшие сделки
+            v = R.get(nm)
+            if v is None:
+                continue
+            st_ = stats(v)
+            log(f"  сверка «{nm}»: {st_.get('n')} сд, {st_.get('mean', 0):+.2%}/сд, медиана {st_.get('med', 0):+.2%}, прибыльных {st_.get('win', 0):.0%}")
+            w_ = np.argsort(np.where(np.isfinite(v), v, np.inf))[:8]
+            log("    худшие: " + ", ".join(f"{E.t[k]} {E.d[k].date()} {v[k]:+.1%}" for k in w_ if np.isfinite(v[k])))
         out["ways"][way] = dict(best=dict(rule=best[0], train=best[1], test=best[2]), families=fb)
         json.dump(out, open(os.path.join(TR.MODELS, "exp20_report.json"), "w"), ensure_ascii=False, indent=1, default=str)
     log("===== ИТОГ ПРОВЕРКИ №20 =====", round(time.time() - t0), "с")
