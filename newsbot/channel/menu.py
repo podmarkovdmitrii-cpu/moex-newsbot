@@ -260,7 +260,9 @@ def new_step(uid, w, text):
         if st == "entry":
             d["entry"] = num(nums[0])
             w["step"] = "stop"
-            return PW.say(uid, f"Шаг 3/5 — стоп ({'ниже' if side > 0 else 'выше'} входа {PW.fmt(d['entry'])}):")
+            return PW.say(uid, f"Шаг 3/5 — стоп ({'ниже' if side > 0 else 'выше'} входа {PW.fmt(d['entry'])}) "
+                               "или кнопка — бот поставит стоп за уровнем/шумом и подберёт цель по истории бумаги:",
+                          reply_markup={"inline_keyboard": [[{"text": "🤖 Стоп и цель автоматически", "callback_data": "wauto"}]]})
         if st == "stop":
             s = num(nums[0])
             if (s - d["entry"]) * side >= 0:
@@ -268,7 +270,8 @@ def new_step(uid, w, text):
             d["stop"] = s
             w["step"] = "target"
             return PW.say(uid, "Шаг 4/5 — цель (общая; можно несколько тейков через «/», например 280/270). "
-                               "Если укажете одну цель — бот сам предложит, как разбить её на тейки:")
+                               "Если укажете одну цель — бот сам предложит, как разбить её на тейки:",
+                          reply_markup={"inline_keyboard": [[{"text": "🤖 Цель автоматически", "callback_data": "wtgt"}]]})
         tk = [num(x) for x in nums]
         if any((x - d["entry"]) * side <= 0 for x in tk):
             return PW.say(uid, f"Для {side_word(side)}а тейки должны быть {'выше' if side > 0 else 'ниже'} входа {PW.fmt(d['entry'])}.")
@@ -279,6 +282,62 @@ def new_step(uid, w, text):
     if st == "comment":
         d["comment"] = text.strip()[:300]
         return finish_new(uid, w)
+
+
+def auto_async(uid, mode):
+    """Кнопки «🤖»: mode "auto" — стоп и цель, "tgt" — только цель (стоп введён вручную). Расчёт по истории бумаги — в отдельном потоке."""
+    import threading
+    w = wiz_get(uid)
+    if not w or w.get("k") != "new" or w["step"] != ("stop" if mode == "auto" else "target"):
+        return "Сценарий устарел — начните заново."
+    d, side = w["d"], w["side"]
+    PW.say(uid, "⏳ Считаю уровни по истории бумаги (обычно 5–20 секунд)…")
+
+    def run():
+        try:
+            import idea_judge as J
+            r = J.auto_levels(d["ticker"], side, d["entry"], S=d.get("stop") if mode == "tgt" else None)
+        except Exception as e:  # noqa: BLE001
+            r = {"error": str(e)[:200]}
+        with PW.LOCK:
+            w2 = wiz_get(uid)
+            if w2 is not w or w2.get("step") != ("stop" if mode == "auto" else "target"):
+                return  # сценарий отменён или уже пошёл дальше
+            if r.get("error"):
+                PW.say(uid, f"⚠️ Авто-уровни не посчитаны: {html.escape(r['error'])}. Введите {'стоп' if mode == 'auto' else 'цель'} вручную.")
+                return
+            d["stop"], d["takes"] = r["stop"], [r["target"]]
+            w["step"] = "comment"
+            w["t"] = PW.now()
+            PW.save()
+        f, b = PW.fmt, r["best"]
+
+        def pc(x):
+            return f"{x:.1f}".replace(".", ",")
+
+        def sg(x):
+            return f"{x:+.2f}".replace(".", ",").replace("-", "−")
+        L = [f"🤖 <b>Авто-уровни</b> {html.escape(PW.tlabel(d['ticker']))} — {side_word(side)} от {f(d['entry'])}"]
+        if r["auto_stop"]:
+            sw = r["stop_why"]
+            why = (f"за сильным уровнем {f(sw['level'])} с запасом 0,3 ATR" if sw["kind"] == "level"
+                   else "2,5 дневного ATR от входа — за пределами обычного шума")
+            L.append(f"Стоп <b>{f(r['stop'])}</b> — {why}. Риск {pc(r['risk_pct'])}% от входа (дневной ATR {f(r['atr'])}).")
+        else:
+            L.append(f"Стоп {f(r['stop'])} (ваш), риск {pc(r['risk_pct'])}%.")
+        lab = b["lab"].replace(".", ",") if not b["lab"].startswith("lvl:") else f"чуть раньше сильного уровня {f(float(b['lab'][4:]))}"
+        L.append(f"Цель <b>{f(r['target'])}</b> — {lab}, прибыль/риск {pc(b['rr'])}. По истории бумаги ({r['tf']} свечам) цель раньше стопа "
+                 f"~{b['p']:.0%}, ожидание {sg(b['ev'])}R на сделку с учётом издержек.")
+        L.append("Сравнение целей: " + "; ".join(f"{x['lab'].replace('.', ',')} — {x['p']:.0%}, {sg(x['ev'])}R" for x in r["table"]))
+        if b["ev"] <= 0:
+            L.append("❗ Ни одна цель не даёт плюса по истории при таком стопе — идея без статистического перевеса, подумайте, стоит ли входить.")
+        L.append(f"Размер позиции: чтобы стоп стоил 1% счёта, позиция ≈ {min(100, 100 / r['risk_pct']):.0f}% счёта.")
+        L.append("Стоп не переносите дальше, а позицию не закрывайте раньше плана без причины. Разбивку цели на тейки бот предложит после разбора.")
+        PW.say(uid, "\n".join(L))
+        PW.say(uid, "Шаг 5/5 — комментарий к идее (коротко) или нажмите «Без комментария». Чтобы поменять уровни — «✖ Отмена» и заново:",
+               reply_markup={"inline_keyboard": [[{"text": "Без комментария", "callback_data": "wnoc"}]]})
+    threading.Thread(target=run, daemon=True).start()
+    return ""
 
 
 def finish_new(uid, w):
@@ -533,6 +592,8 @@ def on_callback(uid, data, cq):
         wiz_set(uid, k="reply", to=arg)
         PW.say(uid, f"Напишите ответ пользователю {arg}:", reply_markup=cancel_kb())
         return ""
+    if kind in ("wauto", "wtgt") and uid in PW.ADMINS:
+        return auto_async(uid, "auto" if kind == "wauto" else "tgt")
     if kind in ("wmkt", "wnoc") and uid in PW.ADMINS:
         w = wiz_get(uid)
         if not w or w.get("k") != "new":

@@ -272,6 +272,68 @@ def plan_takes(side, E, S, T, lv, atr_now):
     return takes, rules
 
 
+def auto_levels(ticker, side, E, S=None, data=None, cost=0.002):
+    """Автоматические стоп и цель для идеи (кнопки «🤖» в боте идей).
+
+    Стоп (если не задан): за ближайшим сильным уровнем на расстоянии 1,2–3,2 дневного ATR от входа (+0,3 ATR запаса), иначе 2,5 ATR —
+    за пределами обычного шума: близкие стопы выбивает колебаниями (проверки №15, №20 — стопы в процентах и долях хода ухудшали результат).
+    Цель: из кандидатов 1,5R…5R и «чуть раньше сильного уровня» выбирается та, у которой по истории бумаги наибольшее ожидание в R
+    (вероятность дойти до цели раньше стопа × R − вероятность стопа − издержки на круг; «не дошло за горизонт» — ноль).
+    Маленькие цели не берутся: далёкий тейк на истории лучше частой мелкой фиксации (№20)."""
+    d, hh = data if data is not None else load(ticker)
+    if len(d["c"]) < 250:
+        return {"error": "истории по бумаге меньше года — авто-уровни ненадёжны"}
+    A = float(atr_series(d)[-1])
+    if not A > 0:
+        return {"error": "нет ATR по бумаге"}
+    tick = tick_of(E)
+    lv = levels(d, hh, A)
+    if S is None:
+        near = [x for x in lv if x.get("strong") and 1.2 * A <= (E - x["px"]) * side <= 3.2 * A]
+        if near:
+            x = min(near, key=lambda x: (E - x["px"]) * side)
+            S = rnd(x["px"] - side * 0.3 * A, tick)
+            stop_why = dict(kind="level", level=float(x["px"]))
+        else:
+            S = rnd(E - side * 2.5 * A, tick)
+            stop_why = dict(kind="atr")
+        auto_stop = True
+    else:
+        stop_why, auto_stop = None, False
+    risk = abs(E - S)
+    if risk <= 0 or (S - E) * side >= 0:
+        return {"error": "стоп должен быть по другую сторону от входа"}
+    if risk / E > 0.25:
+        return {"error": f"стоп дальше 25% от входа ({risk / E:.0%}) — у бумаги слишком высокая волатильность для авто-уровней"}
+    tr, sl, pos = state(d)
+    if risk / A < 0.6 and hh is not None and len(hh["c"]) > 400:  # короткий ручной стоп — по часовым, как в analyze
+        base, Hz, scale, sim = hh, H_H, float(np.nanmedian(atr_series(hh)[-60:])), None
+    else:
+        base, Hz, scale = d, H_D, A
+        sim = (tr == tr[-1]) & (sl == sl[-1]) & (np.abs(pos - pos[-1]) <= 0.2)
+    cands = [(m * risk, f"{m:g}R") for m in (1.5, 2, 2.5, 3, 4, 5)]
+    for x in lv:
+        dist = (x["px"] - E) * side - 0.1 * A
+        if x.get("strong") and 1.5 * risk <= dist <= 6 * risk:
+            cands.append((dist, f"lvl:{x['px']}"))
+    step = 1 if len(base["c"]) < 4000 else 2
+    rows = []
+    for dist, lab in cands:
+        P = prob(base, side, risk / scale, dist / scale, Hz, step=step, similar=sim)
+        p, pt = P["p"], P.get("p_timeout") or 0.0
+        if p != p:
+            continue
+        rr = dist / risk
+        ev = p * rr - max(0.0, 1 - p - pt) - cost / (risk / E)
+        rows.append(dict(T=rnd(E + side * dist, tick), rr=rr, p=float(p), ev=float(ev), lab=lab, bars=P.get("bars_med")))
+    if not rows:
+        return {"error": "не хватило истории для расчёта цели"}
+    best = max(rows, key=lambda r: r["ev"])
+    show = sorted({r["lab"]: r for r in rows if not r["lab"].startswith("lvl:")}.values(), key=lambda r: r["rr"])
+    return dict(stop=float(S), target=float(best["T"]), atr=A, risk_pct=risk / E * 100, auto_stop=auto_stop, stop_why=stop_why,
+                best=best, table=show, tf="часовым" if base is hh else "дневным")
+
+
 def analyze(ticker, side, E, S, T, data=None, last=None):
     d, hh = data if data is not None else load(ticker)
     if len(d["c"]) < 250:
