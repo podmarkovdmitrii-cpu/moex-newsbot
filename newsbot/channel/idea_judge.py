@@ -272,14 +272,19 @@ def plan_takes(side, E, S, T, lv, atr_now):
     return takes, rules
 
 
-def auto_levels(ticker, side, E, S=None, data=None, cost=0.002):
-    """Автоматические стоп и цель для идеи (кнопки «🤖» в боте идей).
+AUTO_R = float(os.environ.get("AUTO_TARGET_R", "5"))
 
-    Стоп (если не задан): за ближайшим сильным уровнем на расстоянии 1,2–3,2 дневного ATR от входа (+0,3 ATR запаса), иначе 2,5 ATR —
-    за пределами обычного шума: близкие стопы выбивает колебаниями (проверки №15, №20 — стопы в процентах и долях хода ухудшали результат).
-    Цель: из кандидатов 1,5R…5R и «чуть раньше сильного уровня» выбирается та, у которой по истории бумаги наибольшее ожидание в R
-    (вероятность дойти до цели раньше стопа × R − вероятность стопа − издержки на круг; «не дошло за горизонт» — ноль).
-    Маленькие цели не берутся: далёкий тейк на истории лучше частой мелкой фиксации (№20)."""
+
+def auto_levels(ticker, side, E, S=None, data=None, cost=0.002):
+    """Автоматические стоп и цель для идеи (кнопки «🤖» в боте идей) — по проверке №23 (87 тыс. входов по 183 ликвидным акциям,
+    2009–2026, выбор по 2009–2019, проверка 2020–2026).
+
+    Стоп (если не задан): за ближайшим сильным уровнем на расстоянии 1,2–3,2 дневного ATR от входа (+0,3 ATR запаса), иначе 2,5 ATR.
+    В №23 стопы 2–2,5 ATR и «за уровнем» — лучшие; 1 ATR и 3% — худшие (выбивает шумом).
+    Цель: AUTO_R·риск (5R). В №23 один далёкий тейк (4–5R) лучше и ближних тейков, и дробления «треть/половина + безубыток»;
+    выбор цели «по ожиданию на истории бумаги» оказался хуже фиксированных 4–5R (чаще выбирал 1,5R).
+    Срок — до 60 торговых дней. Вероятности 2R…5R по истории бумаги считаются для справки. Идеи против тренда (цена и наклон SMA50
+    против стороны сделки) в №23 убыточны при любых стопах и тейках — помечаются флагом against."""
     d, hh = data if data is not None else load(ticker)
     if len(d["c"]) < 250:
         return {"error": "истории по бумаге меньше года — авто-уровни ненадёжны"}
@@ -311,11 +316,7 @@ def auto_levels(ticker, side, E, S=None, data=None, cost=0.002):
     else:
         base, Hz, scale = d, H_D, A
         sim = (tr == tr[-1]) & (sl == sl[-1]) & (np.abs(pos - pos[-1]) <= 0.2)
-    cands = [(m * risk, f"{m:g}R") for m in (1.5, 2, 2.5, 3, 4, 5)]
-    for x in lv:
-        dist = (x["px"] - E) * side - 0.1 * A
-        if x.get("strong") and 1.5 * risk <= dist <= 6 * risk:
-            cands.append((dist, f"lvl:{x['px']}"))
+    cands = [(m * risk, f"{m:g}R") for m in (2, 3, 4, 5)]
     step = 1 if len(base["c"]) < 4000 else 2
     rows = []
     for dist, lab in cands:
@@ -325,13 +326,19 @@ def auto_levels(ticker, side, E, S=None, data=None, cost=0.002):
             continue
         rr = dist / risk
         ev = p * rr - max(0.0, 1 - p - pt) - cost / (risk / E)
-        rows.append(dict(T=rnd(E + side * dist, tick), rr=rr, p=float(p), ev=float(ev), lab=lab, bars=P.get("bars_med")))
+        rows.append(dict(T=rnd(E + side * dist, tick), rr=rr, p=float(p), pt=float(pt), ev=float(ev), lab=lab, bars=P.get("bars_med")))
     if not rows:
         return {"error": "не хватило истории для расчёта цели"}
-    best = max(rows, key=lambda r: r["ev"])
     show = sorted({r["lab"]: r for r in rows if not r["lab"].startswith("lvl:")}.values(), key=lambda r: r["rr"])
+    best = next((r for r in show if abs(r["rr"] - AUTO_R) < 1e-9), None)
+    if best is None:
+        P = prob(base, side, risk / scale, AUTO_R * risk / scale, Hz, step=step, similar=sim)
+        p, pt = P["p"], P.get("p_timeout") or 0.0
+        best = dict(T=rnd(E + side * AUTO_R * risk, tick), rr=AUTO_R, p=float(p), pt=float(pt), ev=float(p * AUTO_R - max(0.0, 1 - p - pt) - cost / (risk / E)),
+                    lab=f"{AUTO_R:g}R", bars=P.get("bars_med"))
+    against = bool(tr[-1] == -side and sl[-1] == -side)
     return dict(stop=float(S), target=float(best["T"]), atr=A, risk_pct=risk / E * 100, auto_stop=auto_stop, stop_why=stop_why,
-                best=best, table=show, tf="часовым" if base is hh else "дневным")
+                best=best, table=[r for r in show if r["rr"] >= 2], tf="часовым" if base is hh else "дневным", against=against)
 
 
 def analyze(ticker, side, E, S, T, data=None, last=None):
