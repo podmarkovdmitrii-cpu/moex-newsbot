@@ -144,6 +144,19 @@ def daily_probs(tickers, today, divh, upcoming, news_state, impact):
     WK = {t: weekend_feats(D[t], today) for t in X["t"]}
     for k in WEEKEND_COLS:
         X[k] = X["t"].map(lambda t: (WK.get(t) or {}).get(k, np.nan))
+    # математические признаки (проверки №21–22) — нужны модели-фильтру виртуального счёта, в прогноз аномалий не входят
+    try:
+        import math_feats as MF
+        ixc = CD.series(IX).set_index("d")["c"]
+        for t in X["t"]:
+            df = CD.series(D[t])
+            if len(df) < 130:
+                continue
+            F = MF.ticker(df, ixc)
+            for k in MF.COLS:
+                X.loc[X["t"] == t, k] = float(F[k].iloc[-1]) if F[k].iloc[-1] == F[k].iloc[-1] else np.nan
+    except Exception as e:  # noqa: BLE001
+        log("математические признаки не посчитаны:", e)
     FD = meta()["feat_daily"]
     for c in FD:
         if c not in X.columns:

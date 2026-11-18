@@ -3,6 +3,7 @@
 
   filter_R4.pkl — аномальное падение: покупка против движения, тейк +200% хода, до 20 торговых дней;
   filter_R2.pkl — аномальный рост: покупка сразу, держать 10 торговых дней.
+Признаки: момент сигнала (№17); для R4 ещё математические закономерности math_feats.py (№21–22; FILTER_MATH=0 — без них).
 В файле: модель (градиентный бустинг, предсказывает результат сделки), список признаков и порог — 70-й процентиль оценок
 «вне выборки» за последние 3 года (каждый год — модель, обученная только на прошлых годах): сигнал с оценкой не ниже порога
 попадает в верхние 30%, как в проверке №18. Запускается после еженедельного обучения модели аномалий и отдельно (anomaly-filter-fit.yml).
@@ -61,10 +62,17 @@ def main():
     E = E17.flows_feats(E)
     E = E17.model_feats(E, X)
     feats = [f for f in FEAT_INTRA + dfe if f in E.columns and E[f].notna().mean() > 0.05]
+    fk = {"R4": feats, "R2": feats}
+    if os.environ.get("FILTER_MATH", "1") == "1":  # R4 + математические признаки: в №22 дважды лучше и обычного фильтра, и контроля шумом; для R2 — нет
+        import core_daily as CD
+        import math_feats as MF
+        E = E.merge(MF.build(Dd, IX, CD.series).drop_duplicates(["d", "t"]), on=["d", "t"], how="left", validate="many_to_one")
+        fk["R4"] = feats + [c for c in MF.COLS if c in E.columns]
     yr = E.d.dt.year.values
     Y1 = int(yr.max())
-    meta = dict(trained=dt.datetime.utcnow().isoformat(timespec="minutes"), n=int(len(E)), feats=feats, ways={})
+    meta = dict(trained=dt.datetime.utcnow().isoformat(timespec="minutes"), n=int(len(E)), feats=fk["R4"], ways={})
     for key, (nm, w) in zip(("R4", "R2"), E18.WAYS.items()):
+        feats = fk[key]
         R = np.where(E.s.values == w["side"], E15.sim_a(E, P, *w["cfg"], cache), np.nan)
         ok = np.isfinite(R)
         oof = []
