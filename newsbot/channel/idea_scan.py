@@ -105,8 +105,13 @@ def scan(tickers=None):
             for side in (1, -1):
                 pl = SC.plan(B, i, side)
                 x = np.asarray([SC.row(B, i, side, pl["risk"])], dtype=np.float32)
-                p = float(rec["model"].predict(x)[0])
-                if p >= rec["thr"]:
+                if rec.get("type") == "rule":   # №24б: только по тренду (цена и наклон SMA50 в сторону сделки), ранжирование — один признак
+                    if not (x[0, 1] > 0 and x[0, 2] > 0):
+                        continue
+                    p = float(x[0, rec["rank_idx"]]) if rec.get("rank_idx") is not None else float(rec["model"].predict(x)[0])
+                else:
+                    p = float(rec["model"].predict(x)[0])
+                if np.isfinite(p) and p >= rec["thr"]:
                     res.append(dict(t=t, side=side, p=p, day=str(df.d.iloc[i].date()), cal=calib(rec, p), **pl))
             return res
         except Exception as e:  # noqa: BLE001
@@ -131,7 +136,8 @@ def card(c, rec, PW):
          f"Вход: ~{_fmt(c['entry'])} (закрытие {c['day']}) · стоп <b>{_fmt(c['stop'])}</b> ({'за уровнем' if c['level'] else '2,5 ATR'}, "
          f"риск {risk_pct:.1f}%)".replace(f"{risk_pct:.1f}%", f"{risk_pct:.1f}%".replace(".", ",")),
          f"Цель <b>{_fmt(c['target'])}</b> (5R) одним тейком, срок до 60 торговых дней",
-         f"Оценка модели {c['p']:+.2f}R; у таких оценок вне выборки: в среднем {cal.get('R', float('nan')):+.2f}R на сделку, "
+         (f"Отбор: по тренду, среди трендовых — лучшие по признаку «{rec.get('rank')}»; " if rec.get("type") == "rule" else f"Оценка модели {c['p']:+.2f}R; ")
+         + f"у таких сделок вне выборки: в среднем {cal.get('R', float('nan')):+.2f}R на сделку, "
          f"цель {cal.get('p_tgt', 0):.0%}, стоп {cal.get('p_stop', 0):.0%}, остальное — выход по сроку".replace(".", ","),
          f"Размер позиции: чтобы стоп стоил 1% счёта — ≈ {min(100, 100 / risk_pct):.0f}% счёта"]
     return "\n".join(L)
@@ -157,7 +163,9 @@ def evening(PW, force=False):
                 PW.S["scan_warned"] = True
             return
         lt = rec.get("late") or {}
-        head = (f"🔎 <b>Сканер на закрытии {day}</b>: бумаги с оценкой не ниже порога ({str(round(rec['thr'], 2)).replace('.', ',')}R).\n"
+        crit = (f"сделки по тренду, {rec.get('k')} лучших по признаку «{rec.get('rank')}»" if rec.get("type") == "rule"
+                else f"бумаги с оценкой не ниже порога ({str(round(rec['thr'], 2)).replace('.', ',')}R)")
+        head = (f"🔎 <b>Сканер на закрытии {day}</b>: {crit}.\n"
                 f"<i>Отбор на проверке 2020–2026 вне выборки: {lt.get('R', 0):+.2f}R на сделку, ~{lt.get('per_year', 0):.0f} сделок в год, "
                 f"прибыльных {lt.get('win', 0):.0%}, лет в плюсе {lt.get('pos', 0)} из {len(lt.get('years') or {})}. "
                 "Цена закрытия считается по основной сессии — к утру уровни стоит сверить.</i>")
