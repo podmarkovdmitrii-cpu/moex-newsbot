@@ -33,7 +33,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Библиотека для картинок к новостям
-        run: pip install --quiet matplotlib reportlab "scikit-learn==1.5.2" pandas numpy
+        run: pip install --quiet matplotlib reportlab "scikit-learn==1.5.2" pandas numpy openpyxl
       - name: Сертификаты НУЦ Минцифры (нужны для API Т-Пульса)
         continue-on-error: true
         run: |
