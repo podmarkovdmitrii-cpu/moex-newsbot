@@ -123,6 +123,56 @@ def summ(R, mask, yrs, lo, hi):
                 years=by, pos=sum(1 for v in by.values() if v > 0), per_year=float(m.sum() / max(1, len(by))))
 
 
+RANK = {"ликвидность (оборот)": 13, "сила к индексу за 20 дн.": 17, "ход за 60 дн.": 5, "ход за 20 дн.": 4, "близость к 60-дн. экстремуму": 6}
+
+
+def rules(X, M, R, p, yrs, trend, out):
+    """№24б: правило «по тренду» (№23) — как выбрать из десятков сигналов дня не больше K: по одному признаку или оценке модели.
+    Выбор способа — по 2014–2019, проверка — 2020–2026; контроль — случайный выбор K из трендовых."""
+    log("===== №24б: ВЫБОР K ЛУЧШИХ ИЗ ТРЕНДОВЫХ СИГНАЛОВ ДНЯ (выбор по 2014–2019) =====")
+    fin = np.isfinite(p)
+    keys = dict(RANK)
+    res = []
+    for k in (3, 5):
+        for nm in list(keys) + ["оценка модели", "случайно"]:
+            if nm == "оценка модели":
+                score = p
+            elif nm == "случайно":
+                score = np.random.RandomState(7).rand(len(p))
+            else:
+                score = X[:, keys[nm]].astype(float)
+            sc = np.where(trend & fin & np.isfinite(score), score, np.nan)
+            mk = select(M, sc, -np.inf, k)
+            a, b = summ(R, mk, yrs, TEST0, SPLIT - 1), summ(R, mk, yrs, SPLIT, 2026)
+            res.append((nm, k, a, b))
+            log(f"  {nm}, ≤{k}/день: 2014–19 {a['R']:+.3f}R (в плюсе {a['pos']}/{len(a['years'])}) → 2020–26 {b['R']:+.3f}R "
+                f"({b['per_year']:.0f}/год, прибыльных {b['win']:.0%}, в плюсе {b['pos']}/{len(b['years'])}; по годам "
+                + ", ".join(f"{y}: {v:+.2f}" for y, v in b["years"].items()) + ")")
+    cand = [r for r in res if r[0] != "случайно" and r[1] == 3]
+    nm, k, a, b = max(cand, key=lambda r: r[2]["R"])
+    rnd = next(r for r in res if r[0] == "случайно" and r[1] == 3)
+    allt = summ(R, trend & fin, yrs, SPLIT, 2026)
+    ok = a["R"] > 0.03 and a["pos"] >= 4 and b["R"] >= 0.10 and b["pos"] >= 5 and b["R"] >= rnd[3]["R"] - 0.02
+    log("===== ИТОГ №24б =====")
+    log(f"  выбран по 2014–2019: «{nm}», ≤{k}/день → 2014–19 {a['R']:+.3f}R; ПРОВЕРКА 2020–26 {b['R']:+.3f}R, лет в плюсе {b['pos']}/{len(b['years'])}; "
+        f"случайные 3 из трендовых {rnd[3]['R']:+.3f}R, все трендовые {allt['R']:+.3f}R")
+    log(f"  решение: {'ПОДКЛЮЧИТЬ правило' if ok else 'НЕ подключать'}")
+    out["rules"] = dict(chosen=nm, k=k, early=a, late=b, random=rnd[3], deploy=bool(ok))
+    if ok:
+        sel = select(M, np.where(trend & fin, X[:, keys[nm]].astype(float) if nm in keys else p, np.nan), -np.inf, k)
+        late = sel & (yrs >= SPLIT)
+        rec = dict(type="rule", rank=nm, rank_idx=keys.get(nm), k=k, thr=-1e9, model=None, feats=SC.FEATS,
+                   trained=dt.datetime.utcnow().isoformat(timespec="minutes"),
+                   late=dict(R=b["R"], per_year=b["per_year"] * STEP, win=b["win"], pos=b["pos"], years=b["years"]),   # в проверке — каждый STEP-й день
+                   calib=[dict(lo=-1e9, hi=1e9, n=int(late.sum()), R=float(R[late].mean()), p_tgt=float((R[late] >= SC.TARGET_R - 0.3).mean()),
+                               p_stop=float((R[late] <= -0.95).mean()))])
+        if nm == "оценка модели":
+            yy = np.clip(R, np.quantile(R, 0.01), np.quantile(R, 0.99))
+            rec["model"] = hgb().fit(X, yy)
+        pickle.dump(rec, open(os.path.join(TR.MODELS, "scan_model.pkl"), "wb"))
+        log("  правило сканера сохранено:", os.path.join(TR.MODELS, "scan_model.pkl"))
+
+
 def main():
     t0 = time.time()
     os.makedirs(TR.MODELS, exist_ok=True)
@@ -190,6 +240,8 @@ def main():
     if not best:
         log("===== ИТОГ ПРОВЕРКИ №24 =====")
         log("  ни один порог не дал на 2014–2019 ≥ 20 сделок в год и ≥ 4 лет в плюсе — НЕ подключать")
+    if not os.path.exists(os.path.join(TR.MODELS, "scan_model.pkl")):
+        rules(X, M, R, p, yrs, trend, out)
     json.dump(out, open(os.path.join(TR.MODELS, "exp24_report.json"), "w"), ensure_ascii=False, indent=1, default=str)
     log("время", round(time.time() - t0), "с")
 
