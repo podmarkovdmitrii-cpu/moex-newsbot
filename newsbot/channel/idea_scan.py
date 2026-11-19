@@ -38,10 +38,19 @@ def msk():
     return time.gmtime(time.time() + MSK)
 
 
+# Правило по умолчанию (проверки №23, №24б): только по тренду (цена выше растущей SMA50 для лонга, ниже падающей — для шорта);
+# способ выбора среди трендовых сигналов на истории не помог (ни признаки, ни модель не лучше случайного) — берутся 3 случайных.
+# Вне выборки: 3 случайных трендовых в день — 2014–2019 +0,10R на сделку (6 из 6 лет в плюсе), 2020–2026 +0,28R (6 из 7);
+# все трендовые — +0,06R / +0,23R. Лучшая «по отбору» модель — хуже (+0,02R / +0,19R), поэтому не используется.
+TREND_RULE = dict(type="rule", rank="случайно", rank_idx=None, k=3, thr=-1e9, model=None,
+                  late=dict(R=0.28, per_year=750, win=0.36, pos=6, years={y: 0 for y in range(2020, 2027)}, early=0.10, early_pos="6 из 6"),
+                  calib=[dict(lo=-1e9, hi=1e9, n=0, R=0.28)])
+
+
 def model():
     p = os.path.join(os.environ.get("ANOM_MODELS") or os.path.join(HERE, "..", "anomaly", "models"), "scan_model.pkl")
     if not os.path.exists(p):
-        return None
+        return TREND_RULE
     mt = os.path.getmtime(p)
     if _M.get("mt") != mt:
         _M["rec"], _M["mt"] = pickle.load(open(p, "rb")), mt
@@ -108,7 +117,13 @@ def scan(tickers=None):
                 if rec.get("type") == "rule":   # №24б: только по тренду (цена и наклон SMA50 в сторону сделки), ранжирование — один признак
                     if not (x[0, 1] > 0 and x[0, 2] > 0):
                         continue
-                    p = float(x[0, rec["rank_idx"]]) if rec.get("rank_idx") is not None else float(rec["model"].predict(x)[0])
+                    if rec.get("rank_idx") is not None:
+                        p = float(x[0, rec["rank_idx"]])
+                    elif rec.get("model") is not None:
+                        p = float(rec["model"].predict(x)[0])
+                    else:   # случайный, но один и тот же для бумаги и дня
+                        import zlib
+                        p = (zlib.crc32(f"{t}{side}{df.d.iloc[i].date()}".encode()) % 10007) / 10007
                 else:
                     p = float(rec["model"].predict(x)[0])
                 if np.isfinite(p) and p >= rec["thr"]:
@@ -121,6 +136,7 @@ def scan(tickers=None):
         for r in ex.map(one, tickers or universe()):
             out += r
     out.sort(key=lambda r: -r["p"])
+    _M["n_all"] = len(out)
     return out[:int(rec.get("k") or 3)], ""
 
 
@@ -136,9 +152,12 @@ def card(c, rec, PW):
          f"Вход: ~{_fmt(c['entry'])} (закрытие {c['day']}) · стоп <b>{_fmt(c['stop'])}</b> ({'за уровнем' if c['level'] else '2,5 ATR'}, "
          f"риск {risk_pct:.1f}%)".replace(f"{risk_pct:.1f}%", f"{risk_pct:.1f}%".replace(".", ",")),
          f"Цель <b>{_fmt(c['target'])}</b> (5R) одним тейком, срок до 60 торговых дней",
-         (f"Отбор: по тренду, среди трендовых — лучшие по признаку «{rec.get('rank')}»; " if rec.get("type") == "rule" else f"Оценка модели {c['p']:+.2f}R; ")
-         + f"у таких сделок вне выборки: в среднем {cal.get('R', float('nan')):+.2f}R на сделку, "
-         f"цель {cal.get('p_tgt', 0):.0%}, стоп {cal.get('p_stop', 0):.0%}, остальное — выход по сроку".replace(".", ","),
+         (("Отбор: сделка по тренду (цена и наклон 50-дневной средней в сторону сделки); "
+           if rec.get("rank_idx") is None and rec.get("model") is None else f"Отбор: по тренду, лучшие по признаку «{rec.get('rank')}»; ")
+          if rec.get("type") == "rule" else f"Оценка модели {c['p']:+.2f}R; ")
+         + (f"у таких сделок вне выборки: в среднем {cal.get('R', float('nan')):+.2f}R на сделку"
+            + (f", цель {cal['p_tgt']:.0%}, стоп {cal['p_stop']:.0%}, остальное — выход по сроку" if "p_tgt" in cal else
+               "; большинство сделок закрывается стопом или по сроку, плюс дают редкие далёкие цели")).replace(".", ","),
          f"Размер позиции: чтобы стоп стоил 1% счёта — ≈ {min(100, 100 / risk_pct):.0f}% счёта"]
     return "\n".join(L)
 
@@ -163,11 +182,16 @@ def evening(PW, force=False):
                 PW.S["scan_warned"] = True
             return
         lt = rec.get("late") or {}
-        crit = (f"сделки по тренду, {rec.get('k')} лучших по признаку «{rec.get('rank')}»" if rec.get("type") == "rule"
+        n_all = _M.get("n_all", len(cands))
+        crit = (("сделки по тренду, до 3 случайных из всех трендовых сигналов (выбор «лучших» на истории не давал преимущества)"
+                 if rec.get("rank_idx") is None and rec.get("model") is None else f"сделки по тренду, {rec.get('k')} лучших по признаку «{rec.get('rank')}»")
+                if rec.get("type") == "rule"
                 else f"бумаги с оценкой не ниже порога ({str(round(rec['thr'], 2)).replace('.', ',')}R)")
         head = (f"🔎 <b>Сканер на закрытии {day}</b>: {crit}.\n"
                 f"<i>Отбор на проверке 2020–2026 вне выборки: {lt.get('R', 0):+.2f}R на сделку, ~{lt.get('per_year', 0):.0f} сделок в год, "
-                f"прибыльных {lt.get('win', 0):.0%}, лет в плюсе {lt.get('pos', 0)} из {len(lt.get('years') or {})}. "
+                f"прибыльных {lt.get('win', 0):.0%}, лет в плюсе {lt.get('pos', 0)} из {len(lt.get('years') or {})}"
+                + (f"; 2014–2019 {lt['early']:+.2f}R, лет в плюсе {lt['early_pos']}".replace(".", ",") if lt.get("early") is not None else "")
+                + (f". Сигналов по тренду сегодня {n_all}, показаны {len(cands)}" if rec.get("type") == "rule" else "") + ". "
                 "Цена закрытия считается по основной сессии — к утру уровни стоит сверить.</i>")
         if not cands:
             PW.say(admin, head + "\n\nСегодня ни одна бумага не прошла порог — сделок нет.\n\n<i>Не является индивидуальной инвестиционной рекомендацией.</i>")
