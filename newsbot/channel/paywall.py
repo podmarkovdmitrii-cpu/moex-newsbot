@@ -480,10 +480,10 @@ def on_message(msg):
             say(uid, f"Здесь оплачивается доступ к закрытым идеям канала: тикер, вход, стоп и тейк.\n{st}\n\nСтоимость: {price} за {DAYS} дней.",
                 reply_markup={"inline_keyboard": [[{"text": "Оплатить доступ", "callback_data": "pay"}]]})
             MENU.menu(uid, "Кнопки меню — внизу 👇" + ("\nДля вас есть кнопки «🟢 Новый лонг», «🔴 Новый шорт» и «📋 Мои идеи: стопы и тейки»." if admin else ""))
-    elif cmd in ("/errors", "/ошибки") and admin:
+    elif cmd in ("/errors", "/ошибки", "/journal", "/журнал", "/report", "/отчет", "/отчёт") and admin:
         arg = text.split()[1] if len(text.split()) > 1 else ""
         day = arg if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg) else time.strftime("%Y-%m-%d", time.gmtime(now() + 3 * 3600))
-        say(uid, f"⏳ Собираю разбор убыточных идей за {day} (свечи с Мосбиржи, 1–3 минуты)…")
+        say(uid, f"⏳ Собираю журнал сделок и отчёт за {day} (свечи с Мосбиржи, 1–3 минуты)…")
         errors_tick(day=day, force=True, uid=uid)
     elif cmd in ("/status", "/статус"):
         u = sub_until(uid)
@@ -747,7 +747,7 @@ _ERR_RUN = {"busy": False}
 
 
 def errors_tick(day=None, force=False, uid=None):
-    """Вечерний разбор убыточных идей (idea_errors.py) — в отдельном потоке, чтобы бот не ждал свечи с Мосбиржи."""
+    """Вечером: журнал всех сделок в Excel и отчёт за день в PDF (idea_journal.py) — в отдельном потоке, чтобы бот не ждал свечи с Мосбиржи."""
     if _ERR_RUN["busy"]:
         if force and uid:
             say(uid, "Разбор уже идёт — пришлю, как будет готов.")
@@ -758,8 +758,8 @@ def errors_tick(day=None, force=False, uid=None):
 
     def run():
         try:
-            import idea_errors as IE
-            IE.evening(sys.modules[__name__], day=day, force=force)
+            import idea_journal as IJ   # журнал всех сделок (Excel) + отчёт за день (PDF) с разбором убыточных
+            IJ.evening(sys.modules[__name__], day=day, force=force)
         except Exception as e:  # noqa: BLE001
             log("разбор ошибок:", e)
         finally:
