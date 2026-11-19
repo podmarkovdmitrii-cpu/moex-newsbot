@@ -485,6 +485,9 @@ def on_message(msg):
         day = arg if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg) else time.strftime("%Y-%m-%d", time.gmtime(now() + 3 * 3600))
         say(uid, f"⏳ Собираю журнал сделок и отчёт за {day} (свечи с Мосбиржи, 1–3 минуты)…")
         errors_tick(day=day, force=True, uid=uid)
+    elif cmd in ("/scan", "/скан", "/сканер") and admin:
+        say(uid, "⏳ Сканирую ликвидные акции по закрытию (1–3 минуты)…")
+        scan_tick(force=True, uid=uid)
     elif cmd in ("/status", "/статус"):
         u = sub_until(uid)
         say(uid, f"Доступ открыт до {dstr(u)}." if u > now() else "Доступа нет. /start — оплатить.")
@@ -607,6 +610,12 @@ def on_callback(cq):
     data = cq.get("data") or ""
     kind, _, iid = data.partition(":")
     ans = {"callback_query_id": cq["id"]}
+    if kind == "scn":
+        import idea_scan as IS
+        r = IS.on_cb(sys.modules[__name__], uid, iid)
+        tg("answerCallbackQuery", {**ans, **({"text": r[:190]} if r else {})})
+        save()
+        return
     r = MENU.on_callback(uid, data, cq)
     if r is not None:
         tg("answerCallbackQuery", {**ans, **({"text": r[:190]} if r else {})})
@@ -768,6 +777,37 @@ def errors_tick(day=None, force=False, uid=None):
     threading.Thread(target=run, daemon=True).start()
 
 
+_SCAN_RUN = {"busy": False}
+
+
+def scan_tick(force=False, uid=None):
+    """Сканер сделок (idea_scan.py): внутридневные сигналы — каждую минуту, вечерний сканер — в SCAN_AT (по умолчанию 19:25 МСК)."""
+    try:
+        import idea_scan as IS
+        IS.intraday(sys.modules[__name__])
+    except Exception as e:  # noqa: BLE001
+        log("внутридневные сигналы:", e)
+    if _SCAN_RUN["busy"]:
+        if force and uid:
+            say(uid, "Сканер уже работает — пришлю результат.")
+        return
+    t = time.gmtime(now() + 3 * 3600)
+    if not force and (t.tm_wday >= 5 or time.strftime("%H:%M", t) < os.environ.get("SCAN_AT", "19:25")
+                      or S.get("scan_day") == time.strftime("%Y-%m-%d", t)):
+        return
+
+    def run():
+        try:
+            import idea_scan as IS
+            IS.evening(sys.modules[__name__], force=force)
+        except Exception as e:  # noqa: BLE001
+            log("вечерний сканер:", e)
+        finally:
+            _SCAN_RUN["busy"] = False
+    _SCAN_RUN["busy"] = True
+    threading.Thread(target=run, daemon=True).start()
+
+
 STOP = False
 
 
@@ -832,6 +872,7 @@ def main():
         if DIRTY_SUBS:
             backup()
         errors_tick()
+        scan_tick()
         if time.time() - last_remind > 3600:
             monthly()
             remind()
