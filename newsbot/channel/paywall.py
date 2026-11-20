@@ -426,6 +426,7 @@ def say(chat_id, text, **kw):
 HELP_ADMIN = ("Команды администратора:\n"
               "/idea ТИКЕР лонг|шорт ВХОД СТОП ЦЕЛЬ [комментарий] — разбор и публикация закрытой идеи\n"
               "/check ТИКЕР лонг|шорт ВХОД СТОП ЦЕЛЬ — только разбор: вероятность цели, тейки, уровни (можно без /check)\n"
+              "/ta ТИКЕР — теханализ любой акции: тренд, средние, индикаторы, свечи, уровни, трендовые линии, сценарии + картинка\n"
               "/ideas — последние идеи\n"
               "/result НОМЕР текст — дописать итог в пост (например: /result 3 ✅ Тейк взят +6,7%)\n"
               "/subs — подписчики\n"
@@ -491,6 +492,14 @@ def on_message(msg):
     elif cmd in ("/resume", "/возобновить") and admin:
         import idea_scan as IS
         say(uid, IS.resume(sys.modules[__name__]))
+    elif cmd in ("/ta", "/та", "/теханализ") and admin:
+        arg = text.split()[1].upper() if len(text.split()) > 1 else ""
+        if not re.fullmatch(r"[A-Z0-9]{1,12}", arg):
+            say(uid, "Укажите тикер: /ta SBER")
+        else:
+            import idea_ta as TA
+            say(uid, f"⏳ Теханализ {arg}: свечи за 10 лет, уровни и сценарии (10–30 секунд)…")
+            TA.send_async(sys.modules[__name__], uid, arg)
     elif cmd in ("/scan", "/скан", "/сканер") and admin:
         say(uid, "⏳ Сканирую ликвидные акции по закрытию (1–3 минуты)…")
         scan_tick(force=True, uid=uid)
@@ -582,6 +591,12 @@ def judge_async(uid, idea, publish):
             say(uid, rep)
         except Exception as e:  # noqa: BLE001
             log("отчёт не отправлен:", e)
+        if not idea.pop("ta_sent", False):
+            try:
+                import idea_ta as TA
+                TA.send(sys.modules[__name__], uid, idea["ticker"])
+            except Exception as e:  # noqa: BLE001
+                log("теханализ не отправлен:", e)
         if not publish:
             return
         if r and not r.get("error"):

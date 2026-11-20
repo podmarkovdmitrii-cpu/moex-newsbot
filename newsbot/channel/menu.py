@@ -251,8 +251,10 @@ def new_step(uid, w, text):
         d["ticker"], d["last"] = t, (q or {}).get("last")
         w["step"] = "entry"
         cur = (f"{html.escape(PW.tlabel(t))}: сейчас {PW.fmt(d['last'])} ₽. " if d.get("last") else f"{html.escape(PW.tlabel(t))}. ")
-        mk = {"inline_keyboard": [[{"text": f"По рынку {PW.fmt(d['last'])}", "callback_data": "wmkt"}]]} if d.get("last") else None
-        return PW.say(uid, f"{cur}Шаг 2/5 — цена входа:", **({"reply_markup": mk} if mk else {}))
+        rows = [[{"text": f"По рынку {PW.fmt(d['last'])}", "callback_data": "wmkt"}]] if d.get("last") else []
+        rows.append([{"text": "📊 Теханализ бумаги (уровни, тренд, сценарии)", "callback_data": "wta"}])
+        mk = {"inline_keyboard": rows}
+        return PW.say(uid, f"{cur}Шаг 2/5 — цена входа:", reply_markup=mk)
     if st in ("entry", "stop", "target"):
         nums = re.findall(NUM, text)
         if not nums:
@@ -355,6 +357,8 @@ def finish_new(uid, w):
         return menu(uid, html.escape(idea))
     if d.get("last"):
         idea["name"] = d["ticker"]
+    if d.get("ta_sent"):
+        idea["ta_sent"] = True
     menu(uid, "⏳ Разбираю идею: история бумаги и модель аномалий (обычно 10–30 секунд)…")
     PW.judge_async(uid, idea, publish=True)
 
@@ -600,6 +604,15 @@ def on_callback(uid, data, cq):
         return ""
     if kind in ("wauto", "wtgt") and uid in PW.ADMINS:
         return auto_async(uid, "auto" if kind == "wauto" else "tgt")
+    if kind == "wta" and uid in PW.ADMINS:
+        w = wiz_get(uid)
+        if not w or w.get("k") != "new" or not w["d"].get("ticker"):
+            return "Сценарий устарел — начните заново."
+        w["d"]["ta_sent"] = True
+        import idea_ta as TA
+        PW.say(uid, "⏳ Теханализ: свечи за 10 лет, уровни и сценарии (10–30 секунд)…")
+        TA.send_async(PW, uid, w["d"]["ticker"])
+        return ""
     if kind in ("wmkt", "wnoc") and uid in PW.ADMINS:
         w = wiz_get(uid)
         if not w or w.get("k") != "new":
