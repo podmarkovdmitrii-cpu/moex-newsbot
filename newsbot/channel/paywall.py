@@ -426,6 +426,7 @@ def say(chat_id, text, **kw):
 HELP_ADMIN = ("Команды администратора:\n"
               "/idea ТИКЕР лонг|шорт ВХОД СТОП ЦЕЛЬ [комментарий] — разбор и публикация закрытой идеи\n"
               "/check ТИКЕР лонг|шорт ВХОД СТОП ЦЕЛЬ — только разбор: вероятность цели, тейки, уровни (можно без /check)\n"
+              "/trades — открытые сделки сборной стратегии (S1 + F4/F2) со всеми уровнями и загрузкой счёта\n"
               "/ta ТИКЕР — теханализ любой акции: тренд, средние, индикаторы, свечи, уровни, трендовые линии, сценарии + картинка\n"
               "/ideas — последние идеи\n"
               "/result НОМЕР текст — дописать итог в пост (например: /result 3 ✅ Тейк взят +6,7%)\n"
@@ -486,6 +487,9 @@ def on_message(msg):
         day = arg if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg) else time.strftime("%Y-%m-%d", time.gmtime(now() + 3 * 3600))
         say(uid, f"⏳ Собираю журнал сделок и отчёт за {day} (свечи с Мосбиржи, 1–3 минуты)…")
         errors_tick(day=day, force=True, uid=uid)
+    elif cmd in ("/trades", "/сделки") and admin:
+        import idea_scan as IS
+        say(uid, IS.open_text(sys.modules[__name__]))
     elif cmd in ("/risk", "/риск") and admin:
         import idea_scan as IS
         say(uid, IS.status_text(sys.modules[__name__]))

@@ -302,25 +302,34 @@ def _emergency(t, side):
         return None
 
 
-def intraday(PW):
-    """Новые сигналы стратегий виртуального счёта за сегодня → администратору (каждый — один раз)."""
-    t = msk()
-    hm = time.strftime("%H:%M", t)
-    if t.tm_wday >= 5 or not ("10:00" <= hm <= "18:50") or not PW.ADMINS:
-        return
-    if time.time() - _M.get("intra_t", 0) < 60:
-        return
-    _M["intra_t"] = time.time()
-    base = os.environ.get("STATE_DIR") or os.environ.get("NEWS_STATE") or ""
-    p = os.path.join(base, "channel", "paper_anom.json")
-    try:
-        st = json.load(open(p, encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    day = time.strftime("%Y-%m-%d", t)
+def _live(x):
+    """Сделка сборной стратегии: S1 — все, F2/F4 — только «верхние 30%» модель-фильтра."""
+    return x.get("strat", "S1") == "S1" or bool(x.get("top"))
+
+
+def book(st):
+    """Открытые позиции сборной стратегии и загрузка счёта (S1/F4 — 10% капитала, F2 — 5%); лимита позиций нет."""
+    op = [x for x in st.get("trades") or [] if x.get("entry") and not x.get("exit") and _live(x)]
+    load = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) for x in op)
+    return op, load
+
+
+def _load_line(st):
+    op, load = book(st)
+    s = f"Открыто позиций: {len(op)}, загрузка счёта {load:.0%}".replace(".", ",")
+    if load > 1.0001:
+        s += (" ⚠️ больше 100% — на все сделки нужен заём (плечо). В проверках №28–29 без лимита в дни массовых сигналов загрузка доходила "
+              "до 700–2300%, просадка — до −88%")
+    return s
+
+
+def _trade_key(x):
+    return f"{x.get('strat', 'S1')}:{x['t']}:{x['day']}"
+
+
+def _signals(PW, st, day, admin, allowed):
+    """Новые сигналы сборной стратегии за сегодня → администратору (каждый — один раз, без ограничения числа)."""
     seen = PW.S.setdefault("intra_seen", {})
-    admin = sorted(PW.ADMINS)[0]
-    allowed = guard(PW, admin)
     items = [x for x in (st.get("orders") or []) + (st.get("trades") or []) if x.get("day") == day]
     for x in items:
         strat = x.get("strat", "S1")
@@ -333,29 +342,29 @@ def intraday(PW):
         if strat == "S1" and x.get("limit") is None:
             continue
         seen[key] = time.time()
-        if not allowed:
-            log("сигнал пропущен — аварийная остановка:", key)
-            continue
         em = _emergency(x["t"], 1)
         mv = float(x.get("move") or 0)
         if strat == "S1":
             lim = float(x["limit"])
             body = (f"Лимит на покупку: <b>{_fmt(lim)}</b> (откат 50% хода, до конца дня) · тейк <b>{_fmt(lim * (1 + 0.25 * mv))}</b> "
-                    f"(+25% хода) · выход не позже 5-го торгового дня")
+                    f"(+25% хода, {0.25 * mv:+.1%}) · выход не позже 5-го торгового дня после исполнения (по закрытию)")
             entry = lim
             tp = lim * (1 + 0.25 * mv)
         else:
             entry = float(x.get("entry") or x.get("p0"))
             tp = x.get("tp")
-            body = (f"Покупка сразу: ~<b>{_fmt(entry)}</b> · " + (f"тейк <b>{_fmt(float(tp))}</b> (+200% хода) · " if tp else "без тейка · ")
-                    + f"выход не позже {x.get('last_day')}" + (f" · оценка модели {float(x.get('score') or 0):+.1%}" if x.get("score") is not None else ""))
+            body = (f"Покупка сразу: ~<b>{_fmt(entry)}</b> · " + (f"тейк <b>{_fmt(float(tp))}</b> (+200% хода, {float(tp) / entry - 1:+.1%}) · " if tp else "без тейка · ")
+                    + f"выход не позже {x.get('last_day')} (по закрытию)" + (f" · оценка модели {float(x.get('score') or 0):+.1%}" if x.get("score") is not None else ""))
         em_stop = entry - em["risk"] if em else None   # расстояние за уровнем / 2,5 ATR — от цены входа сигнала
         stop = (f"\nАварийный стоп (в проверках стратегии стоп не ставился — он снижал результат): {_fmt(em_stop)} "
-                f"({'за уровнем' if em['level'] else '2,5 ATR'}, риск {em['risk'] / entry:.1%})".replace(".", ",") if em else "")
-        half = ("\n⚖️ Половинный риск: позиция вдвое меньше, чем по S1/F4 — на 2023–2026 F2 держится на редких крупных сделках "
-                "(тест перестановкой p = 0,09)") if strat == "F2" else ""
-        txt = (f"⚡ <b>Сигнал внутри дня · {strat} · {html.escape(PW.tlabel(x['t']))}</b> "
-               f"({float(x.get('exc') or 0):+.1%} к индексу)\n{INTRA.get(strat, '')}\n\n{body}{stop}{half}\n\n<i>Не является индивидуальной инвестиционной рекомендацией.</i>")
+                f"({'за уровнем' if em['level'] else '2,5 ATR'}, риск {em['risk'] / entry:.1%})" if em else "")
+        size = f"\nРазмер позиции: {WEIGHT.get(strat, 0.1):.0%} капитала".replace(".", ",")
+        half = (" (половинный риск: на 2023–2026 F2 держится на редких крупных сделках, тест перестановкой p = 0,09)") if strat == "F2" else ""
+        halt = ("" if allowed else "\n🛑 Сейчас действует аварийная остановка — сделка идёт в учёт виртуального счёта, но по правилу "
+                                   "предохранителя вход пропускается (/risk, /resume).")
+        txt = (f"⚡ <b>Сигнал · {strat} · {html.escape(PW.tlabel(x['t']))}</b> "
+               f"({float(x.get('exc') or 0):+.1%} к индексу, {x.get('sig_at', '')[11:16]})\n{INTRA.get(strat, '')}\n\n{body}{stop}{size}{half}\n"
+               f"{_load_line(st)}{halt}\n\n<i>Не является индивидуальной инвестиционной рекомендацией.</i>")
         try:
             c = dict(t=x["t"], side=1, entry=float(entry), stop=float(em_stop) if em else None, target=float(tp) if tp else None, strat=strat)
             sk = f"{x['t']}{strat}{day.replace('-', '')}"
@@ -366,7 +375,110 @@ def intraday(PW):
             log("сигнал не отправлен:", e)
     for k in [k for k, v in seen.items() if time.time() - v > 5 * 86400]:
         seen.pop(k, None)
+
+
+def _stop_of(PW, x):
+    c = (PW.S.get("scan") or {}).get(f"{x['t']}{x.get('strat', 'S1')}{x['day'].replace('-', '')}") or {}
+    return c.get("stop")
+
+
+def _lifecycle(PW, st, admin):
+    """Исполнение лимита S1, неисполненные лимиты и закрытия сделок (тейк / срок) → администратору, каждое событие один раз."""
+    life = PW.S.setdefault("life_seen", {})
+    first = not PW.S.get("life_init")
+    lo = time.strftime("%Y-%m-%d", time.gmtime(time.time() + MSK - 45 * 86400))
+    for x in st.get("trades") or []:
+        if not _live(x) or (x.get("day") or "") < lo:
+            continue
+        k = _trade_key(x)
+        strat, name = x.get("strat", "S1"), html.escape(PW.tlabel(x["t"]))
+        ev = []
+        if strat == "S1" and x.get("entry"):
+            ev.append(("fill", None))
+        if strat == "S1" and x.get("status") == "не исполнена" and not x.get("entry"):
+            ev.append(("nofill", None))
+        if x.get("exit") is not None and x.get("ret") is not None:
+            ev.append(("exit", None))
+        for e, _ in ev:
+            kk = f"{k}:{e}"
+            if kk in life:
+                continue
+            life[kk] = time.time()
+            if first:
+                continue          # при первом запуске старые события не присылаем
+            stp = _stop_of(PW, x)
+            try:
+                if e == "fill":
+                    tp = x.get("tp")
+                    PW.say(admin, f"✅ <b>Куплено · S1 · {name}</b> — лимит {_fmt(float(x['entry']))} исполнен ({str(x.get('entry_at', ''))[11:16]})\n"
+                                  f"Тейк <b>{_fmt(float(tp))}</b> ({float(tp) / float(x['entry']) - 1:+.1%}) · "
+                                  + (f"аварийный стоп {_fmt(float(stp))} · " if stp else "")
+                                  + f"выход не позже {x.get('last_day')} (по закрытию)\nРазмер позиции: 10% капитала\n{_load_line(st)}")
+                elif e == "nofill":
+                    PW.say(admin, f"▫️ S1 · {name}: лимит {_fmt(float(x['limit']))} за {x['day']} не исполнился — сделки нет.")
+                else:
+                    w = WEIGHT.get(strat, 0.1)
+                    rs = risk_state(PW, st)
+                    why = {"тейк": "🎯 тейк", "срок": "⏱ по сроку"}.get(x.get("exit_why"), x.get("exit_why") or "")
+                    PW.say(admin, f"🏁 <b>Закрыта · {strat} · {name}</b> — {why}\n"
+                                  f"Вход {_fmt(float(x['entry']))} ({str(x.get('entry_at') or x['day'])[:10]}) → выход {_fmt(float(x['exit']))} ({x.get('exit_day')})\n"
+                                  f"Результат {float(x['ret']):+.2%} (с издержками), в капитале {w * float(x['ret']):+.2%}"
+                                  + (f" · аварийный стоп был {_fmt(float(stp))}" if stp else "")
+                                  + f"\nВиртуальный счёт сборной стратегии: итог {rs['eq']:+.1%}, просадка от пика {rs['dd']:.1%}\n{_load_line(st)}")
+            except Exception as ex:  # noqa: BLE001
+                log("событие сделки не отправлено:", kk, ex)
+    PW.S["life_init"] = True
+    for k in [k for k, v in life.items() if time.time() - v > 60 * 86400]:
+        life.pop(k, None)
+
+
+def intraday(PW):
+    """Сигналы и все события сделок сборной стратегии (S1 + F4/F2 «верхние 30%») → администратору; лимита позиций нет."""
+    t = msk()
+    hm = time.strftime("%H:%M", t)
+    if not PW.ADMINS:
+        return
+    if time.time() - _M.get("intra_t", 0) < 60:
+        return
+    _M["intra_t"] = time.time()
+    base = os.environ.get("STATE_DIR") or os.environ.get("NEWS_STATE") or ""
+    p = os.path.join(base, "channel", "paper_anom.json")
+    try:
+        st = json.load(open(p, encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    day = time.strftime("%Y-%m-%d", t)
+    admin = sorted(PW.ADMINS)[0]
+    allowed = guard(PW, admin)
+    if t.tm_wday < 5 and "10:00" <= hm <= "18:50":
+        _signals(PW, st, day, admin, allowed)
+    _lifecycle(PW, st, admin)
     PW.save()
+
+
+def open_text(PW):
+    """/trades — открытые сделки и активные лимиты сборной стратегии со всеми уровнями."""
+    st = _paper() or {}
+    op, load = book(st)
+    day = time.strftime("%Y-%m-%d", msk())
+    L = [f"📒 <b>Сборная стратегия: открытые сделки</b> ({len(op)}, загрузка счёта {load:.0%})".replace(".", ",")]
+    for x in sorted(op, key=lambda x: x.get("entry_at") or ""):
+        stp = _stop_of(PW, x)
+        L.append(f"• {x.get('strat', 'S1')} {html.escape(PW.tlabel(x['t']))}: вход {_fmt(float(x['entry']))} ({str(x.get('entry_at') or x['day'])[:10]})"
+                 + (f", тейк {_fmt(float(x['tp']))}" if x.get("tp") else ", без тейка")
+                 + (f", аварийный стоп {_fmt(float(stp))}" if stp else "") + f", выход не позже {x.get('last_day')}"
+                 + f", {WEIGHT.get(x.get('strat', 'S1'), 0.1):.0%} капитала")
+    orders = [o for o in st.get("orders") or [] if o.get("day") == day]
+    if orders:
+        L.append("\nЛимиты S1 на сегодня:")
+        for o in orders:
+            L.append(f"• {html.escape(PW.tlabel(o['t']))}: лимит {_fmt(float(o['limit']))}, тейк после исполнения +25% хода ({0.25 * float(o['move']):+.1%})")
+    if len(L) == 1:
+        L.append("Открытых сделок нет.")
+    rs = risk_state(PW, st)
+    L.append(f"\nВиртуальный счёт: закрыто {rs['n']}, итог {rs['eq']:+.1%}, просадка от пика {rs['dd']:.1%}. "
+             "Не является индивидуальной инвестиционной рекомендацией.")
+    return "\n".join(L)
 
 
 def on_cb(PW, uid, key):
