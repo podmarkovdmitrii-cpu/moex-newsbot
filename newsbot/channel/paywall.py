@@ -485,6 +485,12 @@ def on_message(msg):
         day = arg if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg) else time.strftime("%Y-%m-%d", time.gmtime(now() + 3 * 3600))
         say(uid, f"⏳ Собираю журнал сделок и отчёт за {day} (свечи с Мосбиржи, 1–3 минуты)…")
         errors_tick(day=day, force=True, uid=uid)
+    elif cmd in ("/risk", "/риск") and admin:
+        import idea_scan as IS
+        say(uid, IS.status_text(sys.modules[__name__]))
+    elif cmd in ("/resume", "/возобновить") and admin:
+        import idea_scan as IS
+        say(uid, IS.resume(sys.modules[__name__]))
     elif cmd in ("/scan", "/скан", "/сканер") and admin:
         say(uid, "⏳ Сканирую ликвидные акции по закрытию (1–3 минуты)…")
         scan_tick(force=True, uid=uid)

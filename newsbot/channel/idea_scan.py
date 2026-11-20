@@ -34,6 +34,77 @@ def log(*a):
     print(time.strftime("%H:%M:%S"), "[сканер]", *a, flush=True)
 
 
+# ---------------- аварийная остановка (по виртуальному счёту S1/F4/F2) ----------------
+# Вес сделки в капитале: S1 и F4 — 10%, F2 — 5% (половинный риск: в №26 F2 на 2023–2026 не прошла тест перестановкой, p = 0,09).
+WEIGHT = {"S1": 0.10, "F4": 0.10, "F2": 0.05}
+KS_DAY = float(os.environ.get("KS_DAY", "-0.02"))      # убыток закрытых сделок за день, доля капитала → стоп до завтра
+KS_STREAK = int(os.environ.get("KS_STREAK", "3"))       # убыточных сделок подряд (последняя — сегодня) → стоп до завтра
+KS_DD = float(os.environ.get("KS_DD", "-0.10"))         # просадка от пика → стоп до команды /resume
+
+
+def _paper():
+    base = os.environ.get("STATE_DIR") or os.environ.get("NEWS_STATE") or ""
+    try:
+        return json.load(open(os.path.join(base, "channel", "paper_anom.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def risk_state(PW, st=None, today=None):
+    """Состояние виртуального счёта и предохранителя. → dict(day_pnl, streak, eq, peak, dd, halted, why)."""
+    st = st if st is not None else _paper()
+    today = today or time.strftime("%Y-%m-%d", msk())
+    ks = PW.S.setdefault("ks", {})
+    out = dict(day_pnl=0.0, streak=0, eq=0.0, peak=0.0, dd=0.0, n=0, halted=False, why="")
+    if not st:
+        return out
+    done = [x for x in st.get("trades") or [] if x.get("exit") is not None and x.get("ret") is not None
+            and (x.get("strat", "S1") == "S1" or x.get("top"))]
+    done.sort(key=lambda x: (x.get("exit_day") or "", x.get("sig_at") or ""))
+    curve = [0.0]
+    for x in done:
+        curve.append(curve[-1] + WEIGHT.get(x.get("strat", "S1"), 0.1) * float(x["ret"]))
+    k0 = min(int(ks.get("dd_reset_n", 0)), len(curve) - 1)   # после /resume пик считается с момента возобновления
+    eq, peak = curve[-1], max(curve[k0:])
+    dd = (1 + eq) / (1 + peak) - 1
+    day_pnl = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * float(x["ret"]) for x in done if x.get("exit_day") == today)
+    streak = 0
+    for x in reversed(done):
+        if float(x["ret"]) <= 0:
+            streak += 1
+        else:
+            break
+    last_today = bool(done) and done[-1].get("exit_day") == today
+    out.update(day_pnl=day_pnl, streak=streak, eq=eq, peak=peak, dd=dd, n=len(done))
+    if ks.get("dd_halt"):
+        out.update(halted=True, why=ks.get("dd_why") or "просадка")
+    elif dd <= KS_DD:
+        ks.update(dd_halt=True, dd_why=f"просадка виртуального счёта {dd:.1%} от пика (порог {KS_DD:.0%})")
+        out.update(halted=True, why=ks["dd_why"], new=True)
+    elif ks.get("day") == today:
+        out.update(halted=True, why=ks.get("why") or "")
+    elif day_pnl <= KS_DAY:
+        ks.update(day=today, why=f"убыток закрытых сделок за день {day_pnl:.1%} капитала (порог {KS_DAY:.0%})")
+        out.update(halted=True, why=ks["why"], new=True)
+    elif streak >= KS_STREAK and last_today:
+        ks.update(day=today, why=f"{streak} убыточные сделки подряд (порог {KS_STREAK})")
+        out.update(halted=True, why=ks["why"], new=True)
+    return out
+
+
+def guard(PW, admin):
+    """True — сигналы можно присылать. При срабатывании — одно сообщение администратору."""
+    rs = risk_state(PW)
+    if rs.get("new"):
+        dd_mode = PW.S["ks"].get("dd_halt")
+        PW.say(admin, f"🛑 <b>Аварийная остановка</b>: {html.escape(rs['why'])}.\n"
+                      + ("Сигналы остановлены до команды /resume — сначала разберитесь, что пошло не так (журнал и отчёт за день)."
+                         if dd_mode else "Сигналы остановлены до 10:00 следующего торгового дня.")
+                      + f"\nВиртуальный счёт: итог {rs['eq']:+.1%}, пик {rs['peak']:+.1%}, сегодня {rs['day_pnl']:+.1%}, убыточных подряд {rs['streak']}.")
+        PW.save()
+    return not rs["halted"]
+
+
 def msk():
     return time.gmtime(time.time() + MSK)
 
@@ -173,6 +244,9 @@ def evening(PW, force=False):
         PW.S["scan_day"] = day
         PW.save()
     admin = sorted(PW.ADMINS)[0]
+    if not guard(PW, admin):
+        PW.say(admin, f"🔎 Вечерний сканер за {day} не запускался: действует аварийная остановка ({html.escape(PW.S['ks'].get('dd_why') or PW.S['ks'].get('why') or '')}).")
+        return
     try:
         cands, why = scan()
         rec = model()
@@ -246,6 +320,7 @@ def intraday(PW):
     day = time.strftime("%Y-%m-%d", t)
     seen = PW.S.setdefault("intra_seen", {})
     admin = sorted(PW.ADMINS)[0]
+    allowed = guard(PW, admin)
     items = [x for x in (st.get("orders") or []) + (st.get("trades") or []) if x.get("day") == day]
     for x in items:
         strat = x.get("strat", "S1")
@@ -258,6 +333,9 @@ def intraday(PW):
         if strat == "S1" and x.get("limit") is None:
             continue
         seen[key] = time.time()
+        if not allowed:
+            log("сигнал пропущен — аварийная остановка:", key)
+            continue
         em = _emergency(x["t"], 1)
         mv = float(x.get("move") or 0)
         if strat == "S1":
@@ -274,8 +352,10 @@ def intraday(PW):
         em_stop = entry - em["risk"] if em else None   # расстояние за уровнем / 2,5 ATR — от цены входа сигнала
         stop = (f"\nАварийный стоп (в проверках стратегии стоп не ставился — он снижал результат): {_fmt(em_stop)} "
                 f"({'за уровнем' if em['level'] else '2,5 ATR'}, риск {em['risk'] / entry:.1%})".replace(".", ",") if em else "")
+        half = ("\n⚖️ Половинный риск: позиция вдвое меньше, чем по S1/F4 — на 2023–2026 F2 держится на редких крупных сделках "
+                "(тест перестановкой p = 0,09)") if strat == "F2" else ""
         txt = (f"⚡ <b>Сигнал внутри дня · {strat} · {html.escape(PW.tlabel(x['t']))}</b> "
-               f"({float(x.get('exc') or 0):+.1%} к индексу)\n{INTRA.get(strat, '')}\n\n{body}{stop}\n\n<i>Не является индивидуальной инвестиционной рекомендацией.</i>")
+               f"({float(x.get('exc') or 0):+.1%} к индексу)\n{INTRA.get(strat, '')}\n\n{body}{stop}{half}\n\n<i>Не является индивидуальной инвестиционной рекомендацией.</i>")
         try:
             c = dict(t=x["t"], side=1, entry=float(entry), stop=float(em_stop) if em else None, target=float(tp) if tp else None, strat=strat)
             sk = f"{x['t']}{strat}{day.replace('-', '')}"
@@ -303,3 +383,25 @@ def on_cb(PW, uid, key):
     PW.say(uid, "⏳ Разбираю кандидата: история бумаги и модель аномалий…")
     PW.judge_async(uid, idea, publish=True)
     return "Готовлю разбор"
+
+
+def status_text(PW):
+    rs = risk_state(PW)
+    ks = PW.S.get("ks") or {}
+    st = "🛑 остановлены: " + html.escape(rs["why"]) if rs["halted"] else "✅ сигналы идут"
+    return (f"<b>Аварийная остановка</b>: {st}\n"
+            f"Виртуальный счёт (S1 и F4 — 10% на сделку, F2 — 5%): закрыто {rs['n']}, итог {rs['eq']:+.1%}, пик {rs['peak']:+.1%}, "
+            f"просадка {rs['dd']:.1%}; сегодня {rs['day_pnl']:+.1%}; убыточных подряд {rs['streak']}.\n"
+            f"Пороги: день {KS_DAY:.0%}, серия {KS_STREAK}, просадка {KS_DD:.0%} (после неё — только командой /resume)."
+            + ("" if not ks.get("dd_halt") else "\nЧтобы возобновить — /resume."))
+
+
+def resume(PW):
+    rs = risk_state(PW)
+    ks = PW.S.setdefault("ks", {})
+    ks.pop("dd_halt", None)
+    ks.pop("dd_why", None)
+    ks.pop("day", None)
+    ks["dd_reset_n"] = rs["n"]   # пик для просадки считается с текущего уровня
+    PW.save()
+    return "▶️ Сигналы возобновлены. Пик для расчёта просадки сброшен на текущий уровень виртуального счёта."
