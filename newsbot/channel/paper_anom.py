@@ -201,6 +201,12 @@ def scan(md, ixc, now, feats, ctx=None):
             st["orders"].append(o)
             n_today += 1
             log(f"виртуальный счёт S1: сигнал {t} {chg:+.1%} (к индексу {exc:+.1%}), лимит {o['limit']:.4f} на откате 50%")
+    # последние цены открытых позиций — для переоценки и аварийной остановки по открытым (idea_scan.risk_state)
+    lp = {tr["t"]: float(px[tr["t"]]["LAST"]) for tr in st["trades"] if tr.get("entry") and not tr.get("exit") and tr["t"] in px}
+    if lp:
+        st["last_px"] = dict(st.get("last_px") or {}, **lp)
+        st["px_at"] = now.isoformat(timespec="minutes")
+        changed = True
     st["seen"] = {k: v for k, v in st["seen"].items() if v >= (now.date() - dt.timedelta(days=3)).isoformat()}
     for k in ("wave", "fp3"):
         st[k] = {d: v for d, v in (st.get(k) or {}).items() if d == today}

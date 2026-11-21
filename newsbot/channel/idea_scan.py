@@ -35,11 +35,14 @@ def log(*a):
 
 
 # ---------------- аварийная остановка (по виртуальному счёту S1/F4/F2) ----------------
-# Вес сделки в капитале: S1 и F4 — 10%, F2 — 5% (половинный риск: в №26 F2 на 2023–2026 не прошла тест перестановкой, p = 0,09).
-WEIGHT = {"S1": 0.10, "F4": 0.10, "F2": 0.05}
+# Вес сделки в капитале (№30, переоценка открытых позиций): S1 и F4 — 5%, F2 — 2,5% (половинный риск: в №26 F2 на 2023–2026 не прошла
+# тест перестановкой, p = 0,09). Потолок загрузки счёта — 150%: сигнал, который не влезает, приходит с пометкой «вне лимита» и в учёт
+# сборной стратегии не идёт (без потолка в дни массовых сигналов счёт обнулялся — просадка с переоценкой −116% при 10% на сделку).
+WEIGHT = {"S1": float(os.environ.get("W_S1", "0.05")), "F4": float(os.environ.get("W_F4", "0.05")), "F2": float(os.environ.get("W_F2", "0.025"))}
+LOAD_CAP = float(os.environ.get("LOAD_CAP", "1.5"))
 KS_DAY = float(os.environ.get("KS_DAY", "-0.02"))      # убыток закрытых сделок за день, доля капитала → стоп до завтра
 KS_STREAK = int(os.environ.get("KS_STREAK", "3"))       # убыточных сделок подряд (последняя — сегодня) → стоп до завтра
-KS_DD = float(os.environ.get("KS_DD", "-0.10"))         # просадка от пика → стоп до команды /resume
+KS_DD = float(os.environ.get("KS_DD", "-0.10"))         # просадка от пика (закрытые + переоценка открытых) → стоп до команды /resume
 
 
 def _paper():
@@ -58,15 +61,23 @@ def risk_state(PW, st=None, today=None):
     out = dict(day_pnl=0.0, streak=0, eq=0.0, peak=0.0, dd=0.0, n=0, halted=False, why="")
     if not st:
         return out
+    inlim = PW.S.get("inlim") or {}
     done = [x for x in st.get("trades") or [] if x.get("exit") is not None and x.get("ret") is not None
-            and (x.get("strat", "S1") == "S1" or x.get("top"))]
+            and _live(x) and inlim.get(_trade_key(x), True)]
     done.sort(key=lambda x: (x.get("exit_day") or "", x.get("sig_at") or ""))
     curve = [0.0]
     for x in done:
         curve.append(curve[-1] + WEIGHT.get(x.get("strat", "S1"), 0.1) * float(x["ret"]))
     k0 = min(int(ks.get("dd_reset_n", 0)), len(curve) - 1)   # после /resume пик считается с момента возобновления
     eq, peak = curve[-1], max(curve[k0:])
-    dd = (1 + eq) / (1 + peak) - 1
+    # переоценка открытых позиций по последним ценам виртуального счёта (paper_anom сохраняет last_px)
+    px = st.get("last_px") or {}
+    op = [x for x in st.get("trades") or [] if x.get("entry") and not x.get("exit") and _live(x) and inlim.get(_trade_key(x), True)]
+    mtm = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * (float(px[x["t"]]) / float(x["entry"]) - 1) for x in op if px.get(x["t"]))
+    eq_m = eq + mtm
+    peak_m = max(float(ks.get("peak_mtm", eq_m)), eq_m, peak)
+    ks["peak_mtm"] = peak_m
+    dd = min((1 + eq) / (1 + peak) - 1, (1 + eq_m) / (1 + peak_m) - 1)
     day_pnl = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * float(x["ret"]) for x in done if x.get("exit_day") == today)
     streak = 0
     for x in reversed(done):
@@ -75,11 +86,11 @@ def risk_state(PW, st=None, today=None):
         else:
             break
     last_today = bool(done) and done[-1].get("exit_day") == today
-    out.update(day_pnl=day_pnl, streak=streak, eq=eq, peak=peak, dd=dd, n=len(done))
+    out.update(day_pnl=day_pnl, streak=streak, eq=eq, peak=peak, dd=dd, n=len(done), mtm=mtm, eq_m=eq_m, peak_m=peak_m, open=len(op))
     if ks.get("dd_halt"):
         out.update(halted=True, why=ks.get("dd_why") or "просадка")
     elif dd <= KS_DD:
-        ks.update(dd_halt=True, dd_why=f"просадка виртуального счёта {dd:.1%} от пика (порог {KS_DD:.0%})")
+        ks.update(dd_halt=True, dd_why=f"просадка виртуального счёта {dd:.1%} от пика с переоценкой открытых позиций (порог {KS_DD:.0%})")
         out.update(halted=True, why=ks["dd_why"], new=True)
     elif ks.get("day") == today:
         out.update(halted=True, why=ks.get("why") or "")
@@ -100,7 +111,8 @@ def guard(PW, admin):
         PW.say(admin, f"🛑 <b>Аварийная остановка</b>: {html.escape(rs['why'])}.\n"
                       + ("Сигналы остановлены до команды /resume — сначала разберитесь, что пошло не так (журнал и отчёт за день)."
                          if dd_mode else "Сигналы остановлены до 10:00 следующего торгового дня.")
-                      + f"\nВиртуальный счёт: итог {rs['eq']:+.1%}, пик {rs['peak']:+.1%}, сегодня {rs['day_pnl']:+.1%}, убыточных подряд {rs['streak']}.")
+                      + f"\nВиртуальный счёт: закрытые {rs['eq']:+.1%}, с переоценкой открытых {rs.get('eq_m', rs['eq']):+.1%} (пик {rs.get('peak_m', rs['peak']):+.1%}), "
+                        f"сегодня {rs['day_pnl']:+.1%}, убыточных подряд {rs['streak']}.")
         PW.save()
     return not rs["halted"]
 
@@ -307,19 +319,22 @@ def _live(x):
     return x.get("strat", "S1") == "S1" or bool(x.get("top"))
 
 
-def book(st):
-    """Открытые позиции сборной стратегии и загрузка счёта (S1/F4 — 10% капитала, F2 — 5%); лимита позиций нет."""
-    op = [x for x in st.get("trades") or [] if x.get("entry") and not x.get("exit") and _live(x)]
+def book(st, reserve_day=None):
+    """Открытые позиции сборной стратегии в лимите и загрузка счёта (S1/F4 — 5% капитала, F2 — 2,5%).
+    reserve_day — добавить к загрузке выставленные сегодня лимиты S1 в лимите (место под них зарезервировано)."""
+    inlim = _M.get("inlim") or {}
+    op = [x for x in st.get("trades") or [] if x.get("entry") and not x.get("exit") and _live(x) and inlim.get(_trade_key(x), True)]
     load = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) for x in op)
+    if reserve_day:
+        load += sum(WEIGHT["S1"] for o in st.get("orders") or [] if o.get("day") == reserve_day and inlim.get(_trade_key(o)) is True)
     return op, load
 
 
 def _load_line(st):
     op, load = book(st)
-    s = f"Открыто позиций: {len(op)}, загрузка счёта {load:.0%}".replace(".", ",")
-    if load > 1.0001:
-        s += (" ⚠️ больше 100% — на все сделки нужен заём (плечо). В проверках №28–29 без лимита в дни массовых сигналов загрузка доходила "
-              "до 700–2300%, просадка — до −88%")
+    s = f"Открыто позиций в лимите: {len(op)}, загрузка счёта {load:.0%} из {LOAD_CAP:.0%}".replace(".", ",")
+    if load > LOAD_CAP + 1e-9:
+        s += " ⚠️ выше потолка (позиции открыты до его введения)"
     return s
 
 
@@ -342,6 +357,11 @@ def _signals(PW, st, day, admin, allowed):
         if strat == "S1" and x.get("limit") is None:
             continue
         seen[key] = time.time()
+        inlim = PW.S.setdefault("inlim", {})
+        _M["inlim"] = inlim
+        _, load_now = book(st, reserve_day=day)
+        fits = load_now + WEIGHT.get(strat, 0.1) <= LOAD_CAP + 1e-9
+        inlim[key] = bool(fits and allowed)
         em = _emergency(x["t"], 1)
         mv = float(x.get("move") or 0)
         if strat == "S1":
@@ -360,9 +380,12 @@ def _signals(PW, st, day, admin, allowed):
                 f"({'за уровнем' if em['level'] else '2,5 ATR'}, риск {em['risk'] / entry:.1%})" if em else "")
         size = f"\nРазмер позиции: {WEIGHT.get(strat, 0.1):.0%} капитала".replace(".", ",")
         half = (" (половинный риск: на 2023–2026 F2 держится на редких крупных сделках, тест перестановкой p = 0,09)") if strat == "F2" else ""
-        halt = ("" if allowed else "\n🛑 Сейчас действует аварийная остановка — сделка идёт в учёт виртуального счёта, но по правилу "
-                                   "предохранителя вход пропускается (/risk, /resume).")
-        txt = (f"⚡ <b>Сигнал · {strat} · {html.escape(PW.tlabel(x['t']))}</b> "
+        halt = ("" if allowed else "\n🛑 Сейчас действует аварийная остановка — по правилу предохранителя вход пропускается, "
+                                   "сделка в учёт сборной стратегии не идёт (/risk, /resume).")
+        if allowed and not fits:
+            halt += (f"\n⚠️ <b>Сигнал вне лимита</b>: потолок загрузки счёта {LOAD_CAP:.0%} достигнут (сейчас {load_now:.0%}) — только для "
+                     "наблюдения, в учёт сборной стратегии не идёт.")
+        txt = (f"{'⚡' if inlim[key] else '▫️'} <b>Сигнал{'' if inlim[key] else ' вне лимита'} · {strat} · {html.escape(PW.tlabel(x['t']))}</b> "
                f"({float(x.get('exc') or 0):+.1%} к индексу, {x.get('sig_at', '')[11:16]})\n{INTRA.get(strat, '')}\n\n{body}{stop}{size}{half}\n"
                f"{_load_line(st)}{halt}\n\n<i>Не является индивидуальной инвестиционной рекомендацией.</i>")
         try:
@@ -392,6 +415,8 @@ def _lifecycle(PW, st, admin):
             continue
         k = _trade_key(x)
         strat, name = x.get("strat", "S1"), html.escape(PW.tlabel(x["t"]))
+        if not (PW.S.get("inlim") or {}).get(k, True):
+            name += " (вне лимита, только наблюдение)"
         ev = []
         if strat == "S1" and x.get("entry"):
             ev.append(("fill", None))
@@ -413,7 +438,7 @@ def _lifecycle(PW, st, admin):
                     PW.say(admin, f"✅ <b>Куплено · S1 · {name}</b> — лимит {_fmt(float(x['entry']))} исполнен ({str(x.get('entry_at', ''))[11:16]})\n"
                                   f"Тейк <b>{_fmt(float(tp))}</b> ({float(tp) / float(x['entry']) - 1:+.1%}) · "
                                   + (f"аварийный стоп {_fmt(float(stp))} · " if stp else "")
-                                  + f"выход не позже {x.get('last_day')} (по закрытию)\nРазмер позиции: 10% капитала\n{_load_line(st)}")
+                                  + f"выход не позже {x.get('last_day')} (по закрытию)\nРазмер позиции: {WEIGHT['S1']:.0%} капитала\n{_load_line(st)}")
                 elif e == "nofill":
                     PW.say(admin, f"▫️ S1 · {name}: лимит {_fmt(float(x['limit']))} за {x['day']} не исполнился — сделки нет.")
                 else:
@@ -449,6 +474,7 @@ def intraday(PW):
         return
     day = time.strftime("%Y-%m-%d", t)
     admin = sorted(PW.ADMINS)[0]
+    _M["inlim"] = PW.S.setdefault("inlim", {})
     allowed = guard(PW, admin)
     if t.tm_wday < 5 and "10:00" <= hm <= "18:50":
         _signals(PW, st, day, admin, allowed)
@@ -459,9 +485,10 @@ def intraday(PW):
 def open_text(PW):
     """/trades — открытые сделки и активные лимиты сборной стратегии со всеми уровнями."""
     st = _paper() or {}
+    _M["inlim"] = PW.S.setdefault("inlim", {})
     op, load = book(st)
     day = time.strftime("%Y-%m-%d", msk())
-    L = [f"📒 <b>Сборная стратегия: открытые сделки</b> ({len(op)}, загрузка счёта {load:.0%})".replace(".", ",")]
+    L = [f"📒 <b>Сборная стратегия: открытые сделки в лимите</b> ({len(op)}, загрузка счёта {load:.0%} из {LOAD_CAP:.0%})"]
     for x in sorted(op, key=lambda x: x.get("entry_at") or ""):
         stp = _stop_of(PW, x)
         L.append(f"• {x.get('strat', 'S1')} {html.escape(PW.tlabel(x['t']))}: вход {_fmt(float(x['entry']))} ({str(x.get('entry_at') or x['day'])[:10]})"
@@ -502,8 +529,10 @@ def status_text(PW):
     ks = PW.S.get("ks") or {}
     st = "🛑 остановлены: " + html.escape(rs["why"]) if rs["halted"] else "✅ сигналы идут"
     return (f"<b>Аварийная остановка</b>: {st}\n"
-            f"Виртуальный счёт (S1 и F4 — 10% на сделку, F2 — 5%): закрыто {rs['n']}, итог {rs['eq']:+.1%}, пик {rs['peak']:+.1%}, "
-            f"просадка {rs['dd']:.1%}; сегодня {rs['day_pnl']:+.1%}; убыточных подряд {rs['streak']}.\n"
+            f"Виртуальный счёт сборной стратегии (S1 и F4 — {WEIGHT['S1']:.0%} на сделку, F2 — {WEIGHT['F2']:.1%}, потолок загрузки {LOAD_CAP:.0%}): "
+            f"закрыто {rs['n']}, итог {rs['eq']:+.1%}; открыто {rs.get('open', 0)}, их переоценка {rs.get('mtm', 0):+.1%}; "
+            f"с переоценкой {rs.get('eq_m', 0):+.1%}, пик {rs.get('peak_m', 0):+.1%}, просадка {rs['dd']:.1%}; сегодня {rs['day_pnl']:+.1%}; "
+            f"убыточных подряд {rs['streak']}.\n"
             f"Пороги: день {KS_DAY:.0%}, серия {KS_STREAK}, просадка {KS_DD:.0%} (после неё — только командой /resume)."
             + ("" if not ks.get("dd_halt") else "\nЧтобы возобновить — /resume."))
 
@@ -515,5 +544,6 @@ def resume(PW):
     ks.pop("dd_why", None)
     ks.pop("day", None)
     ks["dd_reset_n"] = rs["n"]   # пик для просадки считается с текущего уровня
+    ks["peak_mtm"] = rs.get("eq_m", rs["eq"])
     PW.save()
     return "▶️ Сигналы возобновлены. Пик для расчёта просадки сброшен на текущий уровень виртуального счёта."
