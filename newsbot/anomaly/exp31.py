@@ -78,7 +78,7 @@ def build(X, Dd, IX):
                              o=o[j + 1:j + 1 + ND], h=h[j + 1:j + 1 + ND], l=l[j + 1:j + 1 + ND], c=c[j + 1:j + 1 + ND], dts=ds[j + 1:j + 1 + ND], d0=ds[j],
                              trend=bool(c[j] > m50[j] and sl50[j] > 0), mkt=float(ixr.get(r.d, 0) or 0), cost=float(E15.cost_of(np.array([lv]))[0])))
     B = pd.DataFrame(rows)
-    F = X.drop_duplicates(["t", "d"]).set_index(["t", "d"])[feats]
+    F = X.drop_duplicates(["t", "d"]).set_index(["t", "d"])[[f for f in feats if f not in B.columns]]
     B = B.join(F, on=["t", "d"])
     return B, feats
 
