@@ -119,6 +119,7 @@ def build(E, R, F, Dd, bars, cost):
     DA = daily_arrays(Dd)
     bot = {"S1": ("РЛ", ("m", 0.25), "all"), "F2": ("РС", None, "base"), "F4": ("ПС", ("m", 2.0), "math")}
     rows = []
+    n20 = 0
     for Y in range(2020, 2027):
         for nm, (sl, tp, fs) in bot.items():
             hold = OWN[nm]
@@ -133,10 +134,12 @@ def build(E, R, F, Dd, bars, cost):
                 if p is not None and not (p[i] == p[i] and p[i] >= thr):
                     continue
                 r = E.iloc[i]
-                q = seq_full(r, Dd, bars, 20, nm == "S1")
+                q = seq_full(r, Dd, bars, OWN[nm], nm == "S1")      # путь на свой срок — обязателен (как в №22–29)
                 if q is None:
                     continue
-                e, a, dts, days, d_in = q
+                q20 = seq_full(r, Dd, bars, 20, nm == "S1") if OWN[nm] < 20 else q   # на 20 дн. — если есть 5-мин данные
+                n20 += q20 is not None
+                e, a, dts, days, d_in = q20 if q20 is not None and abs(q20[0] - q[0]) < 1e-9 else q
                 da = DA.get(r.t)
                 if da is None:
                     continue
@@ -151,11 +154,14 @@ def build(E, R, F, Dd, bars, cost):
                 lvl = float(e - (dist[ok].min() + 0.3 * A)) if ok.any() else e - 2.5 * A
                 c_ = da["c"]
                 mv = abs(r.p0 / r.prev - 1)
-                rows.append(dict(strat=nm, t=r.t, d=r.d, e=e, a=a, dts=dts, own_last=days[OWN[nm] - 1], last20=days[-1], d_in=d_in, A=A, lvl=lvl,
+                rows.append(dict(strat=nm, t=r.t, d=r.d, e=e, a=a, dts=dts, own_last=q[3][OWN[nm] - 1], last20=days[-1], d_in=d_in, A=A, lvl=lvl,
                                  tp_now=(e * (1 + tp[1] * mv) if tp else None), cost=float(cost[i]),
                                  trend=bool(c_[k] > da["m50"][k] and da["sl"][k] > 0),
                                  mkt=float((r.get("ixr_c") if r.get("ixr_c") == r.get("ixr_c") else 0) * (1 if sg > 0 else -1)),
                                  chase=float((c_[k] - c_[k - 5]) / A), far=float((r.p0 - e) / A)))
+    log(f"путь на 20 дн. есть у {n20} из {len(rows)} сделок (у остальных вариант «20 дн.» = свой срок)")
+    for y in range(2020, 2027):
+        log(f"  {y}: " + ", ".join(f"{s_} {sum(1 for x in rows if x['strat'] == s_ and x['d'].year == y)}" for s_ in OWN))
     return rows
 
 
@@ -348,6 +354,11 @@ def main():
     CL = closes(Dd)
     days_all = sorted(set(d for t in CL.values() for d in t if "2020-01-01" <= d <= "2026-12-31"))
     days_all = [d for d in days_all if pd.Timestamp(d).weekday() < 5]
+    miss_days = sorted(set(x["d_in"] for x in rows) - set(days_all))
+    log(f"торговых дней в календаре {len(days_all)}; дней входа вне календаря: {len(miss_days)} {miss_days[:5]}")
+    days_all = sorted(set(days_all) | set(miss_days))
+    by_m = pd.Series(1, index=pd.to_datetime(days_all)).resample("YE").count()
+    log("дней по годам: " + ", ".join(f"{k.year}: {v}" for k, v in by_m.items()))
     cur_pick = {s: ("нет", "как сейчас", "свой") for s in OWN}
     out["portfolio"] = {}
     for pname, pick in (("выход как сейчас", cur_pick), ("выход по 2020–22", best)):
