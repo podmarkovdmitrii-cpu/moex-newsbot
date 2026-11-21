@@ -40,9 +40,13 @@ def log(*a):
 # сборной стратегии не идёт (без потолка в дни массовых сигналов счёт обнулялся — просадка с переоценкой −116% при 10% на сделку).
 WEIGHT = {"S1": float(os.environ.get("W_S1", "0.05")), "F4": float(os.environ.get("W_F4", "0.05")), "F2": float(os.environ.get("W_F2", "0.025"))}
 LOAD_CAP = float(os.environ.get("LOAD_CAP", "1.5"))
+# Приоритет под потолком (№31: F2 слабая — +0,85% на сделку за 2008–2026, 11 из 19 лет — и при общем потолке вытесняет F4):
+# F2 берётся, только если после неё загрузка не выше F2_LOAD_MAX (место выше остаётся для S1 и F4) и открыто не больше F2_MAX_OPEN F2.
+F2_LOAD_MAX = float(os.environ.get("F2_LOAD_MAX", "1.0"))
+F2_MAX_OPEN = int(os.environ.get("F2_MAX_OPEN", "2"))
 KS_DAY = float(os.environ.get("KS_DAY", "-0.02"))      # убыток закрытых сделок за день, доля капитала → стоп до завтра
 KS_STREAK = int(os.environ.get("KS_STREAK", "3"))       # убыточных сделок подряд (последняя — сегодня) → стоп до завтра
-KS_DD = float(os.environ.get("KS_DD", "-0.10"))         # просадка от пика (закрытые + переоценка открытых) → стоп до команды /resume
+KS_DD = float(os.environ.get("KS_DD", "-0.20"))         # просадка от пика (закрытые + переоценка открытых) → стоп до команды /resume
 
 
 def _paper():
@@ -62,8 +66,9 @@ def risk_state(PW, st=None, today=None):
     if not st:
         return out
     inlim = PW.S.get("inlim") or {}
+    _M["inlim_since"] = PW.S.get("inlim_since") or _M.get("inlim_since")
     done = [x for x in st.get("trades") or [] if x.get("exit") is not None and x.get("ret") is not None
-            and _live(x) and inlim.get(_trade_key(x), True)]
+            and _live(x) and _in(x, inlim)]
     done.sort(key=lambda x: (x.get("exit_day") or "", x.get("sig_at") or ""))
     curve = [0.0]
     for x in done:
@@ -72,7 +77,7 @@ def risk_state(PW, st=None, today=None):
     eq, peak = curve[-1], max(curve[k0:])
     # переоценка открытых позиций по последним ценам виртуального счёта (paper_anom сохраняет last_px)
     px = st.get("last_px") or {}
-    op = [x for x in st.get("trades") or [] if x.get("entry") and not x.get("exit") and _live(x) and inlim.get(_trade_key(x), True)]
+    op = [x for x in st.get("trades") or [] if x.get("entry") and not x.get("exit") and _live(x) and _in(x, inlim)]
     mtm = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * (float(px[x["t"]]) / float(x["entry"]) - 1) for x in op if px.get(x["t"]))
     eq_m = eq + mtm
     peak_m = max(float(ks.get("peak_mtm", eq_m)), eq_m, peak)
@@ -323,7 +328,7 @@ def book(st, reserve_day=None):
     """Открытые позиции сборной стратегии в лимите и загрузка счёта (S1/F4 — 5% капитала, F2 — 2,5%).
     reserve_day — добавить к загрузке выставленные сегодня лимиты S1 в лимите (место под них зарезервировано)."""
     inlim = _M.get("inlim") or {}
-    op = [x for x in st.get("trades") or [] if x.get("entry") and not x.get("exit") and _live(x) and inlim.get(_trade_key(x), True)]
+    op = [x for x in st.get("trades") or [] if x.get("entry") and not x.get("exit") and _live(x) and _in(x, inlim)]
     load = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) for x in op)
     if reserve_day:
         load += sum(WEIGHT["S1"] for o in st.get("orders") or [] if o.get("day") == reserve_day and inlim.get(_trade_key(o)) is True)
@@ -334,12 +339,21 @@ def _load_line(st):
     op, load = book(st)
     s = f"Открыто позиций в лимите: {len(op)}, загрузка счёта {load:.0%} из {LOAD_CAP:.0%}".replace(".", ",")
     if load > LOAD_CAP + 1e-9:
-        s += " ⚠️ выше потолка (позиции открыты до его введения)"
+        s += " ⚠️ выше потолка из-за позиций, открытых до его введения — новые сигналы временно не принимаются"
     return s
 
 
 def _trade_key(x):
     return f"{x.get('strat', 'S1')}:{x['t']}:{x['day']}"
+
+
+def _in(x, inlim=None):
+    """Сделка в лимите: решение сохранено при сигнале; сделки до введения потолка (раньше inlim_since) считаются в лимите."""
+    inlim = _M.get("inlim") or {} if inlim is None else inlim
+    k = _trade_key(x)
+    if k in inlim:
+        return bool(inlim[k])
+    return (x.get("day") or "") < (_M.get("inlim_since") or "9999")
 
 
 def _signals(PW, st, day, admin, allowed):
@@ -359,8 +373,20 @@ def _signals(PW, st, day, admin, allowed):
         seen[key] = time.time()
         inlim = PW.S.setdefault("inlim", {})
         _M["inlim"] = inlim
+        _M["inlim_since"] = PW.S.setdefault("inlim_since", day)
         _, load_now = book(st, reserve_day=day)
         fits = load_now + WEIGHT.get(strat, 0.1) <= LOAD_CAP + 1e-9
+        why_out = f"потолок загрузки счёта {LOAD_CAP:.0%} достигнут (сейчас {load_now:.0%})"
+        if load_now > LOAD_CAP + 1e-9:
+            why_out = (f"загрузка счёта {load_now:.0%} — выше потолка {LOAD_CAP:.0%} из-за позиций, открытых до его введения; "
+                       "новые сигналы временно не принимаются")
+        if strat == "F2" and fits:
+            op_now, _ = book(st)
+            n_f2 = sum(1 for z in op_now if z.get("strat") == "F2")
+            if load_now + WEIGHT["F2"] > F2_LOAD_MAX + 1e-9:
+                fits, why_out = False, f"F2 берётся только при загрузке до {F2_LOAD_MAX:.0%} (сейчас {load_now:.0%}) — место оставлено для S1 и F4"
+            elif n_f2 >= F2_MAX_OPEN:
+                fits, why_out = False, f"уже открыто {n_f2} сделок F2 (максимум {F2_MAX_OPEN}) — место оставлено для S1 и F4"
         inlim[key] = bool(fits and allowed)
         em = _emergency(x["t"], 1)
         mv = float(x.get("move") or 0)
@@ -383,8 +409,7 @@ def _signals(PW, st, day, admin, allowed):
         halt = ("" if allowed else "\n🛑 Сейчас действует аварийная остановка — по правилу предохранителя вход пропускается, "
                                    "сделка в учёт сборной стратегии не идёт (/risk, /resume).")
         if allowed and not fits:
-            halt += (f"\n⚠️ <b>Сигнал вне лимита</b>: потолок загрузки счёта {LOAD_CAP:.0%} достигнут (сейчас {load_now:.0%}) — только для "
-                     "наблюдения, в учёт сборной стратегии не идёт.")
+            halt += f"\n⚠️ <b>Сигнал вне лимита</b>: {why_out} — только для наблюдения, в учёт сборной стратегии не идёт."
         txt = (f"{'⚡' if inlim[key] else '▫️'} <b>Сигнал{'' if inlim[key] else ' вне лимита'} · {strat} · {html.escape(PW.tlabel(x['t']))}</b> "
                f"({float(x.get('exc') or 0):+.1%} к индексу, {x.get('sig_at', '')[11:16]})\n{INTRA.get(strat, '')}\n\n{body}{stop}{size}{half}\n"
                f"{_load_line(st)}{halt}\n\n<i>Не является индивидуальной инвестиционной рекомендацией.</i>")
@@ -415,7 +440,7 @@ def _lifecycle(PW, st, admin):
             continue
         k = _trade_key(x)
         strat, name = x.get("strat", "S1"), html.escape(PW.tlabel(x["t"]))
-        if not (PW.S.get("inlim") or {}).get(k, True):
+        if not _in(x, PW.S.get("inlim") or {}):
             name += " (вне лимита, только наблюдение)"
         ev = []
         if strat == "S1" and x.get("entry"):
@@ -475,6 +500,7 @@ def intraday(PW):
     day = time.strftime("%Y-%m-%d", t)
     admin = sorted(PW.ADMINS)[0]
     _M["inlim"] = PW.S.setdefault("inlim", {})
+    _M["inlim_since"] = PW.S.setdefault("inlim_since", time.strftime("%Y-%m-%d", msk()))
     allowed = guard(PW, admin)
     if t.tm_wday < 5 and "10:00" <= hm <= "18:50":
         _signals(PW, st, day, admin, allowed)
@@ -486,6 +512,7 @@ def open_text(PW):
     """/trades — открытые сделки и активные лимиты сборной стратегии со всеми уровнями."""
     st = _paper() or {}
     _M["inlim"] = PW.S.setdefault("inlim", {})
+    _M["inlim_since"] = PW.S.setdefault("inlim_since", time.strftime("%Y-%m-%d", msk()))
     op, load = book(st)
     day = time.strftime("%Y-%m-%d", msk())
     L = [f"📒 <b>Сборная стратегия: открытые сделки в лимите</b> ({len(op)}, загрузка счёта {load:.0%} из {LOAD_CAP:.0%})"]
