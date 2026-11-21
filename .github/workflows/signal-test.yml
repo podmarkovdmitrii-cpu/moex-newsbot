@@ -1,0 +1,45 @@
+name: Проверочное сообщение сборной стратегии
+
+# Разовая отправка администратору (IDEA_ADMINS) проверочных сообщений сборной стратегии в боевом формате:
+# сигналы S1 / F4 / F2, исполнение лимита и закрытие сделки. Состояние бота не сохраняется и не меняется.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: signal-test
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Библиотеки
+        run: pip install --quiet pandas numpy matplotlib "scikit-learn==1.5.2"
+      - name: Состояние бота (бумажный счёт сборной стратегии) — только чтение
+        uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - name: Состояние закрытых идей — только чтение
+        uses: actions/cache/restore@v4
+        with:
+          path: channel-state
+          key: channel-state-${{ github.run_id }}
+          restore-keys: channel-state-
+      - name: Отправить проверочные сообщения
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_PUBLIC_TOKEN: ${{ secrets.TG_PUBLIC_TOKEN }}
+          IDEA_ADMINS: ${{ vars.IDEA_ADMINS || secrets.IDEA_ADMINS }}
+          STATE_DIR: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE_DIR: ${{ github.workspace }}/channel-state
+        run: |
+          cd newsbot/channel
+          ls -la "$STATE_DIR/channel" 2>/dev/null | head -5 || true
+          python -c "import paywall as PW; PW.restore(); import idea_scan as IS; n = IS.test_signal(PW); print('отправлено сообщений:', n); assert n > 0"
