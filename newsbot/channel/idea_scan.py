@@ -319,6 +319,11 @@ def _emergency(t, side):
         return None
 
 
+def _w(strat):
+    """Доля капитала на сделку текстом: 5%, 2,5%."""
+    return f"{WEIGHT.get(strat, 0.1) * 100:.1f}".rstrip("0").rstrip(".").replace(".", ",") + "%"
+
+
 def _live(x):
     """Сделка сборной стратегии: S1 — все, F2/F4 — только «верхние 30%» модель-фильтра."""
     return x.get("strat", "S1") == "S1" or bool(x.get("top"))
@@ -404,7 +409,7 @@ def _signals(PW, st, day, admin, allowed):
         em_stop = entry - em["risk"] if em else None   # расстояние за уровнем / 2,5 ATR — от цены входа сигнала
         stop = (f"\nАварийный стоп (в проверках стратегии стоп не ставился — он снижал результат): {_fmt(em_stop)} "
                 f"({'за уровнем' if em['level'] else '2,5 ATR'}, риск {em['risk'] / entry:.1%})" if em else "")
-        size = f"\nРазмер позиции: {WEIGHT.get(strat, 0.1):.0%} капитала".replace(".", ",")
+        size = f"\nРазмер позиции: {_w(strat)} капитала"
         half = (" (половинный риск: на 2023–2026 F2 держится на редких крупных сделках, тест перестановкой p = 0,09)") if strat == "F2" else ""
         halt = ("" if allowed else "\n🛑 Сейчас действует аварийная остановка — по правилу предохранителя вход пропускается, "
                                    "сделка в учёт сборной стратегии не идёт (/risk, /resume).")
@@ -457,13 +462,16 @@ def _lifecycle(PW, st, admin):
             if first:
                 continue          # при первом запуске старые события не присылаем
             stp = _stop_of(PW, x)
+            if e == "fill" and not stp:
+                em = _emergency(x["t"], 1)
+                stp = float(x["entry"]) - em["risk"] if em else None
             try:
                 if e == "fill":
                     tp = x.get("tp")
                     PW.say(admin, f"✅ <b>Куплено · S1 · {name}</b> — лимит {_fmt(float(x['entry']))} исполнен ({str(x.get('entry_at', ''))[11:16]})\n"
                                   f"Тейк <b>{_fmt(float(tp))}</b> ({float(tp) / float(x['entry']) - 1:+.1%}) · "
                                   + (f"аварийный стоп {_fmt(float(stp))} · " if stp else "")
-                                  + f"выход не позже {x.get('last_day')} (по закрытию)\nРазмер позиции: {WEIGHT['S1']:.0%} капитала\n{_load_line(st)}")
+                                  + f"выход не позже {x.get('last_day')} (по закрытию)\nРазмер позиции: {_w('S1')} капитала\n{_load_line(st)}")
                 elif e == "nofill":
                     PW.say(admin, f"▫️ S1 · {name}: лимит {_fmt(float(x['limit']))} за {x['day']} не исполнился — сделки нет.")
                 else:
@@ -521,7 +529,7 @@ def open_text(PW):
         L.append(f"• {x.get('strat', 'S1')} {html.escape(PW.tlabel(x['t']))}: вход {_fmt(float(x['entry']))} ({str(x.get('entry_at') or x['day'])[:10]})"
                  + (f", тейк {_fmt(float(x['tp']))}" if x.get("tp") else ", без тейка")
                  + (f", аварийный стоп {_fmt(float(stp))}" if stp else "") + f", выход не позже {x.get('last_day')}"
-                 + f", {WEIGHT.get(x.get('strat', 'S1'), 0.1):.0%} капитала")
+                 + f", {_w(x.get('strat', 'S1'))} капитала")
     orders = [o for o in st.get("orders") or [] if o.get("day") == day]
     if orders:
         L.append("\nЛимиты S1 на сегодня:")
@@ -574,3 +582,78 @@ def resume(PW):
     ks["peak_mtm"] = rs.get("eq_m", rs["eq"])
     PW.save()
     return "▶️ Сигналы возобновлены. Пик для расчёта просадки сброшен на текущий уровень виртуального счёта."
+
+
+def test_signal(PW, uid=None):
+    """/testsignal — проверочные сообщения сборной стратегии в боевом формате: сигналы S1 / F4 / F2, исполнение лимита и закрытие.
+    Берутся последние реальные сделки из бумажного счёта (нет — образец по последней цене SBER); состояние бота не меняется."""
+    import copy
+    import types
+    uid = uid or sorted(PW.ADMINS)[0]
+    st = copy.deepcopy(_paper() or {"orders": [], "trades": []})
+    st.setdefault("orders", [])
+    st.setdefault("trades", [])
+    day = time.strftime("%Y-%m-%d", msk())
+    keep = dict(_M)
+    sent = []
+    head = "🧪 <b>ТЕСТ — проверка формата, это не новая сделка</b>\n\n"
+
+    def say(u, txt, **kw):
+        sent.append(1)
+        return PW.say(uid, head + txt)
+    sh = types.SimpleNamespace(S=copy.deepcopy(PW.S), tlabel=PW.tlabel, ADMINS=PW.ADMINS, say=say, save=lambda: None)
+    sh.S["intra_seen"] = {}
+    sh.S.setdefault("inlim", {})
+    sh.S.setdefault("inlim_since", day)
+    pool = st["orders"] + st["trades"]
+    px = None
+    try:
+        px = float(daily("SBER", 30)["close"].iloc[-1])
+    except Exception as e:  # noqa: BLE001
+        log("тест: цена SBER", e)
+    px = px or 300.0
+    last = time.strftime("%Y-%m-%d", time.gmtime(time.time() + MSK + 28 * 86400))
+    demo = {"S1": dict(strat="S1", t="SBER", limit=round(px * 0.985, 2), move=0.03, exc=0.03, p0=px),
+            "F4": dict(strat="F4", t="SBER", top=True, entry=px, p0=px, tp=round(px * 1.08, 2), last_day=last, score=0.06, exc=-0.04, move=-0.04),
+            "F2": dict(strat="F2", t="SBER", top=True, entry=px, p0=px, tp=None, last_day=last, score=0.04, exc=0.04, move=0.04)}
+    try:
+        for strat in ("S1", "F4", "F2"):
+            c = [x for x in pool if x.get("strat", "S1") == strat and ((strat == "S1" and x.get("limit") is not None) or (strat != "S1" and x.get("top")))]
+            x = copy.deepcopy(max(c, key=lambda z: z.get("day") or "")) if c else copy.deepcopy(demo[strat])
+            x.update(day=day, sig_at=x.get("sig_at") or f"{day}T11:05:00")
+            x.pop("exit", None)
+            x.pop("ret", None)
+            if strat == "S1":
+                x.pop("entry", None)
+            one = {"orders": [x] if strat == "S1" else [], "trades": st["trades"] + ([x] if strat != "S1" else [])}
+            _signals(sh, one, day, uid, True)
+        # исполнение лимита S1 и закрытие сделки
+        lo = time.strftime("%Y-%m-%d", time.gmtime(time.time() + MSK - 45 * 86400))
+        fills = [x for x in st["trades"] if x.get("strat", "S1") == "S1" and x.get("entry") and _live(x)]
+        exits = [x for x in st["trades"] if x.get("exit") is not None and x.get("ret") is not None and _live(x)]
+        fx = max(fills, key=lambda z: z.get("day") or "") if fills else dict(demo["S1"], entry=demo["S1"]["limit"], entry_at=f"{day}T12:40:00",
+                                                                              tp=round(demo["S1"]["limit"] * 1.0075, 2), last_day=last, day=day)
+        ex = max(exits, key=lambda z: z.get("exit_day") or "") if exits else dict(fx, exit=round(fx["entry"] * 1.0075, 2), ret=0.0062,
+                                                                                exit_why="тейк", exit_day=day)
+        if not fills:
+            st["trades"].append(fx)
+        if not exits:
+            st["trades"].append(ex)
+        for x in (fx, ex):
+            if (x.get("day") or "") < lo:
+                x["day"] = day
+            sh.S["inlim"][_trade_key(x)] = True
+        life = {}
+        for x in st["trades"]:
+            for e in ("fill", "nofill", "exit"):
+                life[f"{_trade_key(x)}:{e}"] = time.time()
+        life.pop(f"{_trade_key(fx)}:fill", None)
+        life.pop(f"{_trade_key(ex)}:exit", None)
+        sh.S["life_seen"] = life
+        sh.S["life_init"] = True
+        _lifecycle(sh, st, uid)
+    finally:
+        _M.clear()
+        _M.update(keep)
+    log("тест: отправлено сообщений", len(sent))
+    return len(sent)
