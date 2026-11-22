@@ -2977,7 +2977,10 @@ def day_volume_share(now):
 def anomaly():
     now = now_msk()
     hm = now.strftime("%H:%M")
-    if now.weekday() >= 5 or not ("10:05" <= hm <= "23:50"):
+    # торги выходного дня (сб/вс): виртуальный счёт стратегий работает и в выходные (WEEKEND_TRADING=0 — выключить);
+    # публичные посты об аномалиях в выходные — только при ANOM_WEEKEND_POSTS=1
+    wkd = now.weekday() >= 5
+    if (wkd and os.environ.get("WEEKEND_TRADING", "1") == "0") or not ("10:05" <= hm <= ("19:05" if wkd else "23:50")):
         log("аномалии: вне торговой сессии")
         return
     today = now.date().isoformat()
@@ -2990,6 +2993,8 @@ def anomaly():
     try:
         ix = index_candles("IMOEX", 5)
         ixc = ix[-1]["c"] / ix[-2]["c"] - 1
+        if wkd and str(ix[-1].get("t", ""))[:10] != today:
+            ixc = 0.0          # в выходные индекс может не рассчитываться — ход бумаги считаем к закрытию пятницы без поправки на индекс
     except Exception:  # noqa: BLE001
         ixc = 0.0
     try:
@@ -3012,9 +3017,12 @@ def anomaly():
             al_ = AL_ if AL_.enabled() and not DEMO else None
         except Exception:  # noqa: BLE001
             al_ = None
-        paper_anom.scan(md, ixc, now, (at.get("rows") or {}) if at.get("date") == today else {}, dict(secs=secs, news=nh, al=al_))
+        rows_day = today if not wkd else prev_wd(now.date()).isoformat()   # в выходные — признаки из прогноза пятницы
+        paper_anom.scan(md, ixc, now, (at.get("rows") or {}) if at.get("date") == rows_day else {}, dict(secs=secs, news=nh, al=al_))
     except Exception as e:  # noqa: BLE001
         log("виртуальный счёт:", e)
+    if wkd and not os.environ.get("ANOM_WEEKEND_POSTS"):
+        return
     try:
         index_move(stt, md)
     except Exception as e:  # noqa: BLE001

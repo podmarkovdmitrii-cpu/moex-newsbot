@@ -827,7 +827,7 @@ def scan_tick(force=False, uid=None):
             say(uid, "Сканер уже работает — пришлю результат.")
         return
     t = time.gmtime(now() + 3 * 3600)
-    if not force and (t.tm_wday >= 5 or time.strftime("%H:%M", t) < os.environ.get("SCAN_AT", "19:25")
+    if not force and ((t.tm_wday >= 5 and os.environ.get("WEEKEND_TRADING", "1") == "0") or time.strftime("%H:%M", t) < os.environ.get("SCAN_AT", "19:25")
                       or S.get("scan_day") == time.strftime("%Y-%m-%d", t)):
         return
 

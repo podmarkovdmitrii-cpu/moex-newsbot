@@ -153,7 +153,8 @@ def scan(md, ixc, now, feats, ctx=None):
             keep.append(o)
     st["orders"] = keep
     # 4) новые сигналы
-    if now.weekday() < 5 and "10:00" <= hm < "18:00":
+    wkd = now.weekday() >= 5
+    if (not wkd and "10:00" <= hm < "18:00") or (wkd and os.environ.get("WEEKEND_TRADING", "1") != "0" and "10:00" <= hm < "18:30"):
         n_today = sum(1 for x in st["orders"] + st["trades"] if x.get("day") == today and x.get("strat", "S1") == "S1")
         flt = _filters()
         for t, r in px.items():
@@ -188,7 +189,7 @@ def scan(md, ixc, now, feats, ctx=None):
                     st["trades"].append(dict(strat=key, t=t, day=today, sig_at=now.isoformat(timespec="minutes"), p0=p0, prev=prev,
                                              move=round(move, 5), tier=tier, exc=round(exc, 4), entry=p0, entry_at=now.isoformat(timespec="minutes"),
                                              tp=round(tp, 6) if tp else None, last_day=_wd_after(now.date(), int(rec["hold"])).isoformat(),
-                                             score=round(sc, 5), thr=rec.get("thr"), top=bool(top)))
+                                             score=round(sc, 5), thr=rec.get("thr"), top=bool(top), wkd=wkd))
                     log(f"виртуальный счёт {key}: {t} {chg:+.1%} (к индексу {exc:+.1%}), куплено по {p0:.4f}; оценка модели {sc:+.2%}"
                         f" — {'верхние 30%' if top else 'ниже порога'}")
                 except Exception as e:  # noqa: BLE001
@@ -197,7 +198,7 @@ def scan(md, ixc, now, feats, ctx=None):
             if s < 0 or (PER_DAY and n_today >= PER_DAY):
                 continue
             o = dict(strat="S1", t=t, day=today, sig_at=now.isoformat(timespec="minutes"), p0=p0, prev=prev, move=round(move, 5), tier=tier,
-                     limit=round(p0 - 0.5 * (p0 - prev), 6), exc=round(exc, 4))
+                     limit=round(p0 - 0.5 * (p0 - prev), 6), exc=round(exc, 4), wkd=wkd)
             st["orders"].append(o)
             n_today += 1
             log(f"виртуальный счёт S1: сигнал {t} {chg:+.1%} (к индексу {exc:+.1%}), лимит {o['limit']:.4f} на откате 50%")

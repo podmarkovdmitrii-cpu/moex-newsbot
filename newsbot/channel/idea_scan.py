@@ -47,6 +47,11 @@ F2_MAX_OPEN = int(os.environ.get("F2_MAX_OPEN", "2"))
 KS_DAY = float(os.environ.get("KS_DAY", "-0.02"))      # убыток закрытых сделок за день, доля капитала → стоп до завтра
 KS_STREAK = int(os.environ.get("KS_STREAK", "3"))       # убыточных сделок подряд (последняя — сегодня) → стоп до завтра
 KS_DD = float(os.environ.get("KS_DD", "-0.20"))         # просадка от пика (закрытые + переоценка открытых) → стоп до команды /resume
+# Торги выходного дня (сб/вс): сигналы, сводка и вечерний сканер работают и в выходные (WEEKEND_TRADING=0 — выключить).
+# Сигналы выходных по умолчанию — только наблюдение (на истории стратегии не проверялись, ликвидность ниже); WEEKEND_LIVE=1 — в учёт.
+WEEKEND = os.environ.get("WEEKEND_TRADING", "1") != "0"
+WEEKEND_LIVE = os.environ.get("WEEKEND_LIVE", "0") == "1"
+WD_RU = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
 
 def _paper():
@@ -258,6 +263,22 @@ def _fmt(p):
     return f"{p:,.6g}".replace(",", " ").replace(".", ",")
 
 
+def _wkd_px(tickers):
+    """Последние цены торгов выходного дня: {тикер: (цена, изменение к предыдущему закрытию)}."""
+    out = {}
+    try:
+        from common import iss, table
+        js = iss("engines/stock/markets/shares/boards/TQBR/securities.json",
+                 **{"iss.only": "marketdata", "marketdata.columns": "SECID,LAST,LASTTOPREVPRICE,SYSTIME", "securities": ",".join(tickers)})
+        today = time.strftime("%Y-%m-%d", msk())
+        for r in table(js, "marketdata"):
+            if r.get("LAST") and str(r.get("SYSTIME") or "").startswith(today):
+                out[r["SECID"]] = (float(r["LAST"]), float(r.get("LASTTOPREVPRICE") or 0) / 100)
+    except Exception as e:  # noqa: BLE001
+        log("цены выходного дня:", e)
+    return out
+
+
 def card(c, rec, PW):
     side = "ЛОНГ 🟢" if c["side"] > 0 else "ШОРТ 🔴"
     cal = c.get("cal") or {}
@@ -279,7 +300,7 @@ def card(c, rec, PW):
 def evening(PW, force=False):
     t = msk()
     day = time.strftime("%Y-%m-%d", t)
-    if not force and (t.tm_wday >= 5 or time.strftime("%H:%M", t) < SCAN_AT or PW.S.get("scan_day") == day):
+    if not force and ((t.tm_wday >= 5 and not WEEKEND) or time.strftime("%H:%M", t) < SCAN_AT or PW.S.get("scan_day") == day):
         return
     if not PW.ADMINS:
         return
@@ -313,12 +334,21 @@ def evening(PW, force=False):
         if not cands:
             PW.say(admin, head + "\n\nСегодня ни одна бумага не прошла порог — сделок нет.\n\n<i>Не является индивидуальной инвестиционной рекомендацией.</i>")
             return
+        wk = _wkd_px([c["t"] for c in cands]) if t.tm_wday >= 5 else {}
+        if t.tm_wday >= 5:
+            head += ("\n🗓 <b>Выходные</b>: уровни — по закрытию основной сессии пятницы; цены торгов выходного дня показаны справочно, "
+                     "вход — по правилам в понедельник (после проверки, что цена не ушла за стоп).")
         PW.say(admin, head)
         S = PW.S.setdefault("scan", {})
         for c in cands:
             key = f"{c['t']}{'L' if c['side'] > 0 else 'S'}{day.replace('-', '')}"
             S[key] = c
-            PW.say(admin, card(c, rec, PW) + "\n\n<i>Не является индивидуальной инвестиционной рекомендацией.</i>",
+            wl = ""
+            if c["t"] in wk:
+                lp, ch = wk[c["t"]]
+                beyond = (c["side"] > 0 and lp <= c["stop"]) or (c["side"] < 0 and lp >= c["stop"])
+                wl = f"\n🗓 Торги выходного дня: {_fmt(lp)} ({ch:+.1%} к пятнице)" + (" — цена уже за стопом, сделку не открывать" if beyond else "")
+            PW.say(admin, card(c, rec, PW) + wl + "\n\n<i>Не является индивидуальной инвестиционной рекомендацией.</i>",
                    reply_markup={"inline_keyboard": [[{"text": "📝 Оформить идею", "callback_data": f"scn:{key}"}]]})
         for k in sorted(S)[:-60]:
             S.pop(k, None)
@@ -422,6 +452,9 @@ def _signals(PW, st, day, admin, allowed):
                 fits, why_out = False, f"F2 берётся только при загрузке до {F2_LOAD_MAX:.0%} (сейчас {load_now:.0%}) — место оставлено для S1 и F4"
             elif n_f2 >= F2_MAX_OPEN:
                 fits, why_out = False, f"уже открыто {n_f2} сделок F2 (максимум {F2_MAX_OPEN}) — место оставлено для S1 и F4"
+        if x.get("wkd") and not WEEKEND_LIVE and fits:
+            fits, why_out = False, ("торги выходного дня — по правилам только наблюдение: на истории стратегия проверялась на будних сессиях, "
+                                    "ликвидность в выходные ниже (WEEKEND_LIVE=1 — брать в учёт)")
         inlim[key] = bool(fits and allowed)
         em = _emergency(x["t"], 1)
         mv = float(x.get("move") or 0)
@@ -446,7 +479,9 @@ def _signals(PW, st, day, admin, allowed):
         if allowed and not fits:
             halt += f"\n⚠️ <b>Сигнал вне лимита</b>: {why_out} — только для наблюдения, в учёт сборной стратегии не идёт."
         txt = (f"{'⚡' if inlim[key] else '▫️'} <b>Сигнал{'' if inlim[key] else ' вне лимита'} · {strat} · {html.escape(PW.tlabel(x['t']))}</b> "
-               f"({float(x.get('exc') or 0):+.1%} к индексу, {x.get('sig_at', '')[11:16]})\n{INTRA.get(strat, '')}\n\n{body}{stop}{size}{half}\n"
+               f"({float(x.get('exc') or 0):+.1%} к индексу, {x.get('sig_at', '')[11:16]})\n"
+               + ("🗓 <b>Торги выходного дня</b> (ход к закрытию пятницы)\n" if x.get("wkd") else "")
+               + f"{INTRA.get(strat, '')}\n\n{body}{stop}{size}{half}\n"
                f"{_load_line(st)}{halt}\n\n<i>Не является индивидуальной инвестиционной рекомендацией.</i>")
         try:
             c = dict(t=x["t"], side=1, entry=float(entry), stop=float(em_stop) if em else None, target=float(tp) if tp else None, strat=strat)
@@ -540,7 +575,7 @@ def intraday(PW):
     _M["inlim"] = PW.S.setdefault("inlim", {})
     _M["inlim_since"] = PW.S.setdefault("inlim_since", time.strftime("%Y-%m-%d", msk()))
     allowed = guard(PW, admin)
-    if t.tm_wday < 5 and "10:00" <= hm <= "18:50":
+    if (t.tm_wday < 5 or WEEKEND) and "10:00" <= hm <= "18:50":
         _signals(PW, st, day, admin, allowed)
     _lifecycle(PW, st, admin)
     try:
@@ -717,7 +752,10 @@ def summary_text(PW, day=None):
     tl = lambda t: html.escape(PW.tlabel(t))  # noqa: E731
     mark = lambda x: "" if _in(x, inlim) else " ▫️вне лимита"  # noqa: E731
     dd_ = f"{day[8:10]}.{day[5:7]}.{day[:4]}"
-    L = [f"📋 <b>Сводка сборной стратегии за {dd_}</b> (предварительно, {time.strftime('%H:%M', msk())} МСК)"]
+    wd = time.strptime(day, "%Y-%m-%d").tm_wday
+    L = [f"📋 <b>Сводка сборной стратегии за {dd_}</b> (предварительно, {time.strftime('%H:%M', msk())} МСК)"
+         + (f"\n🗓 Торги выходного дня ({WD_RU[wd]}): цены — сессии выходного дня; сигналы выходных "
+            + ("в учёте" if WEEKEND_LIVE else "только для наблюдения") + "." if wd >= 5 else "")]
     # 1. сигналы дня
     sig, seen = [], set()
     for x in orders + trades:
@@ -763,7 +801,7 @@ def summary_text(PW, day=None):
     if not op:
         L.append("• нет")
     # 4. на завтра
-    nd = time.strftime("%Y-%m-%d", time.gmtime(time.time() + MSK + 86400 * (3 if msk().tm_wday == 4 else 1)))
+    nd = time.strftime("%Y-%m-%d", time.gmtime(time.time() + MSK + 86400 * {4: 3, 5: 2, 6: 1}.get(msk().tm_wday, 1)))
     due = [x for x in op if (x.get("last_day") or "9999") <= nd]
     L.append(f"\n<b>4. На следующий торговый день</b>: выход по сроку (по закрытию) — " + (", ".join(f"{x.get('strat', 'S1')} {tl(x['t'])}" for x in due) or "нет")
              + ". Неисполненные лимиты S1 снимаются; новые — только по новым сигналам.")
@@ -793,7 +831,7 @@ def daily_summary(PW, force=False, uid=None):
     """Каждый торговый день в SUMMARY_AT (19:05 МСК) — сводка администратору; один раз в день."""
     t = msk()
     day = time.strftime("%Y-%m-%d", t)
-    if not force and (t.tm_wday >= 5 or time.strftime("%H:%M", t) < SUMMARY_AT or PW.S.get("sum_day") == day):
+    if not force and ((t.tm_wday >= 5 and not WEEKEND) or time.strftime("%H:%M", t) < SUMMARY_AT or PW.S.get("sum_day") == day):
         return
     if not PW.ADMINS:
         return
