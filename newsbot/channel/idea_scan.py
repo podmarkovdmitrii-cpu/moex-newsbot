@@ -777,7 +777,7 @@ def summary_text(PW, day=None):
     js = _v3()
     if js:
         eqv = float(js.get("equity") or 0) / max(1.0, float(js.get("capital") or 1)) - 1
-        L.append(f"\n<b>6. Вторая стратегия v3</b>: открыто {len(js.get('open') or [])}, загрузка {_v3_load(js):.0%}; виртуальный счёт с {js.get('start')}: {eqv:+.1%}")
+        L.append(f"\n<b>6. Вторая стратегия v3</b>: открыто {len(js.get('open') or [])}, загрузка {_v3_load(js):.0%} (половинный размер); модель v3 в полном размере с {js.get('start')}: {eqv:+.1%}")
         for o in js.get("open") or []:
             L.append(_v3_open_line(PW, o))
         pend = js.get("pend") or []
@@ -829,7 +829,7 @@ def _v3_events(PW, admin, st):
                       f"Вход {_fmt(float(o['entry']))} · стоп <b>{_fmt(float(o['stop']))}</b> (−3%) · "
                       + (f"цель <b>{_fmt(float(o['take']))}</b>" if o.get("take") else "без цели (выход по стопу/безубытку или ротации)") + "\n"
                       f"Правило выхода: {V3_MODS.get(o.get('fam'), '')}\n"
-                      f"Размер: {float(o.get('w') or 0):.0%} капитала, риск {risk:.1%} капитала".replace(".", ",") + "\n"
+                      f"Размер: {float(o.get('w') or 0):.0%} капитала (половина от модели), риск {risk:.1%} капитала".replace(".", ",") + "\n"
                       + ("⚠️ Шорт: нужен доступ к маржинальной торговле, перенос позиции платный.\n" if o.get("side", 1) < 0 else "")
                       + f"{_load_line(st)}\n\n<i>Вторая стратегия (v3). Не является индивидуальной инвестиционной рекомендацией.</i>")
     for x in js.get("recent") or []:
