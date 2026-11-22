@@ -28,6 +28,7 @@ const STRAT = JSON.parse(fs.readFileSync(path.join(HERE, 'strategy.json'), 'utf8
 // ≤17% капитала на позицию, v3 ≤50% (виртуальный счёт модели считается в полном размере). Доля позиций в signals.json (w) — уже с V3_SCALE;
 // общий потолок загрузки 150% (вместе со сборной) соблюдает idea_scan.py. №36: уменьшать параметры движка нельзя — меняется набор сделок (+6,5% вместо +8,8%/год).
 const V3_SCALE = +(process.env.V3_SCALE || 0.5);
+const WKD = d => { const w = new Date(d + 'T12:00:00Z').getUTCDay(); return w === 0 || w === 6; }; // суббота/воскресенье
 const WEIGHTS = JSON.parse(fs.readFileSync(path.join(HERE, 'weights.json'), 'utf8'));
 const RELIAB = fs.existsSync(path.join(HERE, 'reliability.json')) ? JSON.parse(fs.readFileSync(path.join(HERE, 'reliability.json'), 'utf8')) : {};
 const DIVS = JSON.parse(fs.readFileSync(path.join(HERE, 'divhist.json'), 'utf8'));
@@ -384,13 +385,13 @@ function divAdjust(t, rows) { // множитель поправки на див
 function runStrategy(S, data, live, today) {
   const sec = {}, div = {}, fac = {}, lots = {};
   for (const [t, rows0] of Object.entries(data.sec)) {
-    const rows = rows0.slice(); if (live.sec[t]) rows.push(live.sec[t]);
+    const rows = rows0.slice(); if (live.sec[t] && !WKD(today)) rows.push(live.sec[t]); // торги выходного дня в расчёт v3 не идут (модель проверена на будних сессиях)
     if (rows.length < 60) continue;
     const A = divAdjust(t, rows);
     sec[t] = rows.map((r, i) => [r[0], r[1] * A.f[i], r[2] * A.f[i], r[3] * A.f[i], r[4] * A.f[i], r[5]]);
     div[t] = A.div; fac[t] = new Map(rows.map((r, i) => [r[0], A.f[i]])); lots[t] = (data.lot[t] || {}).lot || 1;
   }
-  const X = data.imoex.slice(); if (live.imoex) X.push(live.imoex);
+  const X = data.imoex.slice(); if (live.imoex && !WKD(today)) X.push(live.imoex);
   const days = X.map(r => r[0]);
   // новостные события → сигнальный день (вход на открытии следующего дня после публикации, как в исследовании)
   const sig = {};
@@ -463,7 +464,7 @@ async function tradeMessages(S, res, data) {
   if (hm >= '19:00' && S.sigDay !== today) {
     S.sigDay = today;
     const pend = r.pendEntries || [];
-    if (pend.length) await tg('🔔 <b>Сигналы стратегии на завтра</b> (вход на открытии):\n' + pend.map(q => `• $${q.t} ${q.side > 0 ? 'покупка' : 'шорт'} — ${esc((q.why || [])[0] || '')}`).join('\n') + `\nРежим рынка: ${REG_RU[res.regime]}`);
+    if (pend.length) await tg(`🔔 <b>Сигналы стратегии на ${WKD(today) || nowMsk().getUTCDay() === 5 ? 'понедельник' : 'завтра'}</b> (вход на открытии):\n` + pend.map(q => `• $${q.t} ${q.side > 0 ? 'покупка' : 'шорт'} — ${esc((q.why || [])[0] || '')}`).join('\n') + `\nРежим рынка: ${REG_RU[res.regime]}`);
   }
 }
 
