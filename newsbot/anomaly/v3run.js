@@ -6,7 +6,8 @@ const path = require('path');
 const RG = require(path.join(__dirname, '..', 'regime.js'));
 const STRAT = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'strategy.json'), 'utf8'));
 const DIVS = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'divhist.json'), 'utf8'));
-const [inp, out, start, capArg] = process.argv.slice(2);
+const [inp, out, start, capArg, scaleArg] = process.argv.slice(2);
+const SC = +(scaleArg || 1);   // доля риска: 0,5 — половинный размер всех позиций (риск, доля на позицию, общая загрузка)
 const H = JSON.parse(fs.readFileSync(inp, 'utf8'));
 
 function divAdjust(t, rows) { // как bot.js
@@ -31,7 +32,7 @@ for (const [t, rows] of Object.entries(H.sec)) {
 }
 const D = RG.prepare({ days: H.days, sec, imoex: H.imoex, div, divTaxOnly: 1 });
 const from = Math.max(0, H.days.findIndex(d => d >= (start || '2009-01-01')));
-const P = Object.assign({}, STRAT, { capital: +(capArg || 1000000) });
+const P = Object.assign({}, STRAT, { capital: +(capArg || 1000000), riskPct: STRAT.riskPct * SC, maxPosPct: STRAT.maxPosPct * SC, maxGross: (STRAT.maxGross || 1) * SC });
 const r = RG.run(D, P, { from, to: D.N - 1 });
 const m = RG.metrics(r, from, D.N - 1, P.capital);
 const per = {};
@@ -44,5 +45,6 @@ fs.writeFileSync(out, JSON.stringify({
   name: STRAT.name, metrics: m, per,
   daily: r.daily.map(x => [H.days[x.i], +x.equity.toFixed(2), +x.expo.toFixed(4)]),
   trades: r.trades.length,
+  list: r.trades.map(x => [x.fam, x.side, x.d0, x.d1, x.days, +x.ret.toFixed(5), +x.r.toFixed(3), +(x.pnl / P.capital).toFixed(6), x.reason, x.open ? 1 : 0]),
 }));
 console.log('v3:', STRAT.name, 'сделок', r.trades.length, 'годовых', (m.cagr * 100).toFixed(1) + '%', 'просадка', (m.mdd * 100).toFixed(1) + '%', 'PF', m.pf.toFixed(2));
