@@ -308,6 +308,9 @@ def evening(PW, force=False):
         PW.S["scan_day"] = day
         PW.save()
     admin = sorted(PW.ADMINS)[0]
+    if SCAN_MODE != "trend":       # вечерний прогноз по действующим стратегиям (сборная + v3) вместо прежнего трендового сканера
+        PW.say(admin, forecast_text(PW))
+        return
     if not guard(PW, admin):
         PW.say(admin, f"🔎 Вечерний сканер за {day} не запускался: действует аварийная остановка ({html.escape(PW.S['ks'].get('dd_why') or PW.S['ks'].get('why') or '')}).")
         return
@@ -884,3 +887,87 @@ def _v3_events(PW, admin, st):
     PW.S["v3_init"] = True
     for k in [k for k, v in seen.items() if time.time() - v > 400 * 86400]:
         seen.pop(k, None)
+
+
+SCAN_MODE = os.environ.get("SCAN_MODE", "strategy")   # strategy — вечерний прогноз по сборной стратегии и v3; trend — прежний трендовый сканер (№24)
+THR_TIER = {1: 0.04, 2: 0.06, 3: 0.08}
+
+
+def _anom_next():
+    base = os.environ.get("STATE_DIR") or os.environ.get("NEWS_STATE") or ""
+    for p in (os.path.join(base, "channel", "anom_next.json"), os.path.join(os.environ.get("CHANNEL_STATE") or "", "anom_next.json")):
+        try:
+            js = json.load(open(p, encoding="utf-8"))
+            if js.get("rows"):
+                return js
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def forecast_text(PW):
+    """Вечерний прогноз по действующим стратегиям: кандидаты на сигналы сборной (S1/F4/F2) по модели аномалий на следующий торговый день,
+    сигналы и список наблюдения v3, выходы по сроку, свободное место под потолком загрузки."""
+    t = msk()
+    st = _paper() or {}
+    _M["inlim"] = PW.S.setdefault("inlim", {})
+    _M["inlim_since"] = PW.S.setdefault("inlim_since", time.strftime("%Y-%m-%d", t))
+    nd = time.strftime("%Y-%m-%d", time.gmtime(time.time() + MSK + 86400 * {4: 3, 5: 2, 6: 1}.get(t.tm_wday, 1)))
+    ndt = f"{nd[8:10]}.{nd[5:7]}"
+    tl = lambda x: html.escape(PW.tlabel(x))  # noqa: E731
+    _, load = book(st)
+    free = max(0.0, LOAD_CAP - load)
+    rs = risk_state(PW, st)
+    L = [f"🔭 <b>Вечерний прогноз стратегий на {ndt}</b>",
+         f"<i>Действующие правила (проверки №29–36): сборная — S1 и F4 по 5% капитала, F2 по 2,5%; v3 — половинный размер (риск 0,5%); "
+         f"общий потолок загрузки {LOAD_CAP:.0%}. Сейчас загрузка {load:.0%}, свободно ≈ {free:.0%} (мест под сделки по 5%: {int(free / WEIGHT["S1"] + 1e-9)}).</i>"]
+    if t.tm_wday >= 5:
+        L.append("🗓 Выходные: уровни — по закрытию пятницы, торги выходного дня — справочно; вход — в понедельник.")
+    if rs["halted"]:
+        L.append(f"🛑 Действует аварийная остановка: {html.escape(rs['why'])} — новые входы не принимаются.")
+    # 1. сборная: кандидаты на аномалию завтра
+    an = _anom_next()
+    L.append(f"\n<b>1. Сборная (S1 / F4 / F2): вероятные аномалии на {ndt}</b>")
+    if an and an.get("date") >= time.strftime("%Y-%m-%d", t):
+        rows = {k: v for k, v in an["rows"].items() if (v.get("lval") or 0) >= 7}
+        top = sorted(rows, key=lambda k: -(rows[k].get("p_y") or 0))[:8]
+        L.append(f"<i>Модель аномалий (обучена {an.get('trained') or '—'}); сигнал придёт внутри дня, если ход к индексу превысит порог. "
+                 "Рост → S1 (лимит на откате 50% хода) и F2 (если модель-фильтр даст «верхние 30%»); падение → F4 (покупка сразу, «верхние 30%»).</i>")
+        for k in top:
+            r = rows[k]
+            pu = r.get("p_dir_up")
+            thr = max(THR_TIER.get(int(r.get("tier") or 3), 0.08), 3 * float(r.get("sd60") or 0))
+            dirw = ("направление неясно" if pu is None or abs(pu - 0.5) < 0.1 else
+                    (f"вверх {pu:.0%} → S1/F2" if pu > 0.5 else f"вниз {1 - pu:.0%} → F4"))
+            L.append(f"• {tl(k)} — аномалия {float(r.get('p_y') or 0):.0%}, {dirw}; порог сигнала ±{thr:.0%} к индексу")
+        if not top:
+            L.append("• ликвидных кандидатов нет")
+    else:
+        L.append("• прогноз модели аномалий на следующий день ещё не посчитан (обычно готов к 19:00–23:00)")
+    # выходы по сроку
+    op = [x for x in st.get("trades") or [] if x.get("entry") and not x.get("exit") and _live(x) and _in(x)]
+    due = [x for x in op if (x.get("last_day") or "9999") <= nd]
+    L.append("Выход по сроку " + ndt + " (по закрытию): " + (", ".join(f"{x.get('strat', 'S1')} {tl(x['t'])}" for x in due) or "нет")
+             + f"; открыто позиций сборной {len(op)}.")
+    # 2. v3
+    js = _v3()
+    L.append(f"\n<b>2. v3: сигналы на {ndt}</b> (вход на открытии)")
+    if js:
+        pend = js.get("pend") or []
+        for q in pend:
+            w = float(js.get("riskPct") or 0.005) / 0.03
+            L.append(f"• {tl(q['t'])} — {'покупка' if q.get('side', 1) > 0 else 'шорт'} ({V3_MODS.get(q.get('fam'), q.get('fam') or '').split(' — ')[0]}): "
+                     f"вход ≈ {_fmt(float(q['entry']))}, стоп {_fmt(float(q['stop']))} (−3%)" + (f", цель {_fmt(float(q['take']))}" if q.get("take") else ", без цели")
+                     + f"; размер ≈ {w:.0%} капитала" + (" ⚠️ не влезает в потолок — пропустить" if w > free + 1e-9 else ""))
+        if not pend:
+            L.append("• новых входов нет")
+        watch = (js.get("watch") or [])[:5]
+        if watch:
+            L.append("Наблюдение v3 (возможные входы в ближайшие дни): " + "; ".join(f"{tl(w_['t'])} — {html.escape(w_.get('note') or '')}" for w_ in watch))
+        L.append(f"Открыто v3: {len(js.get('open') or [])}, загрузка {_v3_load(js):.0%}; режим рынка: {html.escape(str(js.get('regimeText') or ''))}.")
+    else:
+        L.append("• данных v3 нет (новостной бот ещё не обновил signals.json)")
+    L.append("\nПолная картина дня — в сводке 19:05; все уровни входа приходят отдельными сообщениями в момент сигнала.\n\n"
+             "<i>Не является индивидуальной инвестиционной рекомендацией.</i>")
+    txt = "\n".join(L)
+    return txt if len(txt) < 4000 else txt[:3900] + "\n…"
