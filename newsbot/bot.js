@@ -24,6 +24,9 @@ const FIXTURE = process.env.BOT_FIXTURE || null; // для проверки бе
 const CAPITAL = +(process.env.BOT_CAPITAL || 100000);
 const ISS = 'https://iss.moex.com/iss/';
 const STRAT = JSON.parse(fs.readFileSync(path.join(HERE, 'strategy.json'), 'utf8'));
+// Вторая стратегия рядом со сборной (проверка №35): v3 с половинным размером — риск 0,5% на сделку, ≤17% капитала на позицию, загрузка v3 ≤50%;
+// общий потолок загрузки 150% (вместе со сборной) соблюдает idea_scan.py по signals.json. V3_SCALE=1 — полный размер.
+const V3_SCALE = +(process.env.V3_SCALE || 0.5);
 const WEIGHTS = JSON.parse(fs.readFileSync(path.join(HERE, 'weights.json'), 'utf8'));
 const RELIAB = fs.existsSync(path.join(HERE, 'reliability.json')) ? JSON.parse(fs.readFileSync(path.join(HERE, 'reliability.json'), 'utf8')) : {};
 const DIVS = JSON.parse(fs.readFileSync(path.join(HERE, 'divhist.json'), 'utf8'));
@@ -400,7 +403,7 @@ function runStrategy(S, data, live, today) {
   const D = RG.prepare({ days, sec, imoex: X, div, divTaxOnly: 1, sig, ctx });
   let from = days.findIndex(d => d >= S.start); if (from < 0) from = days.length - 1;
   const to = days.length - 1, sigTo = days[to] >= today ? to - 1 : to;
-  const P = Object.assign({}, STRAT, { capital: CAPITAL, lots });
+  const P = Object.assign({}, STRAT, { capital: CAPITAL, lots, riskPct: STRAT.riskPct * V3_SCALE, maxPosPct: STRAT.maxPosPct * V3_SCALE, maxGross: (STRAT.maxGross || 1) * V3_SCALE });
   const r = RG.run(D, P, { from, to, live: true, signalTo: sigTo });
   const raw = (t, d, px) => { const f = fac[t] && fac[t].get(d); return f ? px / f : px; };
   return { r, D, raw, days, to, regime: r.daily.length ? r.daily[r.daily.length - 1].g : 0 };
@@ -492,10 +495,11 @@ function writeSignals(S, res, data, today) {
   const out = {
     made: new Date().toISOString(), day: d, today, regime: res.regime, regimeShort: regS, regimeText: REG_RU[res.regime], strategy: STRAT.name, start: S.start,
     equity: last.equity || CAPITAL, capital: CAPITAL, trades: tr.length, wins: tr.filter(x => x.pnl > 0).length,
-    open: r.open.map(p => ({ t: p.t, name: name(p.t), side: p.side, fam: p.fam, d0: p.d0, entry: raw(p.t, p.d0, p.entry), stop: rr(p.t, p.stop), take: p.take ? rr(p.t, p.take) : null, last: rr(p.t, p.last), pnl: p.side * (p.last / p.entry - 1) })),
+    open: r.open.map(p => ({ t: p.t, name: name(p.t), side: p.side, fam: p.fam, d0: p.d0, entry: raw(p.t, p.d0, p.entry), stop: rr(p.t, p.stop), take: p.take ? rr(p.t, p.take) : null, last: rr(p.t, p.last), pnl: p.side * (p.last / p.entry - 1), w: +(p.qty * p.last / Math.max(1, last.equity || CAPITAL)).toFixed(4) })),
+    scale: V3_SCALE, riskPct: STRAT.riskPct * V3_SCALE,
     pend: (r.pendEntries || []).map(q => { const c = D.S[q.t].c[to]; return { t: q.t, name: name(q.t), side: q.side, fam: q.m.fam, why: q.why, entry: rr(q.t, c), stop: rr(q.t, c * (1 - q.side * STRAT.stopPct)), take: q.m.take ? rr(q.t, c * (1 + q.side * q.m.take * STRAT.stopPct)) : null }; }),
     watch: watch.slice(0, 14),
-    recent: tr.slice(-10).map(x => ({ t: x.t, side: x.side, d0: x.d0, d1: x.d1, ret: x.ret, r: x.r, reason: x.reason })),
+    recent: tr.slice(-10).map(x => ({ t: x.t, side: x.side, fam: x.fam, d0: x.d0, d1: x.d1, days: x.days, entry: raw(x.t, x.d0, x.entry), exit: raw(x.t, x.d1, x.exit), ret: x.ret, r: x.r, pnl: x.pnl, reason: x.reason })),
   };
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.writeFileSync(path.join(STATE_DIR, 'signals.json'), JSON.stringify(out));
@@ -687,7 +691,7 @@ async function channelWait() { // перед завершением запуск
     const res = runStrategy(S, data, live, today);
     const eq = res.r.daily.length ? res.r.daily[res.r.daily.length - 1].equity : CAPITAL;
     log('позиций', res.r.open.length, 'сделок', res.r.trades.length, 'капитал', Math.round(eq));
-    if (S.firstRun === undefined) { S.firstRun = false; S.open = Object.fromEntries(res.r.open.map(p => [p.t + '@' + p.d0, { t: p.t, d0: p.d0, entry: res.raw(p.t, p.d0, p.entry), qty: p.qty, side: p.side }])); await tg(`🤖 Новостной бот запущен. Виртуальный счёт ${fmt(CAPITAL, 0)} ₽, стратегия «${esc(STRAT.name)}», риск 1% на сделку, стоп 3%. Каналов: ${Object.keys(CHANNELS).length}. Режим рынка: ${REG_RU[res.regime]}.`); }
+    if (S.firstRun === undefined) { S.firstRun = false; S.open = Object.fromEntries(res.r.open.map(p => [p.t + '@' + p.d0, { t: p.t, d0: p.d0, entry: res.raw(p.t, p.d0, p.entry), qty: p.qty, side: p.side }])); await tg(`🤖 Новостной бот запущен. Виртуальный счёт ${fmt(CAPITAL, 0)} ₽, стратегия «${esc(STRAT.name)}», риск ${fmt(STRAT.riskPct * V3_SCALE * 100, 1)}% на сделку, стоп 3%. Каналов: ${Object.keys(CHANNELS).length}. Режим рынка: ${REG_RU[res.regime]}.`); }
     else await tradeMessages(S, res, data);
     S.equity = Math.round(eq);
     try { writeSignals(S, res, data, today); } catch (e) { log('signals.json: ошибка', e.message); }
