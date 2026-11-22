@@ -514,6 +514,10 @@ def intraday(PW):
         _signals(PW, st, day, admin, allowed)
     _lifecycle(PW, st, admin)
     PW.save()
+    try:
+        daily_summary(PW)
+    except Exception as e:  # noqa: BLE001
+        log("вечерняя сводка:", e)
 
 
 def open_text(PW):
@@ -657,3 +661,94 @@ def test_signal(PW, uid=None):
         _M.update(keep)
     log("тест: отправлено сообщений", len(sent))
     return len(sent)
+
+
+SUMMARY_AT = os.environ.get("SUMMARY_AT", "19:05")
+
+
+def summary_text(PW, day=None):
+    """Вечерняя сводка сборной стратегии за день — формализованно, по разделам (предварительно: вечерняя сессия ещё идёт)."""
+    st = _paper() or {}
+    day = day or time.strftime("%Y-%m-%d", msk())
+    _M["inlim"] = PW.S.setdefault("inlim", {})
+    _M["inlim_since"] = PW.S.setdefault("inlim_since", day)
+    inlim = _M["inlim"]
+    px = st.get("last_px") or {}
+    trades = st.get("trades") or []
+    orders = st.get("orders") or []
+    tl = lambda t: html.escape(PW.tlabel(t))  # noqa: E731
+    mark = lambda x: "" if _in(x, inlim) else " ▫️вне лимита"  # noqa: E731
+    dd_ = f"{day[8:10]}.{day[5:7]}.{day[:4]}"
+    L = [f"📋 <b>Сводка сборной стратегии за {dd_}</b> (предварительно, {time.strftime('%H:%M', msk())} МСК)"]
+    # 1. сигналы дня
+    sig, seen = [], set()
+    for x in orders + trades:
+        k = _trade_key(x)
+        if x.get("day") != day or k in seen or not (_live(x) or (x.get("strat", "S1") == "S1" and x.get("limit") is not None)):
+            continue
+        seen.add(k)
+        sig.append(x)
+    L.append(f"\n<b>1. Сигналы за день: {len(sig)}</b> (в лимите {sum(1 for x in sig if _in(x, inlim))}, вне лимита {sum(1 for x in sig if not _in(x, inlim))})")
+    for x in sig:
+        strat = x.get("strat", "S1")
+        if strat == "S1":
+            tr = next((z for z in trades if _trade_key(z) == _trade_key(x) and z.get("entry")), None)
+            stt = (f"исполнен {str(tr.get('entry_at', ''))[11:16]} по {_fmt(float(tr['entry']))}" if tr else
+                   ("не исполнен" if x.get("status") == "не исполнена" else "лимит активен до конца дня"))
+            L.append(f"• S1 {tl(x['t'])}: лимит {_fmt(float(x['limit']))}, {stt}{mark(x)}")
+        else:
+            L.append(f"• {strat} {tl(x['t'])}: покупка ~{_fmt(float(x.get('entry') or x.get('p0') or 0))}, "
+                     + (f"тейк {_fmt(float(x['tp']))}, " if x.get("tp") else "без тейка, ") + f"выход не позже {x.get('last_day')}{mark(x)}")
+    if not sig:
+        L.append("• сигналов не было")
+    # 2. закрытые сегодня
+    done = [x for x in trades if x.get("exit_day") == day and x.get("ret") is not None and _live(x)]
+    tot = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * float(x["ret"]) for x in done if _in(x, inlim))
+    L.append(f"\n<b>2. Закрыто за день: {len(done)}</b>, вклад в капитал (в лимите) {tot:+.2%}")
+    for x in done:
+        w = WEIGHT.get(x.get("strat", "S1"), 0.1)
+        L.append(f"• {x.get('strat', 'S1')} {tl(x['t'])}: {x.get('exit_why')}, {_fmt(float(x['entry']))} → {_fmt(float(x['exit']))}, "
+                 f"{float(x['ret']):+.2%} (в капитале {w * float(x['ret']):+.2%}){mark(x)}")
+    # 3. открытые позиции
+    op = [x for x in trades if x.get("entry") and not x.get("exit") and _live(x) and _in(x, inlim)]
+    op.sort(key=lambda x: x.get("last_day") or "")
+    _, load = book(st)
+    L.append(f"\n<b>3. Открытые позиции в лимите: {len(op)}</b>, загрузка счёта {load:.0%} из {LOAD_CAP:.0%}")
+    for x in op:
+        e = float(x["entry"])
+        p = px.get(x["t"])
+        pnl = f", сейчас {_fmt(float(p))} ({float(p) / e - 1:+.1%})" if p else ""
+        stp = _stop_of(PW, x)
+        L.append(f"• {x.get('strat', 'S1')} {tl(x['t'])}: вход {_fmt(e)} ({str(x.get('entry_at') or x['day'])[:10]}){pnl}; "
+                 + (f"тейк {_fmt(float(x['tp']))}; " if x.get("tp") else "без тейка; ")
+                 + (f"авар. стоп {_fmt(float(stp))}; " if stp else "") + f"выход не позже {x.get('last_day')}; {_w(x.get('strat', 'S1'))}")
+    if not op:
+        L.append("• нет")
+    # 4. на завтра
+    nd = time.strftime("%Y-%m-%d", time.gmtime(time.time() + MSK + 86400 * (3 if msk().tm_wday == 4 else 1)))
+    due = [x for x in op if (x.get("last_day") or "9999") <= nd]
+    L.append(f"\n<b>4. На следующий торговый день</b>: выход по сроку (по закрытию) — " + (", ".join(f"{x.get('strat', 'S1')} {tl(x['t'])}" for x in due) or "нет")
+             + ". Неисполненные лимиты S1 снимаются; новые — только по новым сигналам.")
+    # 5. риск
+    rs = risk_state(PW, st, day)
+    L.append(f"\n<b>5. Риск</b>: закрыто всего {rs['n']}, итог {rs['eq']:+.2%}; с переоценкой {rs.get('eq_m', rs['eq']):+.2%} "
+             f"(пик {rs.get('peak_m', rs['peak']):+.2%}); просадка {rs['dd']:.2%} (порог {KS_DD:.0%}); за день {rs['day_pnl']:+.2%} (порог {KS_DAY:.0%}); "
+             f"убыточных подряд {rs['streak']} (порог {KS_STREAK})")
+    L.append("Предохранитель: " + ("🛑 " + html.escape(rs["why"]) if rs["halted"] else "✅ сигналы принимаются"))
+    L.append("\n<i>Цены — последние снимки виртуального счёта; окончательные итоги дня — после закрытия торгов. "
+             "Не является индивидуальной инвестиционной рекомендацией.</i>")
+    txt = "\n".join(L)
+    return txt if len(txt) < 4000 else txt[:3900] + "\n…(сокращено, полный список — /trades)"
+
+
+def daily_summary(PW, force=False, uid=None):
+    """Каждый торговый день в SUMMARY_AT (19:05 МСК) — сводка администратору; один раз в день."""
+    t = msk()
+    day = time.strftime("%Y-%m-%d", t)
+    if not force and (t.tm_wday >= 5 or time.strftime("%H:%M", t) < SUMMARY_AT or PW.S.get("sum_day") == day):
+        return
+    if not PW.ADMINS:
+        return
+    PW.S["sum_day"] = day
+    PW.save()
+    PW.say(uid or sorted(PW.ADMINS)[0], summary_text(PW, day))
