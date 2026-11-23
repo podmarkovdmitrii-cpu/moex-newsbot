@@ -210,6 +210,31 @@ def share_candles(t, days=420):
     return candles(f"engines/stock/markets/shares/boards/TQBR/securities/{t}/candles.json", days)
 
 
+_ACTIVE = {}
+
+
+def active_shares(max_age_days=10):
+    """Акции, которые сейчас реально торгуются на TQBR: статус торгов «A» и последние торги не старше max_age_days.
+    Отсекает делистингованные/приостановленные бумаги (например, PIKK после 20.10.2026), у которых в кэше остались старые свечи.
+    None — список получить не удалось (тогда фильтр не применяется)."""
+    if DEMO:
+        return None
+    if _ACTIVE.get("t", 0) > time.time() - 6 * 3600:
+        return _ACTIVE["v"]
+    try:
+        js = iss("engines/stock/markets/shares/boards/TQBR/securities.json",
+                 **{"iss.only": "securities", "securities.columns": "SECID,STATUS,PREVDATE"})
+        lim = (dt.date.today() - dt.timedelta(days=max_age_days)).isoformat()
+        v = {r["SECID"] for r in table(js, "securities") if (r.get("STATUS") or "A") == "A" and str(r.get("PREVDATE") or "9999") >= lim}
+        if len(v) < 50:
+            return None
+        _ACTIVE.update(t=time.time(), v=v)
+        return v
+    except Exception as e:  # noqa: BLE001
+        log("список торгуемых акций:", e)
+        return None
+
+
 def index_candles(t, days=420):
     if DEMO:
         return demo_bars(t, days)

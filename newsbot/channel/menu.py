@@ -248,6 +248,8 @@ def new_step(uid, w, text):
         q = PW.moex_quote(t)
         if q and not q.get("found"):
             return PW.say(uid, f"{t} не найден на Мосбирже (TQBR). Введите другой тикер.")
+        if PW.not_traded(t):
+            return PW.say(uid, "⛔️ " + PW.not_traded(t))
         d["ticker"], d["last"] = t, (q or {}).get("last")
         w["step"] = "entry"
         cur = (f"{html.escape(PW.tlabel(t))}: сейчас {PW.fmt(d['last'])} ₽. " if d.get("last") else f"{html.escape(PW.tlabel(t))}. ")

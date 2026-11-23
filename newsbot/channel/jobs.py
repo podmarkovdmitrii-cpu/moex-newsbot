@@ -25,7 +25,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (plural, DISCLAIMER, MSK as MSKTZ, BG, BLUE, DEMO, DN, FG, GRID, NEWS_STATE, ORANGE, OUT, UP, VIOLET, Publisher, bln, candle_chart, currency_candles, ema, esc, fmt, hbars,  # noqa: E402
-                    http_get, index_candles, candles, iss, load_json, log, now_msk, pc, plt, save_json, share_candles, style, table,
+                    http_get, index_candles, active_shares, candles, iss, load_json, log, now_msk, pc, plt, save_json, share_candles, style, table,
                     FUT, FX, FUT_CODE, fut_continuous, fut_fronts, fut_candles, tf_bars, atr, TF_RU)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1668,6 +1668,9 @@ def top_stocks(n=50):
     try:
         js = iss("engines/stock/markets/shares/boards/TQBR/securities.json", **{"iss.only": "securities", "securities.columns": "SECID,INSTRID"})
         eq = [r["SECID"] for r in table(js, "securities") if (r.get("INSTRID") or "EQIN") == "EQIN"]
+        act = active_shares()                     # без делистингованных/приостановленных (например, PIKK после 20.10.2026)
+        if act:
+            eq = [t for t in eq if t in act]
         avg = turnover_avg(eq)
         out = [t for t in sorted(eq, key=lambda t: -(avg.get(t) or 0)) if avg.get(t)][:n]
         return out or STOCKS

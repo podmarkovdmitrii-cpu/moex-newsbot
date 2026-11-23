@@ -226,6 +226,18 @@ def moex_quote(ticker):
     return {"found": True, "name": sec[0][1], "last": last}
 
 
+def not_traded(t):
+    """Текст ошибки, если бумага сейчас не торгуется на Мосбирже (делистинг, приостановка торгов), иначе None."""
+    try:
+        from common import active_shares
+        act = active_shares()
+    except Exception:  # noqa: BLE001
+        act = None
+    if act and t.upper() not in act:
+        return f"{t.upper()} сейчас не торгуется на Мосбирже (TQBR): торги приостановлены или бумага делистингована. Выберите другой тикер."
+    return None
+
+
 def parse_idea(text):
     """«/idea SBER шорт 300 310 280/270 комментарий» → dict или строка с ошибкой."""
     body = re.sub(r"^/(idea|check|разбор)(@\w+)?", "", text.strip(), flags=re.I).strip()
@@ -589,6 +601,8 @@ def on_message(msg):
         arg = text.split()[1].upper() if len(text.split()) > 1 else ""
         if not re.fullmatch(r"[A-Z0-9]{1,12}", arg):
             say(uid, "Укажите тикер: /ta SBER")
+        elif not_traded(arg):
+            say(uid, "⛔️ " + html.escape(not_traded(arg)))
         else:
             import idea_ta as TA
             say(uid, f"⏳ Теханализ {arg}: свечи за 10 лет, уровни и сценарии (10–30 секунд)…")
@@ -606,6 +620,9 @@ def on_message(msg):
         idea = parse_idea(text)
         if isinstance(idea, str):
             say(uid, html.escape(idea))
+            return
+        if not_traded(idea["ticker"]):
+            say(uid, "⛔️ " + html.escape(not_traded(idea["ticker"])))
             return
         q = moex_quote(idea["ticker"])
         warn = ""

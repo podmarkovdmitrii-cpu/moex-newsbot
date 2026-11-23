@@ -236,7 +236,9 @@ def universe(n=150):
     from common import iss, table
     js = iss("engines/stock/markets/shares/boards/TQBR/securities.json",
              **{"iss.only": "marketdata", "marketdata.columns": "SECID,VALTODAY"})
-    rows = [r for r in table(js, "marketdata") if r.get("VALTODAY")]
+    from common import active_shares
+    act = active_shares()
+    rows = [r for r in table(js, "marketdata") if r.get("VALTODAY") and (not act or r["SECID"] in act)]
     return [r["SECID"] for r in sorted(rows, key=lambda r: -float(r["VALTODAY"]))[:n]]
 
 
@@ -979,7 +981,9 @@ def forecast_text(PW):
     an = _anom_next()
     L.append(f"\n<b>1. Сборная (S1 / F4 / F2): вероятные аномалии на {ndt}</b>")
     if an and an.get("date") >= time.strftime("%Y-%m-%d", t):
-        rows = {k: v for k, v in an["rows"].items() if (v.get("lval") or 0) >= 7}
+        from common import active_shares
+        act = active_shares()
+        rows = {k: v for k, v in an["rows"].items() if (v.get("lval") or 0) >= 7 and (not act or k in act)}
         top = sorted(rows, key=lambda k: -(rows[k].get("p_y") or 0))[:8]
         L.append(f"<i>Модель аномалий (обучена {an.get('trained') or '—'}); сигнал придёт внутри дня, если ход к индексу превысит порог. "
                  "Рост → S1 (лимит на откате 50% хода) и F2 (если модель-фильтр даст «верхние 30%»); падение → F4 (покупка сразу, «верхние 30%»).</i>")
