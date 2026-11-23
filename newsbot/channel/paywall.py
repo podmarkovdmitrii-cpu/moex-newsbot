@@ -427,6 +427,9 @@ HELP_ADMIN = ("Команды администратора:\n"
               "/idea ТИКЕР лонг|шорт ВХОД СТОП ЦЕЛЬ [комментарий] — разбор и публикация закрытой идеи\n"
               "/check ТИКЕР лонг|шорт ВХОД СТОП ЦЕЛЬ — только разбор: вероятность цели, тейки, уровни (можно без /check)\n"
               "/trades — открытые сделки сборной стратегии (S1 + F4/F2) со всеми уровнями и загрузкой счёта\n"
+              "/remove — убрать сделку из портфеля бота или закрыть её по рынку (кнопки), вернуть убранную\n"
+              "/dayreport — отчёт за день по стратегиям (автоматически — 23:55 МСК, в выходные 19:15)\n"
+              "/capital 500000 — капитал для расчёта результата в рублях\n"
               "/summary — сводка сборной стратегии за день (автоматически — каждый торговый день в 19:05 МСК)\n"
               "/testsignal — проверочные сообщения сборной стратегии в боевом формате (состояние не меняется)\n"
               "/ta ТИКЕР — теханализ любой акции: тренд, средние, индикаторы, свечи, уровни, трендовые линии, сценарии + картинка\n"
@@ -492,6 +495,21 @@ def on_message(msg):
     elif cmd in ("/trades", "/сделки") and admin:
         import idea_scan as IS
         say(uid, IS.open_text(sys.modules[__name__]))
+    elif cmd in ("/remove", "/убрать", "/удалить") and admin:
+        import idea_scan as IS
+        txt, kb = IS.remove_menu(sys.modules[__name__])
+        say(uid, txt, **({"reply_markup": kb} if kb else {}))
+    elif cmd in ("/dayreport", "/итоги", "/итог") and admin:
+        import idea_scan as IS
+        say(uid, IS.report_text(sys.modules[__name__]))
+    elif cmd in ("/capital", "/капитал") and admin:
+        import idea_scan as IS
+        arg = re.sub(r"[^\d.]", "", text.split(maxsplit=1)[1]) if len(text.split()) > 1 else ""
+        if arg and float(arg) >= 1000:
+            S["capital"] = float(arg)
+            save()
+        say(uid, f"Капитал для расчёта в рублях: {IS._cap(sys.modules[__name__]):,.0f} ₽".replace(",", " ")
+            + ("" if arg else ". Изменить: /capital 500000"))
     elif cmd in ("/summary", "/сводка") and admin:
         import idea_scan as IS
         say(uid, IS.summary_text(sys.modules[__name__]))
@@ -645,6 +663,12 @@ def on_callback(cq):
     data = cq.get("data") or ""
     kind, _, iid = data.partition(":")
     ans = {"callback_query_id": cq["id"]}
+    if kind == "rm":
+        import idea_scan as IS
+        r = IS.on_remove(sys.modules[__name__], uid, iid)
+        tg("answerCallbackQuery", {**ans, **({"text": r[:190]} if r else {})})
+        save()
+        return
     if kind == "scn":
         import idea_scan as IS
         r = IS.on_cb(sys.modules[__name__], uid, iid)

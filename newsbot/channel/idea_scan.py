@@ -11,6 +11,7 @@
 Под каждым кандидатом — кнопка «📝 Оформить идею»: обычный разбор и превью для публикации. Не является индивидуальной
 инвестиционной рекомендацией.
 """
+import copy
 import html
 import json
 import os
@@ -57,9 +58,44 @@ WD_RU = ["понедельник", "вторник", "среда", "четвер
 def _paper():
     base = os.environ.get("STATE_DIR") or os.environ.get("NEWS_STATE") or ""
     try:
-        return json.load(open(os.path.join(base, "channel", "paper_anom.json"), encoding="utf-8"))
+        st = json.load(open(os.path.join(base, "channel", "paper_anom.json"), encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return _apply_removed(st)
+
+
+def _apply_removed(st):
+    """Сделки, убранные из портфеля вручную (/remove): «убрать» — сделка не учитывается совсем; «закрыть» — закрыта по цене на момент команды."""
+    rm = _M.get("removed") or {}
+    if not st or not rm:
+        return st
+    st = copy.deepcopy(st)
+    st["orders"] = [o for o in st.get("orders") or [] if _trade_key(o) not in rm]
+    out = []
+    for x in st.get("trades") or []:
+        r = rm.get(_trade_key(x))
+        if not r:
+            out.append(x)
+        elif r.get("mode") == "close" and x.get("entry"):
+            out.append(dict(x, exit=r["px"], exit_day=r["day"], exit_why="закрыта вручную", manual=True,
+                            ret=float(r["px"]) / float(x["entry"]) - 1 - 0.001))
+    st["trades"] = out
+    return st
+
+
+def _ctx(PW):
+    _M["removed"] = PW.S.get("removed") or {}
+    _M["inlim"] = PW.S.setdefault("inlim", {})
+    _M["inlim_since"] = PW.S.setdefault("inlim_since", time.strftime("%Y-%m-%d", msk()))
+
+
+def _cap(PW):
+    """Капитал счёта для расчёта в рублях: /capital, иначе PORTFOLIO_CAPITAL / BOT_CAPITAL, иначе 100 000 ₽."""
+    return float(PW.S.get("capital") or os.environ.get("PORTFOLIO_CAPITAL") or os.environ.get("BOT_CAPITAL") or 100000)
+
+
+def _rub(x):
+    return f"{x:+,.0f} ₽".replace(",", " ")
 
 
 V3_MODS = {"mom": "импульс лидеров — держим, пока бумага в числе лидеров (проверка по пятницам), без срока; стоп 3%, дальше безубыток",
@@ -80,6 +116,9 @@ def _v3():
             return None
     except (ValueError, OverflowError):
         return None
+    rm = _M.get("removed") or {}
+    if rm:
+        js = dict(js, open=[o for o in js.get("open") or [] if f"v3:{o['t']}@{o['d0']}" not in rm])
     return js
 
 
@@ -90,6 +129,7 @@ def _v3_load(js=None):
 
 def risk_state(PW, st=None, today=None):
     """Состояние виртуального счёта и предохранителя. → dict(day_pnl, streak, eq, peak, dd, halted, why)."""
+    _M["removed"] = PW.S.get("removed") or {}
     st = st if st is not None else _paper()
     today = today or time.strftime("%Y-%m-%d", msk())
     ks = PW.S.setdefault("ks", {})
@@ -567,11 +607,9 @@ def intraday(PW):
     if time.time() - _M.get("intra_t", 0) < 60:
         return
     _M["intra_t"] = time.time()
-    base = os.environ.get("STATE_DIR") or os.environ.get("NEWS_STATE") or ""
-    p = os.path.join(base, "channel", "paper_anom.json")
-    try:
-        st = json.load(open(p, encoding="utf-8"))
-    except (OSError, ValueError):
+    _ctx(PW)
+    st = _paper()
+    if not st:
         return
     day = time.strftime("%Y-%m-%d", t)
     admin = sorted(PW.ADMINS)[0]
@@ -590,10 +628,15 @@ def intraday(PW):
         daily_summary(PW)
     except Exception as e:  # noqa: BLE001
         log("вечерняя сводка:", e)
+    try:
+        daily_report(PW)
+    except Exception as e:  # noqa: BLE001
+        log("отчёт за день:", e)
 
 
 def open_text(PW):
     """/trades — открытые сделки и активные лимиты сборной стратегии со всеми уровнями."""
+    _ctx(PW)
     st = _paper() or {}
     _M["inlim"] = PW.S.setdefault("inlim", {})
     _M["inlim_since"] = PW.S.setdefault("inlim_since", time.strftime("%Y-%m-%d", msk()))
@@ -744,6 +787,7 @@ SUMMARY_AT = os.environ.get("SUMMARY_AT", "19:05")
 
 def summary_text(PW, day=None):
     """Вечерняя сводка сборной стратегии за день — формализованно, по разделам (предварительно: вечерняя сессия ещё идёт)."""
+    _ctx(PW)
     st = _paper() or {}
     day = day or time.strftime("%Y-%m-%d", msk())
     _M["inlim"] = PW.S.setdefault("inlim", {})
@@ -759,6 +803,11 @@ def summary_text(PW, day=None):
     L = [f"📋 <b>Сводка сборной стратегии за {dd_}</b> (предварительно, {time.strftime('%H:%M', msk())} МСК)"
          + (f"\n🗓 Торги выходного дня ({WD_RU[wd]}): цены — сессии выходного дня; сигналы выходных "
             + ("в учёте" if WEEKEND_LIVE else "только для наблюдения") + "." if wd >= 5 else "")]
+    C = _cap(PW)
+    pn = pnl_state(PW, st, _v3(), day)
+    L.append(f"\n💰 <b>Портфель в цифрах</b> (капитал {C:,.0f} ₽): за день <b>{_rub(pn['day'] * C)}</b> ({pn['day']:+.2%}) — "
+             f"сборная {_rub(pn['day_sb'] * C)}, v3 {_rub(pn['day_v3'] * C)}; с начала <b>{_rub(pn['tot'] * C)}</b> ({pn['tot']:+.2%}) — "
+             f"сборная {_rub(pn['sb'] * C)} (закрытые {_rub(pn['sb_closed'] * C)}, переоценка открытых {_rub(pn['sb_mtm'] * C)}), v3 {_rub(pn['v3'] * C)}".replace(",", " ", 1))
     # 1. сигналы дня
     sig, seen = [], set()
     for x in orders + trades:
@@ -783,11 +832,11 @@ def summary_text(PW, day=None):
     # 2. закрытые сегодня
     done = [x for x in trades if x.get("exit_day") == day and x.get("ret") is not None and _live(x)]
     tot = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * float(x["ret"]) for x in done if _in(x, inlim))
-    L.append(f"\n<b>2. Закрыто за день: {len(done)}</b>, вклад в капитал (в лимите) {tot:+.2%}")
+    L.append(f"\n<b>2. Закрыто за день: {len(done)}</b>, вклад в капитал (в лимите) {tot:+.2%} ({_rub(tot * C)})")
     for x in done:
         w = WEIGHT.get(x.get("strat", "S1"), 0.1)
         L.append(f"• {x.get('strat', 'S1')} {tl(x['t'])}: {x.get('exit_why')}, {_fmt(float(x['entry']))} → {_fmt(float(x['exit']))}, "
-                 f"{float(x['ret']):+.2%} (в капитале {w * float(x['ret']):+.2%}){mark(x)}")
+                 f"{float(x['ret']):+.2%} (в капитале {w * float(x['ret']):+.2%}, {_rub(w * float(x['ret']) * C)}){mark(x)}")
     # 3. открытые позиции
     op = [x for x in trades if x.get("entry") and not x.get("exit") and _live(x) and _in(x, inlim)]
     op.sort(key=lambda x: x.get("last_day") or "")
@@ -796,7 +845,7 @@ def summary_text(PW, day=None):
     for x in op:
         e = float(x["entry"])
         p = px.get(x["t"])
-        pnl = f", сейчас {_fmt(float(p))} ({float(p) / e - 1:+.1%})" if p else ""
+        pnl = (f", сейчас {_fmt(float(p))} ({float(p) / e - 1:+.1%}, {_rub(WEIGHT.get(x.get('strat', 'S1'), 0.1) * (float(p) / e - 1) * C)})" if p else "")
         stp = _stop_of(PW, x)
         L.append(f"• {x.get('strat', 'S1')} {tl(x['t'])}: вход {_fmt(e)} ({str(x.get('entry_at') or x['day'])[:10]}){pnl}; "
                  + (f"тейк {_fmt(float(x['tp']))}; " if x.get("tp") else "без тейка; ")
@@ -820,7 +869,7 @@ def summary_text(PW, day=None):
         eqv = float(js.get("equity") or 0) / max(1.0, float(js.get("capital") or 1)) - 1
         L.append(f"\n<b>6. Вторая стратегия v3</b>: открыто {len(js.get('open') or [])}, загрузка {_v3_load(js):.0%} (половинный размер); модель v3 в полном размере с {js.get('start')}: {eqv:+.1%}")
         for o in js.get("open") or []:
-            L.append(_v3_open_line(PW, o))
+            L.append(_v3_open_line(PW, o) + f"; {_rub(float(o.get('w') or 0) * float(o.get('pnl') or 0) * C)}")
         pend = js.get("pend") or []
         if pend:
             L.append("Сигналы v3 на завтра (вход на открытии): " + ", ".join(f"{html.escape(PW.tlabel(q['t']))} {'покупка' if q.get('side', 1) > 0 else 'шорт'}" for q in pend))
@@ -908,6 +957,7 @@ def _anom_next():
 def forecast_text(PW):
     """Вечерний прогноз по действующим стратегиям: кандидаты на сигналы сборной (S1/F4/F2) по модели аномалий на следующий торговый день,
     сигналы и список наблюдения v3, выходы по сроку, свободное место под потолком загрузки."""
+    _ctx(PW)
     t = msk()
     st = _paper() or {}
     _M["inlim"] = PW.S.setdefault("inlim", {})
@@ -971,3 +1021,219 @@ def forecast_text(PW):
              "<i>Не является индивидуальной инвестиционной рекомендацией.</i>")
     txt = "\n".join(L)
     return txt if len(txt) < 4000 else txt[:3900] + "\n…"
+
+
+REPORT_AT = os.environ.get("REPORT_AT", "23:55")          # итоговый отчёт за день (будни); в выходные — REPORT_AT_WKD
+REPORT_AT_WKD = os.environ.get("REPORT_AT_WKD", "19:15")
+EXPECT = {"S1": (0.014, 0.87, "+1,4% на сделку, 87–90% прибыльных"), "F4": (0.069, 0.65, "+6,9…8,1% на сделку, ~65% прибыльных"),
+          "F2": (0.033, 0.50, "+3,3…4,3% на сделку, ~50% прибыльных")}
+
+
+def pnl_state(PW, st, js, day):
+    """Результат портфеля в долях капитала: сборная (закрытые + переоценка) и v3 (модель × половинный размер с момента подключения);
+    дневной итог — разница с последним снимком предыдущего дня (снимки — PW.S["eq_hist"])."""
+    rs = risk_state(PW, st, day)
+    sb, sb_closed, sb_mtm = float(rs.get("eq_m", rs["eq"])), float(rs["eq"]), float(rs.get("mtm") or 0)
+    v3 = 0.0
+    if js and js.get("equity"):
+        base = PW.S.setdefault("v3_base", {"day": day, "eq": float(js["equity"])})
+        v3 = (float(js["equity"]) / max(1.0, float(base["eq"])) - 1) * float(js.get("scale") or 0.5)
+    tot = sb + v3
+    hist = PW.S.setdefault("eq_hist", {})
+    prev = [k for k in hist if k < day]
+    p = hist[max(prev)] if prev else {"sb": sb - rs["day_pnl"], "v3": v3}
+    hist[day] = {"sb": round(sb, 6), "v3": round(v3, 6)}
+    for k in sorted(hist)[:-400]:
+        hist.pop(k, None)
+    d_sb, d_v3 = sb - float(p.get("sb") or 0), v3 - float(p.get("v3") or 0)
+    return dict(sb=sb, sb_closed=sb_closed, sb_mtm=sb_mtm, v3=v3, tot=tot, day_sb=d_sb, day_v3=d_v3, day=d_sb + d_v3, rs=rs,
+                peak=max([float(h.get("sb", 0)) + float(h.get("v3", 0)) for h in hist.values()] + [tot]))
+
+
+def report_text(PW, day=None):
+    """Итоговый отчёт за день по стратегиям — формализованно: результат в рублях и процентах, сделки дня, статистика по стратегиям
+    против ожиданий из проверок, риск, вывод."""
+    _ctx(PW)
+    st = _paper() or {}
+    day = day or time.strftime("%Y-%m-%d", msk())
+    C = _cap(PW)
+    js = _v3()
+    pn = pnl_state(PW, st, js, day)
+    rs = pn["rs"]
+    inlim = _M["inlim"]
+    tl = lambda x: html.escape(PW.tlabel(x))  # noqa: E731
+    trades = st.get("trades") or []
+    live = [x for x in trades if _live(x) and _in(x, inlim)]
+    dd_ = f"{day[8:10]}.{day[5:7]}.{day[:4]}"
+    L = [f"📊 <b>Отчёт за день {dd_}</b> (итоговый, {time.strftime('%H:%M', msk())} МСК)"]
+    # 1. результат
+    ddp = (1 + pn["tot"]) / (1 + pn["peak"]) - 1
+    L.append(f"\n<b>1. Результат портфеля</b> (капитал {C:,.0f} ₽)".replace(",", " "))
+    L.append(f"• За день: <b>{_rub(pn['day'] * C)}</b> ({pn['day']:+.2%}) — сборная {_rub(pn['day_sb'] * C)}, v3 {_rub(pn['day_v3'] * C)}")
+    L.append(f"• С начала учёта: <b>{_rub(pn['tot'] * C)}</b> ({pn['tot']:+.2%}) — сборная {_rub(pn['sb'] * C)} "
+             f"(закрытые {_rub(pn['sb_closed'] * C)}, переоценка {_rub(pn['sb_mtm'] * C)}), v3 {_rub(pn['v3'] * C)}"
+             + (f" (с {PW.S.get('v3_base', {}).get('day')})" if js else ""))
+    L.append(f"• Пик {pn['peak']:+.2%}, просадка от пика {ddp:.1%} (порог остановки {KS_DD:.0%})")
+    # 2. сделки дня
+    sig = [x for x in (st.get("orders") or []) + trades if x.get("day") == day and (_live(x) or x.get("limit") is not None)]
+    sig = list({_trade_key(x): x for x in sig}.values())
+    opened = [x for x in live if x.get("entry") and str(x.get("entry_at") or x.get("day"))[:10] == day]
+    closed = [x for x in live if x.get("exit_day") == day and x.get("ret") is not None]
+    why = {}
+    for x in closed:
+        why[x.get("exit_why") or "?"] = why.get(x.get("exit_why") or "?", 0) + 1
+    cl_rub = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * float(x["ret"]) for x in closed) * C
+    L.append(f"\n<b>2. Сделки дня</b>")
+    L.append(f"• Сигналов: {len(sig)} (в лимите {sum(1 for x in sig if _in(x, inlim))}, вне лимита/наблюдение {sum(1 for x in sig if not _in(x, inlim))})")
+    L.append(f"• Открыто: {len(opened)}" + (" — " + ", ".join(f"{x.get('strat', 'S1')} {tl(x['t'])}" for x in opened) if opened else ""))
+    L.append(f"• Закрыто: {len(closed)}" + (f" ({', '.join(f'{k} {v}' for k, v in why.items())}), прибыльных {sum(1 for x in closed if float(x['ret']) > 0)} из {len(closed)}, "
+                                           f"итог {_rub(cl_rub)}" if closed else ""))
+    for x in closed:
+        w = WEIGHT.get(x.get("strat", "S1"), 0.1)
+        L.append(f"   – {x.get('strat', 'S1')} {tl(x['t'])}: {float(x['ret']):+.2%}, {_rub(w * float(x['ret']) * C)} ({x.get('exit_why')})")
+    rm_today = [k for k, v in (PW.S.get("removed") or {}).items() if v.get("day") == day]
+    if rm_today:
+        L.append("• Убрано вручную: " + ", ".join(k.split(":")[1] if not k.startswith("v3:") else k[3:].split("@")[0] + " (v3)" for k in rm_today))
+    # 3. по стратегиям
+    L.append(f"\n<b>3. По стратегиям</b> (с начала учёта; ожидание — по проверкам)")
+    warn = []
+    for strat in ("S1", "F4", "F2"):
+        g = [x for x in live if x.get("strat", "S1") == strat and x.get("ret") is not None and x.get("exit")]
+        o = [x for x in live if x.get("strat", "S1") == strat and x.get("entry") and not x.get("exit")]
+        w = WEIGHT.get(strat, 0.1)
+        if g:
+            avg = sum(float(x["ret"]) for x in g) / len(g)
+            wr = sum(1 for x in g if float(x["ret"]) > 0) / len(g)
+            res = sum(w * float(x["ret"]) for x in g) * C
+            L.append(f"• {strat}: закрыто {len(g)}, прибыльных {wr:.0%}, средняя {avg:+.2%}, итог {_rub(res)}; открыто {len(o)} "
+                     f"(ожидание {EXPECT[strat][2]})")
+            if (strat == "S1" and len(g) >= 30 and (wr < 0.70 or avg < 0)) or (strat != "S1" and len(g) >= 20 and avg < 0):
+                warn.append(f"{strat} хуже порога пересмотра правил")
+        else:
+            L.append(f"• {strat}: закрытых сделок пока нет; открыто {len(o)} (ожидание {EXPECT[strat][2]})")
+    if js:
+        eqv = float(js.get("equity") or 0) / max(1.0, float(js.get("capital") or 1)) - 1
+        L.append(f"• v3: открыто {len(js.get('open') or [])}, загрузка {_v3_load(js):.0%}; результат на счёте {_rub(pn['v3'] * C)}; модель в полном размере с {js.get('start')}: {eqv:+.1%} "
+                 "(ожидание: ~+17% в год у полной модели, прибыльных ~28%, прибыль — от редких долгих трендов)")
+    # 4. риск
+    _, load = book(st)
+    L.append(f"\n<b>4. Риск</b>: загрузка {load:.0%} из {LOAD_CAP:.0%}" + (f" (из них v3 {_v3_load(js):.0%})" if js else "")
+             + f"; закрытые за день {rs['day_pnl']:+.2%} (порог {KS_DAY:.0%}); убыточных подряд {rs['streak']} (порог {KS_STREAK}); "
+             f"просадка сборной {rs['dd']:.1%} (порог {KS_DD:.0%})")
+    L.append("Предохранитель: " + ("🛑 " + html.escape(rs["why"]) if rs["halted"] else "✅ сигналы принимаются"))
+    # 5. вывод
+    if ddp <= -0.30:
+        warn.append("просадка портфеля глубже −30% — по правилам снизить доли вдвое")
+    nclosed = sum(1 for x in live if x.get("exit"))
+    L.append("\n<b>5. Вывод</b>: " + ("⚠️ " + "; ".join(warn) + "." if warn else
+             ("статистики пока мало для оценки (закрыто сделок сборной: " + str(nclosed) + "), правила не меняем." if nclosed < 20
+              else "результаты в пределах ожиданий проверок, правила не меняем.")))
+    L.append("\n<i>Расчёт по виртуальному счёту бота (без учёта ваших фактических цен исполнения). Не является индивидуальной инвестиционной рекомендацией.</i>")
+    txt = "\n".join(L)
+    return txt if len(txt) < 4000 else txt[:3900] + "\n…"
+
+
+def daily_report(PW, force=False, uid=None):
+    t = msk()
+    day = time.strftime("%Y-%m-%d", t)
+    at = REPORT_AT_WKD if t.tm_wday >= 5 else REPORT_AT
+    if not force and ((t.tm_wday >= 5 and not WEEKEND) or time.strftime("%H:%M", t) < at or PW.S.get("rep_day") == day):
+        return
+    if not PW.ADMINS:
+        return
+    PW.S["rep_day"] = day
+    PW.save()
+    PW.say(uid or sorted(PW.ADMINS)[0], report_text(PW, day))
+
+
+# ---------------- ручное удаление сделок из портфеля (/remove) ----------------
+def _px_now(t):
+    try:
+        from common import iss, table
+        js = iss(f"engines/stock/markets/shares/boards/TQBR/securities/{t}.json", **{"iss.only": "marketdata", "marketdata.columns": "SECID,LAST"})
+        r = (table(js, "marketdata") or [{}])[0]
+        return float(r["LAST"]) if r.get("LAST") else None
+    except Exception as e:  # noqa: BLE001
+        log("цена", t, e)
+        return None
+
+
+def remove_menu(PW):
+    """/remove — открытые сделки и лимиты обеих стратегий с кнопками: убрать (не учитывать) / закрыть по рынку; убранные — вернуть."""
+    _ctx(PW)
+    st = _paper() or {}
+    day = time.strftime("%Y-%m-%d", msk())
+    rows, L = [], ["🗂 <b>Портфель бота: что убрать</b>",
+                   "«🗑 Убрать» — сделка не учитывается совсем (как будто её не было); «✋ Закрыть» — закрыть по текущей цене и учесть результат."]
+    for x in [x for x in st.get("trades") or [] if x.get("entry") and not x.get("exit") and _live(x) and _in(x)]:
+        k = _trade_key(x)
+        L.append(f"• {x.get('strat', 'S1')} {html.escape(PW.tlabel(x['t']))}: вход {_fmt(float(x['entry']))} ({str(x.get('entry_at') or x['day'])[:10]})")
+        rows.append([{"text": f"🗑 {x['t']} {x.get('strat', 'S1')}", "callback_data": f"rm:d:{k}"[:64]},
+                     {"text": f"✋ Закрыть {x['t']}", "callback_data": f"rm:c:{k}"[:64]}])
+    for o in [o for o in st.get("orders") or [] if o.get("day") == day and _in(o)]:
+        k = _trade_key(o)
+        L.append(f"• лимит S1 {html.escape(PW.tlabel(o['t']))}: {_fmt(float(o['limit']))} (сегодня)")
+        rows.append([{"text": f"🗑 Отменить лимит {o['t']}", "callback_data": f"rm:d:{k}"[:64]}])
+    js = _v3()
+    for o in (js or {}).get("open") or []:
+        k = f"v3:{o['t']}@{o['d0']}"
+        L.append(f"• v3 {html.escape(PW.tlabel(o['t']))}: вход {_fmt(float(o['entry']))} ({o['d0']})")
+        rows.append([{"text": f"🗑 {o['t']} v3", "callback_data": f"rm:d:{k}"[:64]},
+                     {"text": f"✋ Закрыть {o['t']} v3", "callback_data": f"rm:c:{k}"[:64]}])
+    rm = PW.S.get("removed") or {}
+    if rm:
+        L.append("\nУбрано раньше:")
+        for k, v in list(rm.items())[-8:]:
+            nm = k[3:].split("@")[0] + " v3" if k.startswith("v3:") else k.split(":")[1] + " " + k.split(":")[0]
+            L.append(f"• {nm}: {'закрыта ' + _fmt(float(v['px'])) if v.get('mode') == 'close' else 'не учитывается'} ({v.get('day')})")
+            rows.append([{"text": f"↩️ Вернуть {nm}", "callback_data": f"rm:u:{k}"[:64]}])
+    if len(L) == 2:
+        L.append("Открытых сделок и лимитов нет.")
+    return "\n".join(L), ({"inline_keyboard": rows} if rows else None)
+
+
+def on_remove(PW, uid, data):
+    """Кнопки /remove: d — убрать, c — закрыть по рынку, u — вернуть."""
+    if uid not in PW.ADMINS:
+        return "Только для администратора."
+    mode, _, key = data.partition(":")
+    _ctx(PW)
+    rm = PW.S.setdefault("removed", {})
+    day = time.strftime("%Y-%m-%d", msk())
+    if mode == "u":
+        rm.pop(key, None)
+        PW.save()
+        PW.say(uid, f"↩️ Сделка {html.escape(key)} снова учитывается в портфеле.")
+        return "Вернул"
+    tk = key[3:].split("@")[0] if key.startswith("v3:") else key.split(":")[1]
+    rec = {"mode": "drop" if mode == "d" else "close", "day": day, "at": time.strftime("%Y-%m-%dT%H:%M", msk())}
+    txt = f"🗑 <b>{html.escape(PW.tlabel(tk))}</b> убрана из портфеля бота — в учёте и загрузке больше не участвует."
+    if mode == "c":
+        px = _px_now(tk)
+        if not px:
+            return "Нет текущей цены — попробуйте позже"
+        rec["px"] = px
+        entry, w = None, 0.0
+        if key.startswith("v3:"):
+            o = next((o for o in (_v3() or {}).get("open") or [] if f"v3:{o['t']}@{o['d0']}" == key), None)
+            if o:
+                entry, w = float(o["entry"]) * (1 if o.get("side", 1) > 0 else -1), float(o.get("w") or 0)
+        else:
+            x = next((x for x in (_paper() or {}).get("trades") or [] if _trade_key(x) == key), None)
+            if x and x.get("entry"):
+                entry, w = float(x["entry"]), WEIGHT.get(x.get("strat", "S1"), 0.1)
+        if entry:
+            ret = (px / abs(entry) - 1) * (1 if entry > 0 else -1) - 0.001
+            rec["ret"] = round(ret, 5)
+            txt = (f"✋ <b>{html.escape(PW.tlabel(tk))}</b> закрыта вручную по {_fmt(px)}: {ret:+.2%} по цене, "
+                   f"{_rub(w * ret * _cap(PW))} в капитале. Дальше сделка в портфеле бота не ведётся.")
+    if key.startswith("v3:"):
+        PW.S.setdefault("v3_seen", {})[f"close:{key[3:]}"] = time.time()
+        txt += "\nМодель v3 продолжает вести эту позицию у себя; строка «v3» в сводках и отчёте считается по модели."
+    rm[key] = rec
+    life = PW.S.setdefault("life_seen", {})
+    for e in ("fill", "nofill", "exit"):
+        life[f"{key}:{e}"] = time.time()
+    PW.save()
+    PW.say(uid, txt + "\nВернуть — /remove → «↩️ Вернуть». <i>Не является индивидуальной инвестиционной рекомендацией.</i>")
+    return "Готово"
