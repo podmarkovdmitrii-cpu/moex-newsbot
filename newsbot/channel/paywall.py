@@ -427,6 +427,8 @@ HELP_ADMIN = ("Команды администратора:\n"
               "/idea ТИКЕР лонг|шорт ВХОД СТОП ЦЕЛЬ [комментарий] — разбор и публикация закрытой идеи\n"
               "/check ТИКЕР лонг|шорт ВХОД СТОП ЦЕЛЬ — только разбор: вероятность цели, тейки, уровни (можно без /check)\n"
               "/trades — открытые сделки сборной стратегии (S1 + F4/F2) со всеми уровнями и загрузкой счёта\n"
+              "/panel — все функции стратегий кнопками (или кнопка «🤖 Все функции» внизу)\n"
+              "/forecast — вечерний прогноз стратегий на следующий торговый день\n"
               "/remove — убрать сделку из портфеля бота или закрыть её по рынку (кнопки), вернуть убранную\n"
               "/dayreport — отчёт за день по стратегиям (автоматически — 23:55 МСК, в выходные 19:15)\n"
               "/capital 500000 — капитал для расчёта результата в рублях\n"
@@ -439,6 +441,56 @@ HELP_ADMIN = ("Команды администратора:\n"
               "/stats [ГГГГ-ММ] — итоги закрытых идей за месяц в канал (по умолчанию — прошлый месяц; 1-го числа публикуются сами)\n"
               "/grant ID ДНЕЙ — выдать доступ вручную, /revoke ID — забрать\n"
               "/myid — ваш Telegram id")
+
+
+# ---------------- кнопки администратора: все функции стратегий ----------------
+ADM_FN = [("📋 Сводка за день", "/summary"), ("📊 Отчёт за день", "/dayreport"),
+          ("🔭 Прогноз на завтра", "/forecast"), ("📒 Открытые сделки", "/trades"),
+          ("🗂 Убрать / закрыть сделку", "/remove"), ("🛡 Риск и остановка", "/risk"),
+          ("▶️ Возобновить сигналы", "resume?"), ("💰 Капитал", "capital?"),
+          ("📈 Теханализ бумаги", "ta?"), ("🧪 Проверочный сигнал", "/testsignal"),
+          ("🧾 Журнал и отчёт ошибок", "/errors"), ("❓ Все команды", "/help")]
+ADM_KB = {"📋 Сводка": "/summary", "📊 Отчёт за день": "/dayreport", "📒 Сделки": "/trades", "🤖 Все функции": "panel"}
+
+
+def admin_panel(uid):
+    kv = S.setdefault("kbv", {})
+    if kv.get(str(uid)) != 2:           # один раз — обновить нижнее меню (новые кнопки «📋 Сводка», «📊 Отчёт за день», «📒 Сделки», «🤖 Все функции»)
+        kv[str(uid)] = 2
+        MENU.menu(uid, "Нижнее меню обновлено 👇")
+    rows, row = [], []
+    for i, (t, _) in enumerate(ADM_FN):
+        row.append({"text": t, "callback_data": f"adm:{i}"})
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    say(uid, "🤖 <b>Функции стратегий</b> — выберите:", reply_markup={"inline_keyboard": rows})
+
+
+def admin_action(uid, act):
+    """Кнопка панели или нижнего меню → та же команда, что и текстом; для ввода (тикер, капитал) — ждём следующее сообщение."""
+    import idea_scan as IS
+    if act == "panel":
+        return admin_panel(uid)
+    if act == "resume?":
+        return say(uid, IS.status_text(sys.modules[__name__]) + "\n\nВозобновить приём сигналов после аварийной остановки?",
+                   reply_markup={"inline_keyboard": [[{"text": "▶️ Да, возобновить", "callback_data": "adm:resume!"},
+                                                      {"text": "✖ Нет", "callback_data": "adm:no"}]]})
+    if act == "resume!":
+        return say(uid, IS.resume(sys.modules[__name__]))
+    if act == "no":
+        return say(uid, "Оставил как есть.")
+    if act == "capital?":
+        S.setdefault("await", {})[str(uid)] = "/capital"
+        return say(uid, f"Капитал сейчас: {IS._cap(sys.modules[__name__]):,.0f} ₽. Пришлите новую сумму числом (например 500000) или ✖ Отмена.".replace(",", " "))
+    if act == "ta?":
+        S.setdefault("await", {})[str(uid)] = "/ta"
+        return say(uid, "Пришлите тикер бумаги (например SBER).")
+    if act == "/forecast":
+        return say(uid, IS.forecast_text(sys.modules[__name__]))
+    on_message({"from": {"id": uid}, "chat": {"id": uid, "type": "private"}, "text": act})
 
 
 def on_message(msg):
@@ -456,6 +508,13 @@ def on_message(msg):
 
     if MENU.on_proof(uid, msg):
         return
+    if admin and text in ADM_KB:
+        MENU.wiz_end(uid)
+        S.setdefault("await", {}).pop(str(uid), None)
+        return admin_action(uid, ADM_KB[text])
+    aw = (S.get("await") or {}).pop(str(uid), None) if admin and text and not text.startswith("/") else None
+    if aw and text != MENU.BTN_CANCEL:
+        return on_message(dict(msg, text=f"{aw} {text}"))
     if text and not text.startswith("/") and MENU.on_text(uid, text, msg):
         return
     if cmd == "/myid":
@@ -499,6 +558,8 @@ def on_message(msg):
         import idea_scan as IS
         txt, kb = IS.remove_menu(sys.modules[__name__])
         say(uid, txt, **({"reply_markup": kb} if kb else {}))
+    elif cmd in ("/forecast", "/прогноз", "/panel", "/функции") and admin:
+        admin_action(uid, "/forecast" if cmd in ("/forecast", "/прогноз") else "panel")
     elif cmd in ("/dayreport", "/итоги", "/итог") and admin:
         import idea_scan as IS
         say(uid, IS.report_text(sys.modules[__name__]))
@@ -663,6 +724,12 @@ def on_callback(cq):
     data = cq.get("data") or ""
     kind, _, iid = data.partition(":")
     ans = {"callback_query_id": cq["id"]}
+    if kind == "adm" and uid in ADMINS:
+        tg("answerCallbackQuery", ans)
+        act = ADM_FN[int(iid)][1] if iid.isdigit() and int(iid) < len(ADM_FN) else iid
+        admin_action(uid, act)
+        save()
+        return
     if kind == "rm":
         import idea_scan as IS
         r = IS.on_remove(sys.modules[__name__], uid, iid)

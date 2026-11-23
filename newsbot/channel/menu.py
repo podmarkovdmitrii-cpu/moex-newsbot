@@ -33,7 +33,7 @@ def init(pw):
 def kb(admin):
     rows = [[BTN_PAY, BTN_SUB], [BTN_SUP, BTN_FAQ], [BTN_BONUS]]
     if admin:
-        rows += [[BTN_LONG, BTN_SHORT], [BTN_IDEAS]]
+        rows += [[BTN_LONG, BTN_SHORT], [BTN_IDEAS], ["📋 Сводка", "📊 Отчёт за день"], ["📒 Сделки", "🤖 Все функции"]]
     return {"keyboard": [[{"text": t} for t in r] for r in rows], "resize_keyboard": True, "is_persistent": True}
 
 
