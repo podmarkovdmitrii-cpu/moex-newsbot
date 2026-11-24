@@ -157,9 +157,16 @@ def scan(md, ixc, now, feats, ctx=None):
     if (not wkd and "10:00" <= hm < "18:00") or (wkd and os.environ.get("WEEKEND_TRADING", "1") != "0" and "10:00" <= hm < "18:30"):
         n_today = sum(1 for x in st["orders"] + st["trades"] if x.get("day") == today and x.get("strat", "S1") == "S1")
         flt = _filters()
+        exd = ctx.get("ex") or {}
         for t, r in px.items():
             f = feats.get(t) or {}
             if st["seen"].get(t) == today or f.get("tier") is None or f.get("lval") is None:
+                continue
+            if t in exd:                              # день дивидендной отсечки: гэп — не движение (как в исследованиях, core_daily)
+                if st.setdefault("exdiv_skip", {}).get(t) != today:
+                    st["exdiv_skip"][t] = today
+                    changed = True
+                    log(f"виртуальный счёт: {t} — день дивидендной отсечки, сигналы не считаются ({exd[t].get('src')})")
                 continue
             prev = r.get("PREVPRICE")
             if not prev:

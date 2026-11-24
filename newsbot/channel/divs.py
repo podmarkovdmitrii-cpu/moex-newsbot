@@ -63,6 +63,31 @@ def upcoming(days=45):
     return rows
 
 
+def ex_dates(day=None):
+    """Бумаги, у которых день `day` — день дивидендной отсечки (первый торговый день без права на дивиденд) → {тикер: {amount, yld, src}}.
+    Единый источник для живых сигналов (paper_anom через jobs.anomaly) и публичных постов — то же правило, что в исследованиях
+    (core_daily.ex_days: день отсечки не считается движением, проверка №12+). Источники: объявленные выплаты dohod.ru (последний день
+    покупки = предыдущий торговый день, или дата закрытия реестра = day при T+1) и история divhist.json (дата закрытия реестра)."""
+    day = day or dt.date.today()
+    if isinstance(day, str):
+        day = dt.date.fromisoformat(day)
+    prev = day - dt.timedelta(days=1)
+    while prev.weekday() >= 5:
+        prev -= dt.timedelta(days=1)
+    out = {}
+    try:
+        for r in upcoming(60):
+            if r.get("last_buy") == prev.isoformat() or (not r.get("last_buy") and r.get("reg") == day.isoformat()):
+                out[r["t"]] = dict(amount=r.get("amount"), yld=r.get("yld"), src="dohod.ru")
+    except Exception as e:  # noqa: BLE001
+        log("отсечки (dohod.ru):", e)
+    for t, rows in DIVS.items():
+        for d, amt in rows:
+            if prev.isoformat() < d <= day.isoformat():      # дата реестра в (предыдущий торговый день; day] → day — первый день без дивиденда
+                out.setdefault(t, dict(amount=amt, yld=None, src="divhist"))
+    return out
+
+
 def _ex_index(B, d):
     """Индекс бара отсечки (первая сессия без права на дивиденд). В divhist.json дата — первый будний день без дивиденда;
     с появлением торгов выходного дня гэп может прийти раньше, в субботу. Берём из двух кандидатов бар с самым глубоким гэпом."""

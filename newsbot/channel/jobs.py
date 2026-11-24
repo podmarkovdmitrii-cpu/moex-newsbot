@@ -3021,7 +3021,13 @@ def anomaly():
         except Exception:  # noqa: BLE001
             al_ = None
         rows_day = today if not wkd else prev_wd(now.date()).isoformat()   # в выходные — признаки из прогноза пятницы
-        paper_anom.scan(md, ixc, now, (at.get("rows") or {}) if at.get("date") == rows_day else {}, dict(secs=secs, news=nh, al=al_))
+        try:   # отсечки — ДО поиска сигналов (аудит A-1: раньше список считался после и только для постов)
+            import divs as _dv
+            exd_ = _dv.ex_dates(now.date())   # в выходные: последний день покупки — пятница → отсечка относится и к сессии выходного дня
+        except Exception as e:  # noqa: BLE001
+            log("отсечки для виртуального счёта:", e)
+            exd_ = {}
+        paper_anom.scan(md, ixc, now, (at.get("rows") or {}) if at.get("date") == rows_day else {}, dict(secs=secs, news=nh, al=al_, ex=exd_))
     except Exception as e:  # noqa: BLE001
         log("виртуальный счёт:", e)
     if wkd and not os.environ.get("ANOM_WEEKEND_POSTS"):
@@ -3033,8 +3039,7 @@ def anomaly():
     exset = set()
     try:
         import divs
-        pw = prev_wd(now.date()).isoformat()
-        exset = {r["t"] for r in divs.upcoming(60) if r.get("last_buy") == pw}
+        exset = set(divs.ex_dates(now.date()))   # единый источник с виртуальным счётом (аудит A-1)
     except Exception:  # noqa: BLE001
         pass
     found = []
