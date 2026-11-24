@@ -1,0 +1,47 @@
+name: Проверка теханализа IMOEX и фьючерсов (без отправки в Telegram)
+
+# Разовая проверка на живых данных ISS: распознавание инструментов, список фьючерсов, разбор IMOEX / Si / BR / USDRUBF / SiZ6.
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Библиотеки
+        run: pip install --quiet pandas numpy matplotlib "scikit-learn==1.5.2"
+      - name: Проверка
+        env:
+          TINVEST_TOKEN: ${{ secrets.TINVEST_TOKEN }}
+        run: |
+          cd newsbot/channel
+          python - <<'PY'
+          import time, re, idea_ta as TA, ta_assets as T
+          for a in ["IMOEX", "RTSI", "SBER", "Si", "SiZ6", "BR", "GOLD", "SBRF", "USDRUBF", "IMOEXF", "CNY", "NG", "XXXX"]:
+              t0 = time.time()
+              try:
+                  r = T.resolve(a)
+              except Exception as e:
+                  r = repr(e)
+              print("RESOLVE", a, "→", r, f"{time.time() - t0:.1f} с", flush=True)
+          parts = T.fut_list_texts()
+          print("FUTLIST частей", len(parts), "длины", [len(p) for p in parts])
+          print(re.sub(r"<[^>]+>", "", parts[0])[:3500])
+          for a in ["IMOEX", "Si", "SiZ6", "BR", "USDRUBF", "GOLD"]:
+              t0 = time.time()
+              inst = T.resolve(a)
+              if not inst:
+                  print("НЕТ", a); continue
+              r = TA.analyze(inst["code"] if inst["kind"] != "fut" else a, inst=inst)
+              if r.get("error"):
+                  print("ОШИБКА", a, r["error"]); continue
+              png = TA.chart(inst.get("name", a), r["df"], r["d"], r["res"], r["sup"], r["tl"])
+              df = r["df"]
+              print(f"===== {a}: {inst.get('name')} | баров {len(df)} {df.t.iloc[0]:%Y-%m-%d}…{df.t.iloc[-1]:%Y-%m-%d} | картинка {len(png)} байт | {time.time() - t0:.1f} с")
+              print(re.sub(r"<[^>]+>", "", TA.text(r, inst.get("name", a)))[:1500])
+          PY
