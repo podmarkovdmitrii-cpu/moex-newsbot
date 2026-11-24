@@ -518,6 +518,8 @@ def _signals(PW, st, day, admin, allowed):
         stop = (f"\nАварийный стоп (в проверках стратегии стоп не ставился — он снижал результат): {_fmt(em_stop)} "
                 f"({'за уровнем' if em['level'] else '2,5 ATR'}, риск {em['risk'] / entry:.1%})" if em else "")
         size = f"\nРазмер позиции: {_w(strat)} капитала"
+        if strat == "F4":
+            size += _f4_tag(PW, key)
         half = (" (половинный риск: на 2023–2026 F2 держится на редких крупных сделках, тест перестановкой p = 0,09)") if strat == "F2" else ""
         halt = ("" if allowed else "\n🛑 Сейчас действует аварийная остановка — по правилу предохранителя вход пропускается, "
                                    "сделка в учёт сборной стратегии не идёт (/risk, /resume).")
@@ -538,6 +540,88 @@ def _signals(PW, st, day, admin, allowed):
             log("сигнал не отправлен:", e)
     for k in [k for k, v in seen.items() if time.time() - v > 5 * 86400]:
         seen.pop(k, None)
+
+
+# ---------------- макрорежим для F4 (проверки №37–38; пока только пометка — paper-тест, размер не меняется) ----------------
+# №37: F4 (выкуп паники) заметно сильнее, когда рубль ослаб > 3% за 20 торговых дней или ключевая ставка выросла за 90 дней;
+# вне этих режимов F4 в среднем около нуля. Подтверждено на 5-мин 2020–26 и дневных 2014–26, но на 5-мин мало сделок (20–38) →
+# сигналы только помечаются, итоги по режимам копятся в PW.S["f4_regime"] для решения после paper-теста.
+F4_USD_THR = float(os.environ.get("F4_USD_THR", "0.03"))
+F4_RATE_THR = float(os.environ.get("F4_RATE_THR", "0.25"))
+
+
+def _cbr(url):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (moex-newsbot)"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def macro_regime():
+    """Курс доллара ЦБ за 20 торговых дней и ключевая ставка за 90 дней (на вчера), кэш 6 ч. None — данных нет."""
+    m = _M.get("macro")
+    if m and time.time() - m["ts"] < 6 * 3600:
+        return m
+    import datetime as _dt
+    import re as _re
+    try:
+        td = _dt.date.today()
+        x = _cbr("https://www.cbr.ru/scripts/XML_dynamic.asp?date_req1=" + (td - _dt.timedelta(days=80)).strftime("%d/%m/%Y")
+                 + "&date_req2=" + td.strftime("%d/%m/%Y") + "&VAL_NM_RQ=R01235")
+        usd = sorted((_dt.datetime.strptime(d, "%d.%m.%Y").date(), float(v.replace(",", ".")))
+                     for d, v in _re.findall(r'Date="(\d\d\.\d\d\.\d{4})"[^>]*>.*?<Value>([\d,]+)</Value>', x, _re.S))
+        h = _cbr("https://www.cbr.ru/hd_base/KeyRate/?UniDbQuery.Posted=True&UniDbQuery.From=" + (td - _dt.timedelta(days=200)).strftime("%d.%m.%Y")
+                 + "&UniDbQuery.To=" + td.strftime("%d.%m.%Y"))
+        kr = sorted((_dt.datetime.strptime(d, "%d.%m.%Y").date(), float(v.replace(",", ".")))
+                    for d, v in _re.findall(r"<td>(\d\d\.\d\d\.\d{4})</td>\s*<td>([\d,]+)</td>", h))
+
+        def asof(ser, d):
+            v = [b for a, b in ser if a < d]
+            return v[-1] if v else None
+        u1, u0 = asof(usd, td), asof(usd, td - _dt.timedelta(days=28))
+        r1, r0 = asof(kr, td), asof(kr, td - _dt.timedelta(days=90))
+        if None in (u1, u0, r1, r0):
+            raise ValueError("мало данных ЦБ")
+        usd20, rate90 = u1 / u0 - 1, r1 - r0
+        m = dict(ts=time.time(), usd=u1, usd20=usd20, rate=r1, rate90=rate90, rub=usd20 > F4_USD_THR, hike=rate90 > F4_RATE_THR)
+        m["stress"] = m["rub"] or m["hike"]
+    except Exception as e:  # noqa: BLE001
+        log("макрорежим недоступен:", e)
+        m = dict(ts=time.time() - 5 * 3600, err=str(e)[:80])   # повтор через час
+    _M["macro"] = m
+    return m
+
+
+def macro_line(m=None):
+    m = m or macro_regime()
+    if not m or "usd20" not in m:
+        return "🌡 Макрорежим: данные ЦБ сейчас недоступны."
+    st = ("<b>стресс</b> (на истории F4 сильнее: +3,3…6,9% на сделку против +1,9…2,6% у всех F4)" if m["stress"]
+          else "<b>спокойный</b> (на истории F4 вне стресса в среднем около нуля)")
+    return (f"🌡 Макрорежим: доллар ЦБ {m['usd']:.2f} ₽, за 20 торговых дней {m['usd20']:+.1%} (порог ослабления рубля +{F4_USD_THR:.0%}) "
+            f"{'✅' if m['rub'] else '—'}; ключевая {m['rate']:g}%, за 90 дней {m['rate90']:+.2f} п.п. {'✅ росла' if m['hike'] else '— не росла'} → {st}. "
+            "Пока только пометка (paper-тест, проверки №37–38), размер F4 не меняется.")
+
+
+def _f4_tag(PW, key):
+    m = macro_regime()
+    if not m or "usd20" not in m:
+        return ""
+    PW.S.setdefault("f4_regime", {})[key] = dict(rub=bool(m["rub"]), hike=bool(m["hike"]), usd20=round(m["usd20"], 4), rate90=round(m["rate90"], 2))
+    return "\n" + macro_line(m)
+
+
+def f4_regime_stats(PW, st):
+    """Итоги закрытых F4 с пометкой режима: стресс / спокойный."""
+    reg = PW.S.get("f4_regime") or {}
+    res = {"стресс": [], "спокойный": []}
+    for x in st.get("trades") or []:
+        if x.get("strat") != "F4" or x.get("ret") is None or x.get("exit") is None:
+            continue
+        r = reg.get(f"F4:{x['t']}:{x.get('day')}")
+        if r:
+            res["стресс" if (r["rub"] or r["hike"]) else "спокойный"].append(float(x["ret"]))
+    return res
 
 
 def _stop_of(PW, x):
@@ -865,6 +949,12 @@ def summary_text(PW, day=None):
              f"(пик {rs.get('peak_m', rs['peak']):+.2%}); просадка {rs['dd']:.2%} (порог {KS_DD:.0%}); за день {rs['day_pnl']:+.2%} (порог {KS_DAY:.0%}); "
              f"убыточных подряд {rs['streak']} (порог {KS_STREAK})")
     L.append("Предохранитель: " + ("🛑 " + html.escape(rs["why"]) if rs["halted"] else "✅ сигналы принимаются"))
+    # 5а. макрорежим (пометка для F4)
+    L.append("\n" + macro_line())
+    fr = f4_regime_stats(PW, st)
+    if any(fr.values()):
+        L.append("F4 по режимам (закрытые с пометкой): " + "; ".join(
+            f"{k} {len(v)} сд., средняя {np.mean(v):+.1%}" for k, v in fr.items() if v))
     # 6. вторая стратегия
     js = _v3()
     if js:
@@ -975,6 +1065,7 @@ def forecast_text(PW):
          f"общий потолок загрузки {LOAD_CAP:.0%}. Сейчас загрузка {load:.0%}, свободно ≈ {free:.0%} (мест под сделки по 5%: {int(free / WEIGHT["S1"] + 1e-9)}).</i>"]
     if t.tm_wday >= 5:
         L.append("🗓 Выходные: уровни — по закрытию пятницы, торги выходного дня — справочно; вход — в понедельник.")
+    L.append(macro_line())
     if rs["halted"]:
         L.append(f"🛑 Действует аварийная остановка: {html.escape(rs['why'])} — новые входы не принимаются.")
     # 1. сборная: кандидаты на аномалию завтра
