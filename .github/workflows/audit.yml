@@ -1,0 +1,59 @@
+name: Аудит — регрессионные тесты и проверка виртуального счёта (без отправки в Telegram)
+
+# Тесты newsbot/channel/test_*.py (без сети) и разбор состояния виртуального счёта: какие сделки пришлись на дни дивидендной отсечки
+# (аудит A-1). Состояние бота только читается, не сохраняется.
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Библиотеки
+        run: pip install --quiet pandas numpy matplotlib "scikit-learn==1.5.2"
+      - name: Регрессионные тесты
+        run: |
+          for t in newsbot/channel/test_*.py; do echo "== $t"; python "$t"; done
+      - name: Состояние бота — только чтение
+        uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - name: Состояние канала — только чтение
+        uses: actions/cache/restore@v4
+        with:
+          path: channel-state
+          key: channel-state-${{ github.run_id }}
+          restore-keys: channel-state-
+      - name: A-1 — сделки виртуального счёта в дни отсечки
+        run: |
+          cd newsbot/channel
+          python - <<'PY'
+          import json, os, glob
+          import divs
+          divs.upcoming = lambda days=60: []          # прошлые отсечки — по истории divhist.json (60 бумаг)
+          files = [f for p in ("../../newsbot-state", "../../channel-state") for f in glob.glob(p + "/**/paper_anom.json", recursive=True)]
+          print("файлы:", files)
+          for f in files:
+              st = json.load(open(f, encoding="utf-8"))
+              rows = st.get("trades", []) + st.get("orders", [])
+              print(f, "сделок/заявок", len(rows), "с", st.get("started"))
+              hit = []
+              for x in rows:
+                  ex = divs.ex_dates(x["day"])
+                  if x["t"] in ex:
+                      hit.append(x)
+                      print("  ОТСЕЧКА:", x["day"], x.get("strat", "S1"), x["t"], "ход", x.get("exc"), "вход", x.get("entry"), "выход", x.get("exit"),
+                            "результат", x.get("ret"), "лучшие 30%:", x.get("top"), "дивиденд", ex[x["t"]].get("amount"))
+              by = {}
+              for x in rows:
+                  by.setdefault(x.get("strat", "S1"), 0)
+                  by[x.get("strat", "S1")] += 1
+              print("  всего по стратегиям:", by, "| в дни отсечки:", len(hit), "(F4 верхние 30%:", sum(1 for x in hit if x.get("strat") == "F4" and x.get("top")), ")")
+          PY
