@@ -95,6 +95,41 @@ def _cap(PW):
     return float(PW.S.get("capital") or os.environ.get("PORTFOLIO_CAPITAL") or os.environ.get("BOT_CAPITAL") or 100000)
 
 
+SIZING_SINCE = os.environ.get("SIZING_SINCE", "2026-11-25")   # аудит B1-4: с этой даты размер — от текущего капитала по закрытым
+
+
+def _build_sizes(st, inlim=None):
+    """Размер каждой сделки в лимите — в долях начального капитала, как в исследованиях №27/30/31: доля × (1 + результат сделок,
+    закрытых ДО дня входа). Сделки до SIZING_SINCE — по старому правилу (доля от начального капитала), чтобы история не пересчитывалась.
+    → {ключ сделки: размер}; заодно _M["realized"] — текущий результат закрытых (доля начального капитала)."""
+    inlim = _M.get("inlim") or {} if inlim is None else inlim
+    tr = [x for x in st.get("trades") or [] if x.get("entry") and _live(x) and _in(x, inlim)]
+    tr.sort(key=lambda x: (str(x.get("entry_at") or x.get("day")), x.get("t")))
+    closed = sorted([x for x in tr if x.get("exit") is not None and x.get("ret") is not None], key=lambda x: x.get("exit_day") or "")
+    sizes, cash, j = {}, 0.0, 0
+    for x in tr:
+        d_in = str(x.get("entry_at") or x.get("day"))[:10]
+        while j < len(closed) and (closed[j].get("exit_day") or "") < d_in:
+            c = closed[j]
+            cash += sizes.get(_trade_key(c), WEIGHT.get(c.get("strat", "S1"), 0.1)) * float(c["ret"])
+            j += 1
+        w = WEIGHT.get(x.get("strat", "S1"), 0.1)
+        sizes[_trade_key(x)] = w if (x.get("day") or "") < SIZING_SINCE else w * max(0.0, 1 + cash)
+    for c in closed[j:]:
+        cash += sizes.get(_trade_key(c), WEIGHT.get(c.get("strat", "S1"), 0.1)) * float(c["ret"])
+    _M["sizes"], _M["realized"] = sizes, cash
+    return sizes
+
+
+def _sz(x):
+    """Размер сделки в долях начального капитала (после _build_sizes); новая сделка — доля × текущий капитал по закрытым."""
+    k = _trade_key(x)
+    if k in (_M.get("sizes") or {}):
+        return _M["sizes"][k]
+    w = WEIGHT.get(x.get("strat", "S1"), 0.1)
+    return w if (x.get("day") or "9") < SIZING_SINCE else w * max(0.0, 1 + float(_M.get("realized") or 0))
+
+
 def _rub(x):
     return f"{x:+,.0f} ₽".replace(",", " ")
 
@@ -159,9 +194,10 @@ def risk_state(PW, st=None, today=None):
     done = [x for x in st.get("trades") or [] if x.get("exit") is not None and x.get("ret") is not None
             and _live(x) and _in(x, inlim)]
     done.sort(key=lambda x: (x.get("exit_day") or "", x.get("sig_at") or ""))
+    _build_sizes(st, inlim)
     curve = [0.0]
     for x in done:
-        curve.append(curve[-1] + WEIGHT.get(x.get("strat", "S1"), 0.1) * float(x["ret"]))
+        curve.append(curve[-1] + _sz(x) * float(x["ret"]))
     k0 = min(int(ks.get("dd_reset_n", 0)), len(curve) - 1)   # после /resume пик считается с момента возобновления
     eq, peak = curve[-1], max(curve[k0:])
     # переоценка открытых позиций по последним ценам виртуального счёта (paper_anom сохраняет last_px)
@@ -173,15 +209,15 @@ def risk_state(PW, st=None, today=None):
     for x in op:
         d_px = pxt.get(x["t"]) or (st.get("px_at") or "")[:10]
         if not px.get(x["t"]):
-            stale.append((x["t"], None))
+            stale.append((x["t"], None))     # цены не было с входа — оценка по цене входа (не путать с «старой ценой»)
         elif d_px and d_px < _prev_wd_str(today):
             stale.append((x["t"], d_px))
-    mtm = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * (float(px.get(x["t"]) or x["entry"]) / float(x["entry"]) - 1) for x in op)
+    mtm = sum(_sz(x) * (float(px.get(x["t"]) or x["entry"]) / float(x["entry"]) - 1) for x in op)
     eq_m = eq + mtm
     peak_m = max(float(ks.get("peak_mtm", eq_m)), eq_m, peak)
     ks["peak_mtm"] = peak_m
     dd = min((1 + eq) / (1 + peak) - 1, (1 + eq_m) / (1 + peak_m) - 1)
-    day_pnl = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * float(x["ret"]) for x in done if x.get("exit_day") == today)
+    day_pnl = sum(_sz(x) * float(x["ret"]) for x in done if x.get("exit_day") == today)
     streak = 0
     for x in reversed(done):
         if float(x["ret"]) <= 0:
@@ -192,7 +228,7 @@ def risk_state(PW, st=None, today=None):
     # аудит B1-2: порог −20% — по всему счёту (сборная + v3 в реальном половинном размере), как в правилах
     v3p = _v3_part(PW)
     tot_m = eq_m + v3p
-    peak_t = max(float(ks.get("peak_tot", tot_m)), tot_m)
+    peak_t = max(float(ks.get("peak_tot", 0.0)), tot_m)   # учёт начинается с нуля
     ks["peak_tot"] = peak_t
     dd_tot = (1 + tot_m) / (1 + peak_t) - 1
     out.update(day_pnl=day_pnl, streak=streak, eq=eq, peak=peak, dd=dd, n=len(done), mtm=mtm, eq_m=eq_m, peak_m=peak_m, open=len(op),
@@ -580,7 +616,8 @@ def _signals(PW, st, day, admin, allowed):
         em_stop = entry - em["risk"] if em else None   # расстояние за уровнем / 2,5 ATR — от цены входа сигнала
         stop = (f"\nАварийный стоп (в проверках стратегии стоп не ставился — он снижал результат): {_fmt(em_stop)} "
                 f"({'за уровнем' if em['level'] else '2,5 ATR'}, риск {em['risk'] / entry:.1%})" if em else "")
-        size = f"\nРазмер позиции: {_w(strat)} капитала"
+        size = (f"\nРазмер позиции: {_w(strat)} текущего капитала (по закрытым сделкам) ≈ "
+                f"{abs(WEIGHT.get(strat, 0.1) * _cap(PW) * (1 + float(_M.get('realized') or 0))):,.0f} ₽".replace(",", " "))
         if strat == "F4":
             size += _f4_tag(PW, key)
         half = (" (половинный риск: на 2023–2026 F2 держится на редких крупных сделках, тест перестановкой p = 0,09)") if strat == "F2" else ""
@@ -881,8 +918,8 @@ def _lifecycle(PW, st, admin):
                 elif e == "nofill":
                     PW.say(admin, f"▫️ S1 · {name}: лимит {_fmt(float(x['limit']))} за {x['day']} не исполнился — сделки нет.")
                 else:
-                    w = WEIGHT.get(strat, 0.1)
                     rs = risk_state(PW, st)
+                    w = _sz(x)
                     why = {"тейк": "🎯 тейк", "срок": "⏱ по сроку"}.get(x.get("exit_why"), x.get("exit_why") or "")
                     PW.say(admin, f"🏁 <b>Закрыта · {strat} · {name}</b> — {why}\n"
                                   f"Вход {_fmt(float(x['entry']))} ({str(x.get('entry_at') or x['day'])[:10]}) → выход {_fmt(float(x['exit']))} ({x.get('exit_day')})\n"
@@ -1104,9 +1141,9 @@ def summary_text(PW, day=None):
             + ("в учёте" if WEEKEND_LIVE else "только для наблюдения") + "." if wd >= 5 else "")]
     C = _cap(PW)
     pn = pnl_state(PW, st, _v3(), day)
-    L.append(f"\n💰 <b>Портфель в цифрах</b> (капитал {C:,.0f} ₽): за день <b>{_rub(pn['day'] * C)}</b> ({pn['day']:+.2%}) — "
+    L.append(f"\n💰 <b>Портфель в цифрах</b> (капитал {f'{C:,.0f}'.replace(',', ' ')} ₽): за день <b>{_rub(pn['day'] * C)}</b> ({pn['day']:+.2%}) — "
              f"сборная {_rub(pn['day_sb'] * C)}, v3 {_rub(pn['day_v3'] * C)}; с начала <b>{_rub(pn['tot'] * C)}</b> ({pn['tot']:+.2%}) — "
-             f"сборная {_rub(pn['sb'] * C)} (закрытые {_rub(pn['sb_closed'] * C)}, переоценка открытых {_rub(pn['sb_mtm'] * C)}), v3 {_rub(pn['v3'] * C)}".replace(",", " ", 1))
+             f"сборная {_rub(pn['sb'] * C)} (закрытые {_rub(pn['sb_closed'] * C)}, переоценка открытых {_rub(pn['sb_mtm'] * C)}), v3 {_rub(pn['v3'] * C)}")
     # 1. сигналы дня
     sig, seen = [], set()
     for x in orders + trades:
@@ -1130,10 +1167,11 @@ def summary_text(PW, day=None):
         L.append("• сигналов не было")
     # 2. закрытые сегодня
     done = [x for x in trades if x.get("exit_day") == day and x.get("ret") is not None and _live(x)]
-    tot = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * float(x["ret"]) for x in done if _in(x, inlim))
+    _build_sizes(st, inlim)
+    tot = sum(_sz(x) * float(x["ret"]) for x in done if _in(x, inlim))
     L.append(f"\n<b>2. Закрыто за день: {len(done)}</b>, вклад в капитал (в лимите) {tot:+.2%} ({_rub(tot * C)})")
     for x in done:
-        w = WEIGHT.get(x.get("strat", "S1"), 0.1)
+        w = _sz(x)
         L.append(f"• {x.get('strat', 'S1')} {tl(x['t'])}: {x.get('exit_why')}, {_fmt(float(x['entry']))} → {_fmt(float(x['exit']))}, "
                  f"{float(x['ret']):+.2%} (в капитале {w * float(x['ret']):+.2%}, {_rub(w * float(x['ret']) * C)}){mark(x)}")
     # 3. открытые позиции
@@ -1144,7 +1182,7 @@ def summary_text(PW, day=None):
     for x in op:
         e = float(x["entry"])
         p = px.get(x["t"])
-        pnl = (f", сейчас {_fmt(float(p))} ({float(p) / e - 1:+.1%}, {_rub(WEIGHT.get(x.get('strat', 'S1'), 0.1) * (float(p) / e - 1) * C)})" if p else "")
+        pnl = (f", сейчас {_fmt(float(p))} ({float(p) / e - 1:+.1%}, {_rub(_sz(x) * (float(p) / e - 1) * C)})" if p else "")
         stp = _stop_of(PW, x)
         L.append(f"• {x.get('strat', 'S1')} {tl(x['t'])}: вход {_fmt(e)} ({str(x.get('entry_at') or x['day'])[:10]}){pnl}; "
                  + (f"тейк {_fmt(float(x['tp']))}; " if x.get("tp") else "без тейка; ")
@@ -1162,9 +1200,12 @@ def summary_text(PW, day=None):
              f"(пик {rs.get('peak_m', rs['peak']):+.2%}); просадка {rs['dd']:.2%} (порог {KS_DD:.0%}); за день {rs['day_pnl']:+.2%} (порог {KS_DAY:.0%}); "
              f"убыточных подряд {rs['streak']} (порог {KS_STREAK})")
     L.append(f"Весь счёт (сборная + v3 ×0,5): {rs.get('tot_m', 0):+.2%}, просадка {rs.get('dd_tot', 0):.2%} (порог {KS_DD:.0%} — общий для обеих стратегий)")
-    if rs.get("stale"):
-        L.append("⚠️ Нет свежей цены (переоценка по последней известной): " + ", ".join(
-            f"{html.escape(PW.tlabel(t))} — " + (f"цена от {d[8:10]}.{d[5:7]}" if d else "цены не было, по цене входа") for t, d in rs["stale"]))
+    old_ = [(t, d) for t, d in rs.get("stale") or [] if d]
+    none_ = [t for t, d in rs.get("stale") or [] if not d]
+    if old_:
+        L.append("⚠️ Нет свежей цены (переоценка по последней известной): " + ", ".join(f"{html.escape(PW.tlabel(t))} — цена от {d[8:10]}.{d[5:7]}" for t, d in old_))
+    if none_:
+        L.append("⚠️ Цены нет с входа (оценка по цене входа, не рыночная): " + ", ".join(html.escape(PW.tlabel(t)) for t in none_))
     L.append("Предохранитель: " + ("🛑 " + html.escape(rs["why"]) if rs["halted"] else "✅ сигналы принимаются"))
     # 5а. макрорежим (пометка для F4)
     L.append("\n" + macro_line())
@@ -1414,14 +1455,15 @@ def report_text(PW, day=None):
     why = {}
     for x in closed:
         why[x.get("exit_why") or "?"] = why.get(x.get("exit_why") or "?", 0) + 1
-    cl_rub = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * float(x["ret"]) for x in closed) * C
+    _build_sizes(st, inlim)
+    cl_rub = sum(_sz(x) * float(x["ret"]) for x in closed) * C
     L.append(f"\n<b>2. Сделки дня</b>")
     L.append(f"• Сигналов: {len(sig)} (в лимите {sum(1 for x in sig if _in(x, inlim))}, вне лимита/наблюдение {sum(1 for x in sig if not _in(x, inlim))})")
     L.append(f"• Открыто: {len(opened)}" + (" — " + ", ".join(f"{x.get('strat', 'S1')} {tl(x['t'])}" for x in opened) if opened else ""))
     L.append(f"• Закрыто: {len(closed)}" + (f" ({', '.join(f'{k} {v}' for k, v in why.items())}), прибыльных {sum(1 for x in closed if float(x['ret']) > 0)} из {len(closed)}, "
                                            f"итог {_rub(cl_rub)}" if closed else ""))
     for x in closed:
-        w = WEIGHT.get(x.get("strat", "S1"), 0.1)
+        w = _sz(x)
         L.append(f"   – {x.get('strat', 'S1')} {tl(x['t'])}: {float(x['ret']):+.2%}, {_rub(w * float(x['ret']) * C)} ({x.get('exit_why')})")
     rm_today = [k for k, v in (PW.S.get("removed") or {}).items() if v.get("day") == day]
     if rm_today:
@@ -1436,7 +1478,7 @@ def report_text(PW, day=None):
         if g:
             avg = sum(float(x["ret"]) for x in g) / len(g)
             wr = sum(1 for x in g if float(x["ret"]) > 0) / len(g)
-            res = sum(w * float(x["ret"]) for x in g) * C
+            res = sum(_sz(x) * float(x["ret"]) for x in g) * C
             L.append(f"• {strat}: закрыто {len(g)}, прибыльных {wr:.0%}, средняя {avg:+.2%}, итог {_rub(res)}; открыто {len(o)} "
                      f"(ожидание {EXPECT[strat][2]})")
             if (strat == "S1" and len(g) >= 30 and (wr < 0.70 or avg < 0)) or (strat != "S1" and len(g) >= 20 and avg < 0):
@@ -1553,7 +1595,8 @@ def on_remove(PW, uid, data):
         else:
             x = next((x for x in (_paper() or {}).get("trades") or [] if _trade_key(x) == key), None)
             if x and x.get("entry"):
-                entry, w = float(x["entry"]), WEIGHT.get(x.get("strat", "S1"), 0.1)
+                _build_sizes(_paper() or {})
+                entry, w = float(x["entry"]), _sz(x)
         if entry:
             ret = (px / abs(entry) - 1) * (1 if entry > 0 else -1) - 0.001
             rec["ret"] = round(ret, 5)

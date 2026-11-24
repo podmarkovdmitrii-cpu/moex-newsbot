@@ -97,3 +97,25 @@ rs = I.risk_state(PW, st, day)
 assert abs(rs["mtm"] - 0.05 * (60 / 100 - 1)) < 1e-9, rs["mtm"]
 assert ("EEE", old) in rs["stale"] and ("FFF", None) in rs["stale"], rs["stale"]
 print("B1-3 OK: переоценка по последней цене, позиции без свежей цены помечены:", rs["stale"])
+
+# ---- B1-4: размер — доля × (1 + результат закрытых до дня входа), как в исследованиях №27/30/31; до SIZING_SINCE — по-старому
+I.SIZING_SINCE = "2026-02-01"
+PW.S = {"inlim": {}}
+st = {"orders": [], "trades": [
+    dict(sig("S1", "OLD", day="2026-01-10"), entry=100.0, entry_at="2026-01-10T11:00", exit=120.0, exit_day="2026-01-12", ret=20.0),  # +100% капитала
+    dict(sig("F4", "NEW", day="2026-02-10"), entry=100.0, entry_at="2026-02-10T11:00"),
+    dict(sig("F4", "LOSS", day="2026-02-11"), entry=100.0, entry_at="2026-02-11T11:00", exit=50.0, exit_day="2026-02-12", ret=-10.0),
+    dict(sig("F4", "LATE", day="2026-02-13"), entry=100.0, entry_at="2026-02-13T11:00")]}
+sz = I._build_sizes(st, {})
+assert abs(sz["S1:OLD:2026-01-10"] - 0.05) < 1e-12, sz             # до даты перехода — от начального капитала
+assert abs(sz["F4:NEW:2026-02-10"] - 0.10) < 1e-12, sz             # капитал ×2 → размер ×2
+assert abs(sz["F4:LOSS:2026-02-11"] - 0.10) < 1e-12, sz
+# после убытка −1,0 (0,10 × −10): капитал 1 + 1 − 1 = 1 → размер снова 0,05
+assert abs(sz["F4:LATE:2026-02-13"] - 0.05) < 1e-12, sz
+rs = I.risk_state(PW, st, "2026-02-13")
+assert abs(rs["eq"] - (1.0 - 1.0)) < 1e-9, rs["eq"]                # кривая — суммы «размер × результат» (в долях начального капитала)
+st2 = {"orders": [], "trades": [dict(sig("S1", "HALF", day="2026-02-01"), entry=100.0, entry_at="2026-02-01T11:00", exit=50.0,
+                                     exit_day="2026-02-02", ret=-10.0), dict(sig("F4", "X", day="2026-02-05"), entry=100.0, entry_at="2026-02-05T11:00")]}
+sz = I._build_sizes(st2, {})
+assert abs(sz["F4:X:2026-02-05"] - 0.025) < 1e-12, sz             # капитал ×0,5 → размер ×0,5
+print("B1-4 OK: размер от текущего капитала по закрытым (×2 → ×2, ×0,5 → ×0,5), до даты перехода — по-старому")
