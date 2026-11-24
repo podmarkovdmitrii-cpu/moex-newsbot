@@ -1,0 +1,103 @@
+name: "Проверка №38 — режимный фильтр F4: пороги, ИЛИ/И, бутстрэп"
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: anomaly-regime38
+  cancel-in-progress: false
+
+jobs:
+  risk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet "scikit-learn==1.5.2" pandas numpy scipy matplotlib
+      - name: Сертификаты НУЦ Минцифры (apim.moex.com подписан ими)
+        run: |
+          for f in russian_trusted_root_ca_pem.crt russian_trusted_sub_ca_pem.crt; do
+            curl -sSfL --max-time 30 "https://gu-st.ru/content/lending/$f" >> "$RUNNER_TEMP/ru_ca.pem" && echo >> "$RUNNER_TEMP/ru_ca.pem"
+          done
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data
+          key: anomaly-data-${{ github.run_id }}
+          restore-keys: anomaly-data-
+      - uses: actions/cache/restore@v4
+        with:
+          path: newsbot-state
+          key: newsbot-state-${{ github.run_id }}
+          restore-keys: newsbot-state-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2020
+          key: algopack-v2-2020-${{ github.run_id }}
+          restore-keys: algopack-v2-2020-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2021
+          key: algopack-v2-2021-${{ github.run_id }}
+          restore-keys: algopack-v2-2021-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2022
+          key: algopack-v2-2022-${{ github.run_id }}
+          restore-keys: algopack-v2-2022-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2023
+          key: algopack-v2-2023-${{ github.run_id }}
+          restore-keys: algopack-v2-2023-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2024
+          key: algopack-v2-2024-${{ github.run_id }}
+          restore-keys: algopack-v2-2024-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2025
+          key: algopack-v2-2025-${{ github.run_id }}
+          restore-keys: algopack-v2-2025-
+      - uses: actions/cache/restore@v4
+        with:
+          path: anomaly-data/algopack/2026
+          key: algopack-v2-2026-${{ github.run_id }}
+          restore-keys: algopack-v2-2026-
+      - name: Часовые свечи до 2020 года (кэш проверки №13)
+        uses: actions/cache/restore@v4
+        with:
+          path: h-old
+          key: h-old-v1-${{ github.run_id }}
+          restore-keys: h-old-v1-
+      - name: 5-минутные бары ALGOPACK по сигналам (кэш)
+        uses: actions/cache/restore@v4
+        with:
+          path: a18
+          key: a18-v1-${{ github.run_id }}
+          restore-keys: a18-v1-
+      - name: "Стопы, тейки, размер позиций — 2020–2026"
+        env:
+          ANOM_DATA: ${{ github.workspace }}/anomaly-data
+          ANOM_MODELS: ${{ github.workspace }}/anomaly-exp
+          NEWS_STATE: ${{ github.workspace }}/newsbot-state
+          CHANNEL_STATE: ${{ github.workspace }}/tmp-state
+          ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
+          RU_CA: ${{ runner.temp }}/ru_ca.pem
+          EXP_H_DIR: ${{ github.workspace }}/h-old
+          EXP_A18_DIR: ${{ github.workspace }}/a18
+        run: python newsbot/anomaly/exp38.py
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: a18
+          key: a18-v1-${{ github.run_id }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp38-report
+          path: anomaly-exp/exp38_report.json
+          if-no-files-found: ignore
