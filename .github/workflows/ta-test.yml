@@ -13,11 +13,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Сертификаты НУЦ Минцифры (ISS / apim.moex.com)
+        run: |
+          for f in russian_trusted_root_ca_pem.crt russian_trusted_sub_ca_pem.crt; do
+            curl -sSfL --max-time 30 "https://gu-st.ru/content/lending/$f" >> "$RUNNER_TEMP/ru_ca.pem" && echo >> "$RUNNER_TEMP/ru_ca.pem"
+          done
       - name: Библиотеки
         run: pip install --quiet pandas numpy matplotlib "scikit-learn==1.5.2"
       - name: Проверка
         env:
           TINVEST_TOKEN: ${{ secrets.TINVEST_TOKEN }}
+          ALGOPACK_TOKEN: ${{ secrets.ALGOPACK_TOKEN }}
+          RU_CA: ${{ runner.temp }}/ru_ca.pem
         run: |
           cd newsbot/channel
           python - <<'PY'
