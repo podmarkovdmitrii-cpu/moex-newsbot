@@ -104,7 +104,7 @@ def ru_ctx():
 
 def http_get(url, timeout=30, tries=3, headers=None):
     last = None
-    ctx = ru_ctx() if "tbank.ru" in url or "tinkoff.ru" in url or "apim.moex.com" in url else None
+    ctx = ru_ctx() if "tbank.ru" in url or "tinkoff.ru" in url or "moex.com" in url else None   # iss.moex.com тоже: цепочка с НУЦ Минцифры
     for k in range(tries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "ru,en;q=0.8", **(headers or {})})
