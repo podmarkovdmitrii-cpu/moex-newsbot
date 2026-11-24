@@ -213,6 +213,7 @@ def scan(md, ixc, now, feats, ctx=None):
     lp = {tr["t"]: float(px[tr["t"]]["LAST"]) for tr in st["trades"] if tr.get("entry") and not tr.get("exit") and tr["t"] in px}
     if lp:
         st["last_px"] = dict(st.get("last_px") or {}, **lp)
+        st["px_t"] = dict(st.get("px_t") or {}, **{t_: today for t_ in lp})   # дата последней цены по бумаге (аудит B1-3)
         st["px_at"] = now.isoformat(timespec="minutes")
         changed = True
     st["seen"] = {k: v for k, v in st["seen"].items() if v >= (now.date() - dt.timedelta(days=3)).isoformat()}

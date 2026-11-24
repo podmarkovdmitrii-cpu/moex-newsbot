@@ -128,6 +128,24 @@ def _v3_load(js=None):
     return sum(abs(float(o.get("w") or 0)) for o in (js or {}).get("open") or [])
 
 
+def _prev_wd_str(day):
+    d = time.mktime(time.strptime(day, "%Y-%m-%d")) - 86400
+    while time.localtime(d).tm_wday >= 5:
+        d -= 86400
+    return time.strftime("%Y-%m-%d", time.localtime(d))
+
+
+def _v3_part(PW):
+    """Результат v3 на реальном счёте (модель × половинный размер) с момента подключения — в долях капитала."""
+    js = _v3()
+    if not js or not js.get("equity"):
+        return float((PW.S.get("v3_last") or 0.0))
+    base = PW.S.setdefault("v3_base", {"day": time.strftime("%Y-%m-%d", msk()), "eq": float(js["equity"])})
+    v = (float(js["equity"]) / max(1.0, float(base["eq"])) - 1) * float(js.get("scale") or 0.5)
+    PW.S["v3_last"] = v
+    return v
+
+
 def risk_state(PW, st=None, today=None):
     """Состояние виртуального счёта и предохранителя. → dict(day_pnl, streak, eq, peak, dd, halted, why)."""
     _M["removed"] = PW.S.get("removed") or {}
@@ -135,8 +153,7 @@ def risk_state(PW, st=None, today=None):
     today = today or time.strftime("%Y-%m-%d", msk())
     ks = PW.S.setdefault("ks", {})
     out = dict(day_pnl=0.0, streak=0, eq=0.0, peak=0.0, dd=0.0, n=0, halted=False, why="")
-    if not st:
-        return out
+    st = st or {"trades": [], "orders": []}   # без сделок сборной общий порог всё равно считается (v3 на том же счёте)
     inlim = PW.S.get("inlim") or {}
     _M["inlim_since"] = PW.S.get("inlim_since") or _M.get("inlim_since")
     done = [x for x in st.get("trades") or [] if x.get("exit") is not None and x.get("ret") is not None
@@ -149,8 +166,17 @@ def risk_state(PW, st=None, today=None):
     eq, peak = curve[-1], max(curve[k0:])
     # переоценка открытых позиций по последним ценам виртуального счёта (paper_anom сохраняет last_px)
     px = st.get("last_px") or {}
+    pxt = st.get("px_t") or {}
     op = [x for x in st.get("trades") or [] if x.get("entry") and not x.get("exit") and _live(x) and _in(x, inlim)]
-    mtm = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * (float(px[x["t"]]) / float(x["entry"]) - 1) for x in op if px.get(x["t"]))
+    # аудит B1-3: позиция без свежей цены (остановка торгов) — по последней известной цене (или цене входа), с пометкой, а не молча нулём
+    stale = []
+    for x in op:
+        d_px = pxt.get(x["t"]) or (st.get("px_at") or "")[:10]
+        if not px.get(x["t"]):
+            stale.append((x["t"], None))
+        elif d_px and d_px < _prev_wd_str(today):
+            stale.append((x["t"], d_px))
+    mtm = sum(WEIGHT.get(x.get("strat", "S1"), 0.1) * (float(px.get(x["t"]) or x["entry"]) / float(x["entry"]) - 1) for x in op)
     eq_m = eq + mtm
     peak_m = max(float(ks.get("peak_mtm", eq_m)), eq_m, peak)
     ks["peak_mtm"] = peak_m
@@ -163,11 +189,22 @@ def risk_state(PW, st=None, today=None):
         else:
             break
     last_today = bool(done) and done[-1].get("exit_day") == today
-    out.update(day_pnl=day_pnl, streak=streak, eq=eq, peak=peak, dd=dd, n=len(done), mtm=mtm, eq_m=eq_m, peak_m=peak_m, open=len(op))
+    # аудит B1-2: порог −20% — по всему счёту (сборная + v3 в реальном половинном размере), как в правилах
+    v3p = _v3_part(PW)
+    tot_m = eq_m + v3p
+    peak_t = max(float(ks.get("peak_tot", tot_m)), tot_m)
+    ks["peak_tot"] = peak_t
+    dd_tot = (1 + tot_m) / (1 + peak_t) - 1
+    out.update(day_pnl=day_pnl, streak=streak, eq=eq, peak=peak, dd=dd, n=len(done), mtm=mtm, eq_m=eq_m, peak_m=peak_m, open=len(op),
+               stale=stale, v3p=v3p, tot_m=tot_m, dd_tot=dd_tot)
     if ks.get("dd_halt"):
         out.update(halted=True, why=ks.get("dd_why") or "просадка")
     elif dd <= KS_DD:
         ks.update(dd_halt=True, dd_why=f"просадка виртуального счёта {dd:.1%} от пика с переоценкой открытых позиций (порог {KS_DD:.0%})")
+        out.update(halted=True, why=ks["dd_why"], new=True)
+    elif dd_tot <= KS_DD:
+        ks.update(dd_halt=True, dd_why=f"просадка всего счёта (сборная + v3) {dd_tot:.1%} от пика с переоценкой (порог {KS_DD:.0%}) — "
+                                       "новые входы обеих стратегий остановлены")
         out.update(halted=True, why=ks["dd_why"], new=True)
     elif ks.get("day") == today:
         out.update(halted=True, why=ks.get("why") or "")
@@ -443,6 +480,22 @@ def book(st, reserve_day=None):
     return op, load
 
 
+def _held(st, day, exclude=None):
+    """Бумаги, по которым уже есть позиция или зарезервированный лимит: сборная в лимите (открытые + сегодняшние лимиты S1) и v3 → {тикер: что}."""
+    inlim = _M.get("inlim") or {}
+    out = {}
+    for x in st.get("trades") or []:
+        if x.get("entry") and not x.get("exit") and _live(x) and _in(x, inlim) and _trade_key(x) != exclude:
+            out.setdefault(x["t"], f"{x.get('strat', 'S1')} с {x.get('day')}")
+    for o in st.get("orders") or []:
+        k = _trade_key(o)
+        if o.get("day") == day and inlim.get(k) is True and k != exclude:
+            out.setdefault(o["t"], f"лимит S1 от {o.get('day')}")
+    for o in (_v3() or {}).get("open") or []:
+        out.setdefault(o["t"], f"v3 с {o.get('d0')}")
+    return out
+
+
 def _load_line(st):
     op, load = book(st)
     js = _v3()
@@ -487,6 +540,8 @@ def _signals(PW, st, day, admin, allowed):
         _M["inlim_since"] = PW.S.setdefault("inlim_since", day)
         _, load_now = book(st, reserve_day=day)
         fits = load_now + WEIGHT.get(strat, 0.1) <= LOAD_CAP + 1e-9
+        held = _held(st, day, exclude=key)
+        dup = held.get(x["t"])
         why_out = f"потолок загрузки счёта {LOAD_CAP:.0%} достигнут (сейчас {load_now:.0%})"
         if load_now > LOAD_CAP + 1e-9:
             why_out = (f"загрузка счёта {load_now:.0%} — выше потолка {LOAD_CAP:.0%} из-за позиций, открытых до его введения; "
@@ -498,6 +553,9 @@ def _signals(PW, st, day, admin, allowed):
                 fits, why_out = False, f"F2 берётся только при загрузке до {F2_LOAD_MAX:.0%} (сейчас {load_now:.0%}) — место оставлено для S1 и F4"
             elif n_f2 >= F2_MAX_OPEN:
                 fits, why_out = False, f"уже открыто {n_f2} сделок F2 (максимум {F2_MAX_OPEN}) — место оставлено для S1 и F4"
+        if dup and fits:     # аудит B1-1: правило «по бумаге уже есть позиция в любой стратегии — сигнал не берётся»
+            fits, why_out = False, (f"по этой бумаге уже есть позиция ({dup}) — по правилам одна позиция на бумагу, "
+                                    "без докупки и усреднения")
         if x.get("wkd") and not WEEKEND_LIVE and fits:
             fits, why_out = False, ("торги выходного дня — по правилам только наблюдение: на истории стратегия проверялась на будних сессиях, "
                                     "ликвидность в выходные ниже (WEEKEND_LIVE=1 — брать в учёт)")
@@ -943,6 +1001,7 @@ def resume(PW):
     ks.pop("day", None)
     ks["dd_reset_n"] = rs["n"]   # пик для просадки считается с текущего уровня
     ks["peak_mtm"] = rs.get("eq_m", rs["eq"])
+    ks["peak_tot"] = rs.get("tot_m", rs.get("eq_m", rs["eq"]))
     PW.save()
     return "▶️ Сигналы возобновлены. Пик для расчёта просадки сброшен на текущий уровень виртуального счёта."
 
@@ -1102,6 +1161,10 @@ def summary_text(PW, day=None):
     L.append(f"\n<b>5. Риск</b>: закрыто всего {rs['n']}, итог {rs['eq']:+.2%}; с переоценкой {rs.get('eq_m', rs['eq']):+.2%} "
              f"(пик {rs.get('peak_m', rs['peak']):+.2%}); просадка {rs['dd']:.2%} (порог {KS_DD:.0%}); за день {rs['day_pnl']:+.2%} (порог {KS_DAY:.0%}); "
              f"убыточных подряд {rs['streak']} (порог {KS_STREAK})")
+    L.append(f"Весь счёт (сборная + v3 ×0,5): {rs.get('tot_m', 0):+.2%}, просадка {rs.get('dd_tot', 0):.2%} (порог {KS_DD:.0%} — общий для обеих стратегий)")
+    if rs.get("stale"):
+        L.append("⚠️ Нет свежей цены (переоценка по последней известной): " + ", ".join(
+            f"{html.escape(PW.tlabel(t))} — " + (f"цена от {d[8:10]}.{d[5:7]}" if d else "цены не было, по цене входа") for t, d in rs["stale"]))
     L.append("Предохранитель: " + ("🛑 " + html.escape(rs["why"]) if rs["halted"] else "✅ сигналы принимаются"))
     # 5а. макрорежим (пометка для F4)
     L.append("\n" + macro_line())
@@ -1178,7 +1241,10 @@ def _v3_events(PW, admin, st):
         if first:
             continue
         side = "Покупка" if o.get("side", 1) > 0 else "Шорт"
-        PW.say(admin, f"🔷 <b>v3 · {side} · {html.escape(PW.tlabel(o['t']))}</b> — открыта {o.get('d0')} (вход на открытии)\n"
+        rs_ = risk_state(PW, st)
+        halt_ = (f"🛑 <b>Действует аварийная остановка</b> ({html.escape(rs_['why'])}) — по правилам вход v3 не берётся; модель v3 учитывает сделку "
+                 "только виртуально.\n") if rs_["halted"] and (PW.S.get("ks") or {}).get("dd_halt") else ""
+        PW.say(admin, halt_ + f"🔷 <b>v3 · {side} · {html.escape(PW.tlabel(o['t']))}</b> — открыта {o.get('d0')} (вход на открытии)\n"
                       f"Вход {_fmt(float(o['entry']))} · стоп <b>{_fmt(float(o['stop']))}</b> (−3%) · "
                       + (f"цель <b>{_fmt(float(o['take']))}</b>" if o.get("take") else "без цели (выход по стопу/безубытку или ротации)") + "\n"
                       f"Правило выхода: {V3_MODS.get(o.get('fam'), '')}\n"
