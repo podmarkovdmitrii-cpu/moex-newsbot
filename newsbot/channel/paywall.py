@@ -446,7 +446,8 @@ HELP_ADMIN = ("Команды администратора:\n"
               "/capital 500000 — капитал для расчёта результата в рублях\n"
               "/summary — сводка сборной стратегии за день (автоматически — каждый торговый день в 19:05 МСК)\n"
               "/testsignal — проверочные сообщения сборной стратегии в боевом формате (состояние не меняется)\n"
-              "/ta ТИКЕР — теханализ любой акции: тренд, средние, индикаторы, свечи, уровни, трендовые линии, сценарии + картинка\n"
+              "/ta ТИКЕР — теханализ акции, индекса (/ta IMOEX) или фьючерса (/ta Si, /ta SiZ6): тренд, средние, индикаторы, свечи, уровни, трендовые линии, сценарии + картинка\n"
+              "/futures — все фьючерсы срочного рынка Мосбиржи (Т-Инвестиции торгуют на нём) с кнопками-командами теханализа\n"
               "/ideas — последние идеи\n"
               "/result НОМЕР текст — дописать итог в пост (например: /result 3 ✅ Тейк взят +6,7%)\n"
               "/subs — подписчики\n"
@@ -461,6 +462,7 @@ ADM_FN = [("📋 Сводка за день", "/summary"), ("📊 Отчёт з�
           ("🗂 Убрать / закрыть сделку", "/remove"), ("🛡 Риск и остановка", "/risk"),
           ("▶️ Возобновить сигналы", "resume?"), ("💰 Капитал", "capital?"),
           ("📈 Теханализ бумаги", "ta?"), ("🧪 Проверочный сигнал", "/testsignal"),
+          ("🏛 Теханализ IMOEX", "/ta IMOEX"), ("📜 Фьючерсы: список и теханализ", "/futures"),
           ("🧾 Журнал и отчёт ошибок", "/errors"), ("❓ Все команды", "/help")]
 ADM_KB = {"📋 Сводка": "/summary", "📊 Отчёт за день": "/dayreport", "📒 Сделки": "/trades", "🤖 Все функции": "panel"}
 
@@ -499,7 +501,7 @@ def admin_action(uid, act):
         return say(uid, f"Капитал сейчас: {IS._cap(sys.modules[__name__]):,.0f} ₽. Пришлите новую сумму числом (например 500000) или ✖ Отмена.".replace(",", " "))
     if act == "ta?":
         S.setdefault("await", {})[str(uid)] = "/ta"
-        return say(uid, "Пришлите тикер бумаги (например SBER).")
+        return say(uid, "Пришлите тикер: акция (SBER), индекс (IMOEX, RTSI, MOEXOG) или фьючерс (Si, BR, GOLD, SiZ6, USDRUBF). Список фьючерсов — /futures.")
     if act == "/forecast":
         return say(uid, IS.forecast_text(sys.modules[__name__]))
     on_message({"from": {"id": uid}, "chat": {"id": uid, "type": "private"}, "text": act})
@@ -597,16 +599,26 @@ def on_message(msg):
     elif cmd in ("/resume", "/возобновить") and admin:
         import idea_scan as IS
         say(uid, IS.resume(sys.modules[__name__]))
-    elif cmd in ("/ta", "/та", "/теханализ") and admin:
-        arg = text.split()[1].upper() if len(text.split()) > 1 else ""
-        if not re.fullmatch(r"[A-Z0-9]{1,12}", arg):
-            say(uid, "Укажите тикер: /ta SBER")
-        elif not_traded(arg):
-            say(uid, "⛔️ " + html.escape(not_traded(arg)))
+    elif (cmd in ("/ta", "/та", "/теханализ") or cmd.startswith("/ta_")) and admin:
+        w0 = text.split()[0].split("@")[0]
+        arg = w0[4:] if cmd.startswith("/ta_") else (text.split()[1] if len(text.split()) > 1 else "")
+        if not re.fullmatch(r"[A-Za-z0-9]{1,16}", arg):
+            say(uid, "Укажите тикер: /ta SBER — акция, /ta IMOEX — индекс Мосбиржи, /ta Si или /ta SiZ6 — фьючерс (список — /futures).")
         else:
             import idea_ta as TA
-            say(uid, f"⏳ Теханализ {arg}: свечи за 10 лет, уровни и сценарии (10–30 секунд)…")
+            say(uid, f"⏳ Теханализ {html.escape(arg)}: свечи, уровни и сценарии (10–40 секунд)…")
             TA.send_async(sys.modules[__name__], uid, arg)
+    elif cmd in ("/futures", "/фьючерсы", "/fut") and admin:
+        say(uid, "⏳ Загружаю список фьючерсов Мосбиржи…")
+
+        def _fl(u=uid):
+            try:
+                import ta_assets as TAA
+                for part in TAA.fut_list_texts():
+                    say(u, part)
+            except Exception as e:  # noqa: BLE001
+                say(u, f"⚠️ Список фьючерсов не загрузился: {html.escape(str(e))[:200]}")
+        threading.Thread(target=_fl, daemon=True).start()
     elif cmd in ("/scan", "/скан", "/сканер") and admin:
         say(uid, "⏳ Сканирую ликвидные акции по закрытию (1–3 минуты)…")
         scan_tick(force=True, uid=uid)

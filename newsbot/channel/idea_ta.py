@@ -337,8 +337,11 @@ def chart(name, df, ta, res, sup, tl, bars=220):
 
 
 # ---------------- разбор ----------------
-def analyze(ticker, data=None):
+def analyze(ticker, data=None, inst=None):
     import idea_judge as J
+    if data is None and inst is not None and inst.get("kind") != "share":
+        import ta_assets as TAA
+        data = TAA.load(inst)
     a_d, a_h = data or J.load(ticker)
     if a_d is None or len(a_d["c"]) < 260:
         return {"error": "мало истории (нужно ≥ 1 года дневных свечей)"}
@@ -354,15 +357,18 @@ def analyze(ticker, data=None):
     y = df.iloc[-250:]
     chg = dict(d=c / float(df.c.iloc[-2]) - 1, m=c / float(df.c.iloc[-22]) - 1, y=c / float(df.c.iloc[-250]) - 1,
                lo52=float(y.l.min()), hi52=float(y.h.max()))
-    return dict(ticker=ticker, price=c, date=df.t.iloc[-1], chg=chg, d=td, w=tw, res=res, sup=sup, tl=tl, sc=sc, df=df)
+    return dict(ticker=ticker, price=c, date=df.t.iloc[-1], chg=chg, d=td, w=tw, res=res, sup=sup, tl=tl, sc=sc, df=df,
+                unit=(inst or {}).get("unit", "₽"), kind=(inst or {}).get("kind", "share"), cont=bool((inst or {}).get("cont")))
 
 
 def text(r, name):
     if r.get("error"):
         return f"⚠️ Теханализ {html.escape(name)}: {html.escape(r['error'])}"
     d, w, c, ch = r["d"], r["w"], r["price"], r["chg"]
+    u = r.get("unit", "₽")
+    u_ = (" " + u) if u else ""
     m = d["mas"]
-    L = [f"📊 <b>Технический анализ {html.escape(name)}</b> — {fnum(c)} ₽ (закрытие/последняя цена {r['date']:%d.%m.%Y})",
+    L = [f"📊 <b>Технический анализ {html.escape(name)}</b> — {fnum(c)}{u_} (закрытие/последняя цена {r['date']:%d.%m.%Y})",
          f"За день {pct(ch['d'])} · за месяц {pct(ch['m'])} · за год {pct(ch['y'])} · диапазон 52 нед.: {fnum(ch['lo52'])}–{fnum(ch['hi52'])}"]
     above = [nm for nm in ("EMA 20", "SMA 50", "SMA 200") if m.get(nm) == m.get(nm) and c > m[nm]]
     below = [nm for nm in ("EMA 20", "SMA 50", "SMA 200") if m.get(nm) == m.get(nm) and c < m[nm]]
@@ -393,7 +399,7 @@ def text(r, name):
     cds, cws = uniq(d["candles"], 3), uniq(w["candles"], 2, "нед. ")
     if cds or cws:
         L.append("• Свечи: " + "; ".join(cds + cws) + ".")
-    L.append(f"• Волатильность: дневной ATR {fnum(d['atr'])} ₽ ({pct(d['atr'] / c, 1, False)} за день); за 1–2 дня ход ±{fnum(d['atr'] * 1.1)} ₽ — обычный.")
+    L.append(f"• Волатильность: дневной ATR {fnum(d['atr'])}{u_} ({pct(d['atr'] / c, 1, False)} за день); за 1–2 дня ход ±{fnum(d['atr'] * 1.1)}{u_} — обычный.")
     L.append("")
     L.append("<b>Уровни</b>")
     for i, g in enumerate(r["res"]):
@@ -405,7 +411,7 @@ def text(r, name):
         L.append(f"{nm}: сейчас ≈{fnum(t['now'])}" + (" — пробита" if t["broken"] else ""))
     sc = r["sc"]
     L.append("")
-    L.append("<b>Сценарии по истории этой бумаги</b> (не гарантия)")
+    L.append("<b>Сценарии по истории " + {"index": "индекса", "fut": "фьючерса"}.get(r.get("kind"), "этой бумаги") + "</b> (не гарантия)")
     sim = sc["rows"][0]["similar"]
     L.append(("Похожие дни в прошлом: тот же тренд к SMA 50 и та же зона RSI — " + f"{sc['n_sim']} дн" if sim else
               "Похожих дней мало — взяты все дни истории") + ". Куда цена уходила (80% случаев между):")
@@ -416,6 +422,9 @@ def text(r, name):
         rc = sc["race"]
         L.append(f"За месяц раньше дойдёт до сопротивления {fnum(rc['res'])}: ~{rc['up']:.0%}; до поддержки {fnum(rc['sup'])}: ~{rc['dn']:.0%}; "
                  f"ни туда ни туда: ~{rc['none']:.0%}.")
+    if r.get("cont"):
+        L.append("ℹ️ Ряд склеен из ближайших контрактов с обратной корректировкой цен на экспирациях (переход за 3 торговых дня до "
+                 "экспирации): уровни далёкой истории — в ценах текущего контракта, точнее всего последние месяцы.")
     L.append("")
     L.append("<i>Новости, фундамент и дивиденды не учитываются. Проверка на истории (№19): индикаторы Investing.com сами по себе почти не "
              "предсказывают движение — используйте разбор для уровней стопа и цели, а не как сигнал. "
@@ -440,10 +449,22 @@ def tg_photo(PW, chat_id, png, caption=""):
 
 
 def send(PW, uid, ticker):
-    """Картинка + текст разбора (вызывать в потоке: ISS бывает медленным)."""
-    name = PW.tlabel(ticker) if hasattr(PW, "tlabel") else ticker
+    """Картинка + текст разбора (вызывать в потоке: ISS бывает медленным). Акции, индексы (IMOEX …) и фьючерсы (ta_assets.py)."""
     try:
-        r = analyze(ticker)
+        import ta_assets as TAA
+        inst = TAA.resolve(ticker)
+    except Exception as e:  # noqa: BLE001
+        PW.log("теханализ: инструмент не определён:", e) if hasattr(PW, "log") else None
+        inst = None
+    if inst is None:
+        PW.say(uid, f"⚠️ {html.escape(ticker)}: не нашёл такой акции, индекса или фьючерса на Мосбирже. Список фьючерсов — /futures.")
+        return
+    ticker = inst["code"] if inst["kind"] in ("share", "index") else ticker
+    name = inst.get("name") or (PW.tlabel(ticker) if hasattr(PW, "tlabel") else ticker)
+    if inst["kind"] == "index":
+        name = f"{name} ({inst['code']})"
+    try:
+        r = analyze(ticker, inst=inst)
     except Exception as e:  # noqa: BLE001
         PW.say(uid, f"⚠️ Теханализ {html.escape(ticker)} не посчитан: {html.escape(str(e))[:200]}")
         return
