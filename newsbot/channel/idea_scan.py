@@ -85,6 +85,7 @@ def _apply_removed(st):
 
 def _ctx(PW):
     _M["removed"] = PW.S.get("removed") or {}
+    _M["PW_S"] = PW.S
     _M["inlim"] = PW.S.setdefault("inlim", {})
     _M["inlim_since"] = PW.S.setdefault("inlim_since", time.strftime("%Y-%m-%d", msk()))
 
@@ -548,6 +549,13 @@ def _signals(PW, st, day, admin, allowed):
 # сигналы только помечаются, итоги по режимам копятся в PW.S["f4_regime"] для решения после paper-теста.
 F4_USD_THR = float(os.environ.get("F4_USD_THR", "0.03"))
 F4_RATE_THR = float(os.environ.get("F4_RATE_THR", "0.25"))
+MACRO_STALE_DAYS = int(os.environ.get("MACRO_STALE_DAYS", "4"))   # сколько дней можно опираться на последние успешные данные ЦБ
+# Определения (те же, что в проверках №37–38):
+#  • курс — официальный курс доллара ЦБ (XML_dynamic, R01235): последнее значение с датой раньше сегодняшней против последнего
+#    значения с датой раньше «сегодня − 28 календарных дней» (≈ 20 торговых); рубль ослаб — рост курса больше F4_USD_THR;
+#  • ставка — ключевая ставка ЦБ (cbr.ru/hd_base/KeyRate), действовавшая на вчера, против действовавшей 90 календарных дней назад;
+#    росла — разница больше F4_RATE_THR п.п.;
+#  • двойной стресс — оба условия; стресс — ровно одно; спокойный — ни одного; неизвестен — данных ЦБ нет (не «спокойный»).
 
 
 def _cbr(url):
@@ -583,11 +591,18 @@ def macro_regime():
         if None in (u1, u0, r1, r0):
             raise ValueError("мало данных ЦБ")
         usd20, rate90 = u1 / u0 - 1, r1 - r0
-        m = dict(ts=time.time(), usd=u1, usd20=usd20, rate=r1, rate90=rate90, rub=usd20 > F4_USD_THR, hike=rate90 > F4_RATE_THR)
+        m = dict(ts=time.time(), usd=u1, usd20=usd20, rate=r1, rate90=rate90, rub=usd20 > F4_USD_THR, hike=rate90 > F4_RATE_THR,
+                 on=str(td))
         m["stress"] = m["rub"] or m["hike"]
+        if _M.get("PW_S") is not None:   # последнее успешное значение — на случай, если ЦБ не ответит
+            _M["PW_S"]["macro_last"] = {k: v for k, v in m.items() if k != "ts"}
     except Exception as e:  # noqa: BLE001
         log("макрорежим недоступен:", e)
-        m = dict(ts=time.time() - 5 * 3600, err=str(e)[:80])   # повтор через час
+        last = (_M.get("PW_S") or {}).get("macro_last")
+        if last and (_dt.date.today() - _dt.date.fromisoformat(last["on"])).days <= MACRO_STALE_DAYS:
+            m = dict(last, ts=time.time() - 5 * 3600, stale=True)   # последние доступные данные, повтор через час
+        else:
+            m = dict(ts=time.time() - 5 * 3600, err=str(e)[:80])
     _M["macro"] = m
     return m
 
@@ -595,33 +610,35 @@ def macro_regime():
 def macro_line(m=None):
     m = m or macro_regime()
     if not m or "usd20" not in m:
-        return "🌡 Макрорежим: данные ЦБ сейчас недоступны."
+        return ("🌡 Макрорежим: <b>неизвестен</b> — данные ЦБ недоступны (сигналы F4 помечаются «неизвестен», а не «спокойный»).")
     st = ("<b>двойной стресс</b> (рубль и ставка; на дневной истории 2020–26 F4 в среднем +8,7% на сделку против +2,6% у всех)" if m["rub"] and m["hike"]
           else "<b>стресс</b> (одно из условий; на дневной истории 2020–26 F4 «рубль ИЛИ ставка» +5,6% против +2,6% у всех)" if m["stress"]
           else "<b>спокойный</b> (на истории F4 вне стресса в среднем около нуля или в минусе)")
     return (f"🌡 Макрорежим: доллар ЦБ {m['usd']:.2f} ₽, за 20 торговых дней {m['usd20']:+.1%} (порог ослабления рубля +{F4_USD_THR:.0%}) "
             f"{'✅' if m['rub'] else '—'}; ключевая {m['rate']:g}%, за 90 дней {m['rate90']:+.2f} п.п. {'✅ росла' if m['hike'] else '— не росла'} → {st}. "
-            "Пока только пометка (paper-тест, проверки №37–38: на 5-мин 2023–26 эффект не отличим от случайного), размер F4 не меняется.")
+            + (f"Данные ЦБ на {m['on'][8:10]}.{m['on'][5:7]} — последние доступные. " if m.get("stale") else "")
+            + "Пока только пометка (paper-тест, проверки №37–38: на 5-мин 2023–26 эффект не отличим от случайного), размер F4 не меняется.")
 
 
 def _f4_tag(PW, key):
     m = macro_regime()
     if not m or "usd20" not in m:
-        return ""
-    PW.S.setdefault("f4_regime", {})[key] = dict(rub=bool(m["rub"]), hike=bool(m["hike"]), usd20=round(m["usd20"], 4), rate90=round(m["rate90"], 2))
+        PW.S.setdefault("f4_regime", {})[key] = dict(unknown=True)
+        return "\n" + macro_line(m)
+    PW.S.setdefault("f4_regime", {})[key] = dict(stale=bool(m.get("stale")), rub=bool(m["rub"]), hike=bool(m["hike"]), usd20=round(m["usd20"], 4), rate90=round(m["rate90"], 2))
     return "\n" + macro_line(m)
 
 
 def f4_regime_stats(PW, st):
     """Итоги закрытых F4 с пометкой режима: стресс / спокойный."""
     reg = PW.S.get("f4_regime") or {}
-    res = {"двойной стресс": [], "стресс": [], "спокойный": []}
+    res = {"двойной стресс": [], "стресс": [], "спокойный": [], "неизвестен": []}
     for x in st.get("trades") or []:
         if x.get("strat") != "F4" or x.get("ret") is None or x.get("exit") is None:
             continue
         r = reg.get(f"F4:{x['t']}:{x.get('day')}")
         if r:
-            res["двойной стресс" if (r["rub"] and r["hike"]) else "стресс" if (r["rub"] or r["hike"]) else "спокойный"].append(float(x["ret"]))
+            res["неизвестен" if r.get("unknown") else "двойной стресс" if (r["rub"] and r["hike"]) else "стресс" if (r["rub"] or r["hike"]) else "спокойный"].append(float(x["ret"]))
     return res
 
 
@@ -955,7 +972,9 @@ def summary_text(PW, day=None):
     fr = f4_regime_stats(PW, st)
     if any(fr.values()):
         L.append("F4 по режимам (закрытые с пометкой): " + "; ".join(
-            f"{k} {len(v)} сд., средняя {np.mean(v):+.1%}" for k, v in fr.items() if v))
+            f"{k} {len(v)} сд., средняя {np.mean(v):+.1%}, прибыльных {np.mean([r > 0 for r in v]):.0%}" for k, v in fr.items() if v)
+                 + f". Разбор — когда в стрессе (оба уровня) и в спокойном режиме будет хотя бы по 10 закрытых: "
+                 f"сейчас {len(fr['двойной стресс']) + len(fr['стресс'])} и {len(fr['спокойный'])}; размер F4 до разбора не меняется.")
     # 6. вторая стратегия
     js = _v3()
     if js:
