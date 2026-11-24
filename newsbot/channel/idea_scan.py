@@ -549,12 +549,16 @@ def _signals(PW, st, day, admin, allowed):
 # сигналы только помечаются, итоги по режимам копятся в PW.S["f4_regime"] для решения после paper-теста.
 F4_USD_THR = float(os.environ.get("F4_USD_THR", "0.03"))
 F4_RATE_THR = float(os.environ.get("F4_RATE_THR", "0.25"))
-MACRO_STALE_DAYS = int(os.environ.get("MACRO_STALE_DAYS", "4"))   # сколько дней можно опираться на последние успешные данные ЦБ
+MACRO_STALE_DAYS = int(os.environ.get("MACRO_STALE_DAYS", "4"))   # курс: сколько дней можно опираться на сохранённую копию ЦБ
+RATE_STALE_DAYS = int(os.environ.get("RATE_STALE_DAYS", "30"))    # ставка: меняется только на заседаниях ЦБ
 # Определения (те же, что в проверках №37–38):
-#  • курс — официальный курс доллара ЦБ (XML_dynamic, R01235): последнее значение с датой раньше сегодняшней против последнего
-#    значения с датой раньше «сегодня − 28 календарных дней» (≈ 20 торговых); рубль ослаб — рост курса больше F4_USD_THR;
+#  • курс — официальный курс доллара ЦБ (XML_dynamic, R01235) по дате, на которую ЦБ его установил: берётся курс с самой поздней
+#    датой строго раньше сегодняшней (то есть действовавший вчера или в последний день до выходных; курс на сегодня и на завтра,
+#    уже опубликованный ЦБ, не используется — так в любой день недели правило одно), против курса с самой поздней датой раньше
+#    «сегодня − 28 календарных дней» (≈ 20 торговых); рубль ослаб — рост курса больше F4_USD_THR;
 #  • ставка — ключевая ставка ЦБ (cbr.ru/hd_base/KeyRate), действовавшая на вчера, против действовавшей 90 календарных дней назад;
-#    росла — разница больше F4_RATE_THR п.п.;
+#    росла — разница больше F4_RATE_THR п.п. (0,25 — минимальный шаг ЦБ; условие строгое, поэтому одно повышение на 0,25 не
+#    считается — так было и в проверках №37–38; другие пороги не проверялись);
 #  • двойной стресс — оба условия; стресс — ровно одно; спокойный — ни одного; неизвестен — данных ЦБ нет (не «спокойный»).
 
 
@@ -565,67 +569,114 @@ def _cbr(url):
         return r.read().decode("utf-8", "replace")
 
 
+def _macro_part(name, fetch, max_age):
+    """Ряд ЦБ: свежая загрузка или сохранённая копия в состоянии бота (paywall.json переживает перезапуск) не старше max_age дней."""
+    import datetime as _dt
+    store = _M.get("PW_S")
+    td = _dt.date.today()
+    try:
+        ser = fetch(td)
+        if not ser:
+            raise ValueError("пустой ответ")
+        if store is not None:
+            store[name] = {"on": str(td), "ser": [[str(d), v] for d, v in ser]}
+        return ser, None          # свежие данные
+    except Exception as e:  # noqa: BLE001
+        log(f"{name}: ЦБ недоступен:", e)
+        c = (store or {}).get(name)
+        if c:
+            age = (td - _dt.date.fromisoformat(c["on"])).days
+            if age <= max_age:
+                return [(_dt.date.fromisoformat(d), v) for d, v in c["ser"]], age
+        return None, -1
+
+
 def macro_regime():
-    """Курс доллара ЦБ за 20 торговых дней и ключевая ставка за 90 дней (на вчера), кэш 6 ч. None — данных нет."""
+    """Курс доллара ЦБ за 20 торговых дней и ключевая ставка за 90 дней (на вчера), кэш 6 ч.
+    Курс и ставка хранятся отдельно: при сбое ЦБ курс берётся из копии не старше MACRO_STALE_DAYS дней, ставка — не старше
+    RATE_STALE_DAYS (она меняется только на заседаниях ЦБ). Нет любой из двух частей — режим «неизвестен»."""
     m = _M.get("macro")
     if m and time.time() - m["ts"] < 6 * 3600:
         return m
     import datetime as _dt
     import re as _re
-    try:
-        td = _dt.date.today()
-        x = _cbr("https://www.cbr.ru/scripts/XML_dynamic.asp?date_req1=" + (td - _dt.timedelta(days=80)).strftime("%d/%m/%Y")
-                 + "&date_req2=" + td.strftime("%d/%m/%Y") + "&VAL_NM_RQ=R01235")
-        usd = sorted((_dt.datetime.strptime(d, "%d.%m.%Y").date(), float(v.replace(",", ".")))
-                     for d, v in _re.findall(r'Date="(\d\d\.\d\d\.\d{4})"[^>]*>.*?<Value>([\d,]+)</Value>', x, _re.S))
-        h = _cbr("https://www.cbr.ru/hd_base/KeyRate/?UniDbQuery.Posted=True&UniDbQuery.From=" + (td - _dt.timedelta(days=200)).strftime("%d.%m.%Y")
-                 + "&UniDbQuery.To=" + td.strftime("%d.%m.%Y"))
-        kr = sorted((_dt.datetime.strptime(d, "%d.%m.%Y").date(), float(v.replace(",", ".")))
-                    for d, v in _re.findall(r"<td>(\d\d\.\d\d\.\d{4})</td>\s*<td>([\d,]+)</td>", h))
+    td = _dt.date.today()
 
-        def asof(ser, d):
-            v = [b for a, b in ser if a < d]
-            return v[-1] if v else None
+    def f_usd(day):
+        x = _cbr("https://www.cbr.ru/scripts/XML_dynamic.asp?date_req1=" + (day - _dt.timedelta(days=80)).strftime("%d/%m/%Y")
+                 + "&date_req2=" + day.strftime("%d/%m/%Y") + "&VAL_NM_RQ=R01235")
+        ser = sorted((_dt.datetime.strptime(d, "%d.%m.%Y").date(), float(v.replace(",", ".")))
+                     for d, v in _re.findall(r'Date="(\d\d\.\d\d\.\d{4})"[^>]*>.*?<Value>([\d,]+)</Value>', x, _re.S))
+        if len(ser) < 20:
+            raise ValueError(f"мало дней курса: {len(ser)}")
+        return ser
+
+    def f_rate(day):
+        h = _cbr("https://www.cbr.ru/hd_base/KeyRate/?UniDbQuery.Posted=True&UniDbQuery.From=" + (day - _dt.timedelta(days=200)).strftime("%d.%m.%Y")
+                 + "&UniDbQuery.To=" + day.strftime("%d.%m.%Y"))
+        ser = sorted((_dt.datetime.strptime(d, "%d.%m.%Y").date(), float(v.replace(",", ".")))
+                     for d, v in _re.findall(r"<td>(\d\d\.\d\d\.\d{4})</td>\s*<td>([\d,]+)</td>", h))
+        if len(ser) < 50:
+            raise ValueError(f"мало дней ставки: {len(ser)}")
+        return [z for i, z in enumerate(ser) if i == 0 or z[1] != ser[i - 1][1]] + ser[-1:]   # только точки изменения + последняя
+
+    def asof(ser, d):
+        v = [b for a, b in ser if a < d]
+        return v[-1] if v else None
+    m = dict(ts=time.time())
+    usd, u_age = _macro_part("macro_usd", f_usd, MACRO_STALE_DAYS)
+    kr, r_age = _macro_part("macro_rate", f_rate, RATE_STALE_DAYS)
+    if usd:
         u1, u0 = asof(usd, td), asof(usd, td - _dt.timedelta(days=28))
+        if u1 and u0:
+            m.update(usd=u1, usd20=u1 / u0 - 1, usd_age=u_age, usd_on=str(max(a for a, _ in usd if a < td)))
+            m["rub"] = m["usd20"] > F4_USD_THR
+    if kr:
         r1, r0 = asof(kr, td), asof(kr, td - _dt.timedelta(days=90))
-        if None in (u1, u0, r1, r0):
-            raise ValueError("мало данных ЦБ")
-        usd20, rate90 = u1 / u0 - 1, r1 - r0
-        m = dict(ts=time.time(), usd=u1, usd20=usd20, rate=r1, rate90=rate90, rub=usd20 > F4_USD_THR, hike=rate90 > F4_RATE_THR,
-                 on=str(td))
+        if r1 is not None and r0 is not None:
+            m.update(rate=r1, rate90=r1 - r0, rate_age=r_age)
+            m["hike"] = m["rate90"] > F4_RATE_THR
+    if "rub" in m and "hike" in m:
         m["stress"] = m["rub"] or m["hike"]
-        if _M.get("PW_S") is not None:   # последнее успешное значение — на случай, если ЦБ не ответит
-            _M["PW_S"]["macro_last"] = {k: v for k, v in m.items() if k != "ts"}
-    except Exception as e:  # noqa: BLE001
-        log("макрорежим недоступен:", e)
-        last = (_M.get("PW_S") or {}).get("macro_last")
-        if last and (_dt.date.today() - _dt.date.fromisoformat(last["on"])).days <= MACRO_STALE_DAYS:
-            m = dict(last, ts=time.time() - 5 * 3600, stale=True)   # последние доступные данные, повтор через час
-        else:
-            m = dict(ts=time.time() - 5 * 3600, err=str(e)[:80])
+    if not usd or not kr:
+        m["ts"] = time.time() - 5 * 3600   # повтор через час
     _M["macro"] = m
     return m
 
 
 def macro_line(m=None):
     m = m or macro_regime()
-    if not m or "usd20" not in m:
-        return ("🌡 Макрорежим: <b>неизвестен</b> — данные ЦБ недоступны (сигналы F4 помечаются «неизвестен», а не «спокойный»).")
-    st = ("<b>двойной стресс</b> (рубль и ставка; на дневной истории 2020–26 F4 в среднем +8,7% на сделку против +2,6% у всех)" if m["rub"] and m["hike"]
-          else "<b>стресс</b> (одно из условий; на дневной истории 2020–26 F4 «рубль ИЛИ ставка» +5,6% против +2,6% у всех)" if m["stress"]
-          else "<b>спокойный</b> (на истории F4 вне стресса в среднем около нуля или в минусе)")
-    return (f"🌡 Макрорежим: доллар ЦБ {m['usd']:.2f} ₽, за 20 торговых дней {m['usd20']:+.1%} (порог ослабления рубля +{F4_USD_THR:.0%}) "
-            f"{'✅' if m['rub'] else '—'}; ключевая {m['rate']:g}%, за 90 дней {m['rate90']:+.2f} п.п. {'✅ росла' if m['hike'] else '— не росла'} → {st}. "
-            + (f"Данные ЦБ на {m['on'][8:10]}.{m['on'][5:7]} — последние доступные. " if m.get("stale") else "")
-            + "Пока только пометка (paper-тест, проверки №37–38: на 5-мин 2023–26 эффект не отличим от случайного), размер F4 не меняется.")
+    parts = []
+    if "usd20" in m:
+        parts.append(f"доллар ЦБ {m['usd']:.2f} ₽ (курс на {m['usd_on'][8:10]}.{m['usd_on'][5:7]}), за 20 торговых дней {m['usd20']:+.1%} "
+                     f"(порог ослабления рубля +{F4_USD_THR:.0%}) {'✅' if m['rub'] else '—'}"
+                     + (f" — сохранённая копия ({m['usd_age']} дн.), ЦБ не отвечает" if m.get("usd_age") is not None else ""))
+    else:
+        parts.append("курс ЦБ: нет данных")
+    if "rate90" in m:
+        parts.append(f"ключевая {m['rate']:g}%, за 90 дней {m['rate90']:+.2f} п.п. {'✅ росла' if m['hike'] else '— не росла'}"
+                     + (f" — сохранённая копия ({m['rate_age']} дн.), ЦБ не отвечает" if m.get("rate_age") is not None else ""))
+    else:
+        parts.append("ставка ЦБ: нет данных")
+    if "stress" not in m:
+        st = "<b>неизвестен</b> (не «спокойный»; сигналы F4 помечаются «неизвестен» и в сравнение режимов не идут)"
+    elif m["rub"] and m["hike"]:
+        st = "<b>двойной стресс</b> (рубль и ставка; на дневной истории 2020–26 F4 в среднем +8,7% на сделку против +2,6% у всех)"
+    elif m["stress"]:
+        st = "<b>стресс</b> (одно из условий; на дневной истории 2020–26 F4 «рубль ИЛИ ставка» +5,6% против +2,6% у всех)"
+    else:
+        st = "<b>спокойный</b> (на истории F4 вне стресса в среднем около нуля или в минусе)"
+    return ("🌡 Макрорежим: " + "; ".join(parts) + f" → {st}. "
+            "Пока только пометка (paper-тест, проверки №37–38: на 5-мин 2023–26 эффект не отличим от случайного), размер F4 не меняется.")
 
 
 def _f4_tag(PW, key):
     m = macro_regime()
-    if not m or "usd20" not in m:
+    if "stress" not in m:
         PW.S.setdefault("f4_regime", {})[key] = dict(unknown=True)
         return "\n" + macro_line(m)
-    PW.S.setdefault("f4_regime", {})[key] = dict(stale=bool(m.get("stale")), rub=bool(m["rub"]), hike=bool(m["hike"]), usd20=round(m["usd20"], 4), rate90=round(m["rate90"], 2))
+    PW.S.setdefault("f4_regime", {})[key] = dict(rub=bool(m["rub"]), hike=bool(m["hike"]), usd20=round(m["usd20"], 4), rate90=round(m["rate90"], 2),
+                                                 usd_age=m.get("usd_age"), rate_age=m.get("rate_age"))
     return "\n" + macro_line(m)
 
 
@@ -973,8 +1024,10 @@ def summary_text(PW, day=None):
     if any(fr.values()):
         L.append("F4 по режимам (закрытые с пометкой): " + "; ".join(
             f"{k} {len(v)} сд., средняя {np.mean(v):+.1%}, прибыльных {np.mean([r > 0 for r in v]):.0%}" for k, v in fr.items() if v)
-                 + f". Разбор — когда в стрессе (оба уровня) и в спокойном режиме будет хотя бы по 10 закрытых: "
-                 f"сейчас {len(fr['двойной стресс']) + len(fr['стресс'])} и {len(fr['спокойный'])}; размер F4 до разбора не меняется.")
+                 + f". Разбор — когда в стрессе (любом: стресс + двойной) и в спокойном режиме будет хотя бы по 10 закрытых: "
+                 f"сейчас {len(fr['двойной стресс']) + len(fr['стресс'])} и {len(fr['спокойный'])}; «двойной стресс» — подгруппа для наблюдения, "
+                 "«неизвестен» в сравнение не входит и разбор не задерживает. Разбор — не автоматическое изменение: размер F4 меняется "
+                 "только отдельным решением.")
     # 6. вторая стратегия
     js = _v3()
     if js:
