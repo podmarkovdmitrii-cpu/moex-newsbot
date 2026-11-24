@@ -465,6 +465,11 @@ def send(PW, uid, ticker):
         name = f"{name} ({inst['code']})"
     try:
         r = analyze(ticker, inst=inst)
+        if r.get("error") and inst["kind"] == "share":   # GOLD: у фонда на бирже мало истории — тогда фьючерс с тем же кодом
+            f = TAA.resolve(ticker, prefer_fut=True)
+            if f and f["kind"] == "fut":
+                inst, name = f, f["name"]
+                r = analyze(ticker, inst=inst)
     except Exception as e:  # noqa: BLE001
         PW.say(uid, f"⚠️ Теханализ {html.escape(ticker)} не посчитан: {html.escape(str(e))[:200]}")
         return

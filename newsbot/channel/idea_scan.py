@@ -501,6 +501,10 @@ def _signals(PW, st, day, admin, allowed):
         if x.get("wkd") and not WEEKEND_LIVE and fits:
             fits, why_out = False, ("торги выходного дня — по правилам только наблюдение: на истории стратегия проверялась на будних сессиях, "
                                     "ликвидность в выходные ниже (WEEKEND_LIVE=1 — брать в учёт)")
+        g = event_guard(x["t"])
+        if g["block"] and fits:
+            fits, why_out = False, ("событийная защита — по бумаге за последние " + f"{EVENT_DAYS:g} дн. новость о событии, при котором падение "
+                                    "не «паника», а переоценка (делистинг, остановка торгов, санкции, изъятие, банкротство); такие сигналы стратегия не берёт")
         inlim[key] = bool(fits and allowed)
         em = _emergency(x["t"], 1)
         mv = float(x.get("move") or 0)
@@ -530,6 +534,7 @@ def _signals(PW, st, day, admin, allowed):
                f"({float(x.get('exc') or 0):+.1%} к индексу, {x.get('sig_at', '')[11:16]})\n"
                + ("🗓 <b>Торги выходного дня</b> (ход к закрытию пятницы)\n" if x.get("wkd") else "")
                + f"{INTRA.get(strat, '')}\n\n{body}{stop}{size}{half}\n"
+               + (_guard_text(g) + "\n" if g["hits"] else "") + g["bg"] + "\n"
                f"{_load_line(st)}{halt}\n\n<i>Не является индивидуальной инвестиционной рекомендацией.</i>")
         try:
             c = dict(t=x["t"], side=1, entry=float(entry), stop=float(em_stop) if em else None, target=float(tp) if tp else None, strat=strat)
@@ -691,6 +696,86 @@ def f4_regime_stats(PW, st):
         if r:
             res["неизвестен" if r.get("unknown") else "двойной стресс" if (r["rub"] and r["hike"]) else "стресс" if (r["rub"] or r["hike"]) else "спокойный"].append(float(x["ret"]))
     return res
+
+
+# ---------------- событийная защита и новостной фон по бумаге ----------------
+# Стратегии покупают аномальные движения; падение из-за делистинга, остановки торгов, санкций или национализации — не «паника»,
+# которую выкупают (пример 24.11.2026: обсуждение делистинга ЛСР → падение → сигнал на покупку). Такие события за последние
+# EVENT_DAYS дней (кластеры новостного бота newsbot.json: тикер, тип, число источников, текст) переводят сигнал во «вне лимита».
+# Это защита от редкого крупного ущерба, а не фильтр по «фону»: обычные новости (отчётность, дивиденды, суды) только показываются.
+EVENT_GUARD = os.environ.get("EVENT_GUARD", "1") != "0"
+EVENT_DAYS = float(os.environ.get("EVENT_DAYS", "3"))
+import re as _re_ev   # noqa: E402
+EV_BLOCK = [
+    ("делистинг", _re_ev.compile(r"делистинг|исключ\w*[^.]{0,40}(из|с) (котировальн|списк\w* ценн|торгов)|прекращ\w*[^.]{0,30}торг|"
+                                r"уход\w* с бирж|добровольн\w* делист|выкуп\w*[^.]{0,30}(у миноритари|акций у акционер)|принудительн\w* выкуп", _re_ev.I)),
+    ("остановка торгов", _re_ev.compile(r"приостанов\w*[^.]{0,30}торг|торг\w*[^.]{0,30}приостановлен|остановк\w* торгов|"
+                                        r"(дискретн\w* аукцион)", _re_ev.I)),
+    ("санкции против компании", _re_ev.compile(r"\bsdn\b|\bofac\b|(вв[её]л|введен|включ\w*|внес\w*|попал\w*)[^.]{0,40}(санкц|sdn)", _re_ev.I)),
+    ("национализация / изъятие", _re_ev.compile(r"национализ|изъяти\w*|в доход государства|временн\w* управлени|обращ\w* в доход", _re_ev.I)),
+    ("банкротство", _re_ev.compile(r"банкрот|дефолт|техническ\w* дефолт|реструктуризац\w* долг", _re_ev.I)),
+]
+EV_TY_RU = {"div_rec": "дивиденды", "div_cut": "отказ от дивидендов", "buyback": "обратный выкуп", "spo": "допэмиссия", "results_up": "рост прибыли",
+            "results_down": "снижение прибыли", "guidance_up": "прогноз повышен", "guidance_down": "прогноз понижен", "analyst_up": "аналитики повысили",
+            "analyst_down": "аналитики понизили", "sanctions": "санкции", "legal": "суды/обыски/штрафы", "tax": "налоги", "mna": "сделка M&A",
+            "delist_redom": "делистинг/редомициляция", "management": "смена руководства", "production_up": "рост добычи/продаж",
+            "production_down": "снижение добычи/продаж", "tone+": "позитив", "tone-": "негатив"}
+
+
+def _news_clusters(t, days=EVENT_DAYS):
+    base = os.environ.get("NEWS_STATE") or os.environ.get("STATE_DIR") or os.path.join(HERE, "..", "state")
+    try:
+        S = json.load(open(os.path.join(base, "newsbot.json"), encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None   # нет состояния новостного бота — «нет данных», а не «новостей нет»
+    now = time.time()
+    out = []
+    for c in (S.get("cl") or {}).values():
+        ts = c.get("ts") or 0
+        ts = ts / 1000 if ts > 1e11 else ts
+        if now - ts > days * 86400:
+            continue
+        tk, ty = ((c.get("key") or "|") + "|").split("|")[:2]
+        if tk != t and t not in (c.get("tks") or []):
+            continue
+        txt = " ".join([(c.get("first") or {}).get("tx") or ""] + [v.get("tx") or "" for v in (c.get("srcs") or {}).values()])
+        out.append(dict(ty=ty, ts=ts, n=max(1, len(c.get("srcs") or {})), official=bool(c.get("official")), rumor=bool(c.get("rumorOnly")),
+                        tx=txt, link=(c.get("first") or {}).get("link")))
+    out.sort(key=lambda z: -z["ts"])
+    return out
+
+
+def event_guard(t):
+    """→ dict(block, hits[(что, кластер)], bg — строка новостного фона, known — есть ли данные новостного бота)."""
+    cl = _news_clusters(t)
+    if cl is None:
+        return dict(block=False, hits=[], known=False, bg="📰 Новостной фон: нет данных новостного бота (это не «новостей нет»).")
+    hits = []
+    for c in cl:
+        for nm, rx in EV_BLOCK:
+            if rx.search(c["tx"]) or (nm == "делистинг" and c["ty"] == "delist_redom" and not _re_ev.search(r"редомицил|переезд|конвертац", c["tx"], _re_ev.I)):
+                hits.append((nm, c))
+                break
+    if not cl:
+        bg = f"📰 Новостной фон за {EVENT_DAYS:g} дн.: новостей по бумаге нет."
+    else:
+        tys = {}
+        for c in cl:
+            tys[EV_TY_RU.get(c["ty"], c["ty"] or "прочее")] = tys.get(EV_TY_RU.get(c["ty"], c["ty"] or "прочее"), 0) + 1
+        conf = sum(1 for c in cl if c["n"] >= 2 or c["official"])
+        bg = (f"📰 Новостной фон за {EVENT_DAYS:g} дн.: {len(cl)} сюжет(ов) — " + ", ".join(f"{k} {v}" for k, v in sorted(tys.items(), key=lambda z: -z[1])[:4])
+              + f"; подтверждено ≥2 источниками или официально: {conf}. Справочно — на вход не влияет.")
+    return dict(block=bool(hits) and EVENT_GUARD, hits=hits, known=True, bg=bg)
+
+
+def _guard_text(g):
+    out = []
+    for nm, c in g["hits"][:2]:
+        when = time.strftime("%d.%m %H:%M", time.gmtime(c["ts"] + MSK))
+        conf = ("официально" if c["official"] else f"источников: {c['n']}") + (", не подтверждено" if c["rumor"] and c["n"] < 2 and not c["official"] else "")
+        snip = html.escape(_re_ev.sub(r"\s+", " ", c["tx"])[:160])
+        out.append(f"⛔ <b>{nm}</b> ({when}, {conf}): «{snip}…»" + (f" <a href=\"{html.escape(c['link'])}\">источник</a>" if c.get("link") else ""))
+    return "\n".join(out)
 
 
 def _stop_of(PW, x):
@@ -1028,6 +1113,19 @@ def summary_text(PW, day=None):
                  f"сейчас {len(fr['двойной стресс']) + len(fr['стресс'])} и {len(fr['спокойный'])}; «двойной стресс» — подгруппа для наблюдения, "
                  "«неизвестен» в сравнение не входит и разбор не задерживает. Разбор — не автоматическое изменение: размер F4 меняется "
                  "только отдельным решением.")
+    # 5б. события по открытым позициям (делистинг, остановка торгов, санкции …) — повод для решения, а не автоматический выход
+    try:
+        op_ev, _ = book(st)
+        warn = []
+        for z in op_ev:
+            g = event_guard(z["t"])
+            if g["hits"]:
+                warn.append(f"• {z.get('strat', 'S1')} {html.escape(PW.tlabel(z['t']))}:\n" + _guard_text(g))
+        if warn:
+            L.append("\n<b>5б. События по открытым позициям</b> (правило выхода стратегии прежнее — тейк или срок; решение по позиции — ваше, "
+                     "убрать из учёта: /remove)\n" + "\n".join(warn))
+    except Exception as e:  # noqa: BLE001
+        log("события по позициям:", e)
     # 6. вторая стратегия
     js = _v3()
     if js:

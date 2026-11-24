@@ -152,7 +152,7 @@ def fut_list_texts():
 
 
 # ---------------- что за инструмент ----------------
-def resolve(arg):
+def resolve(arg, prefer_fut=False):
     """→ dict(kind=share|index|fut, code, name, unit, secid?) или None."""
     a = (arg or "").strip()
     au = a.upper()
@@ -164,7 +164,7 @@ def resolve(arg):
         act = C.active_shares()
     except Exception:  # noqa: BLE001
         act = None
-    if act and au in act:
+    if act and au in act and not prefer_fut:
         return dict(kind="share", code=au, unit="₽")
     try:
         cons, assets = fut_all()
