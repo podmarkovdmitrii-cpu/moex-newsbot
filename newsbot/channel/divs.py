@@ -88,6 +88,22 @@ def ex_dates(day=None):
     return out
 
 
+def ex_between(t, d0, d1):
+    """Отсечки бумаги t с датой в (d0; d1] — для открытых позиций: дивиденд в результат сделки не входит (как в проверках №27–31)."""
+    out = [(d, a) for d, a in DIVS.get(t, []) if d0 < d <= d1]
+    try:
+        out += [(r["reg"], r.get("amount")) for r in upcoming(60) if r["t"] == t and d0 < r["reg"] <= d1 and all(r["reg"] != d for d, _ in out)]
+    except Exception:  # noqa: BLE001
+        pass
+    return sorted(out)
+
+
+def coverage(tickers):
+    """Сколько бумаг из списка есть в истории отсечек divhist.json — остальные проверяются только по объявленным выплатам."""
+    tk = set(tickers)
+    return len(tk & set(DIVS)), len(tk)
+
+
 def _ex_index(B, d):
     """Индекс бара отсечки (первая сессия без права на дивиденд). В divhist.json дата — первый будний день без дивиденда;
     с появлением торгов выходного дня гэп может прийти раньше, в субботу. Берём из двух кандидатов бар с самым глубоким гэпом."""

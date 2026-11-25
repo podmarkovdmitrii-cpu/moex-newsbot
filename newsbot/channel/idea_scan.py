@@ -544,7 +544,8 @@ def _load_line(st):
 
 
 def _trade_key(x):
-    return f"{x.get('strat', 'S1')}:{x['t']}:{x['day']}"
+    # после смены тикера (paper_anom: t_old) ключ сделки прежний — решения «в лимите», убранные сделки и размеры не теряются
+    return f"{x.get('strat', 'S1')}:{x.get('t_old') or x['t']}:{x['day']}"
 
 
 def _in(x, inlim=None):
@@ -1230,6 +1231,29 @@ def summary_text(PW, day=None):
                      "убрать из учёта: /remove)\n" + "\n".join(warn))
     except Exception as e:  # noqa: BLE001
         log("события по позициям:", e)
+    # 5в. аудит партии 2: позиции, которым нужна ручная проверка — срок вышел без торгов, сплит, отсечка дивидендов
+    try:
+        import divs as _dv
+        op_all, _ = book(st)
+        need = []
+        for z in op_all:
+            nm = f"{z.get('strat', 'S1')} {html.escape(PW.tlabel(z['t']))}"
+            if z.get("overdue_since"):
+                need.append(f"⏱ {nm}: срок выхода {z['last_day']} прошёл, торгов нет с {z['overdue_since']} — позиция не закрыта; "
+                            "решение вручную (/remove: закрыть по последней цене или убрать из учёта) или ждать возобновления торгов")
+            for sp in z.get("splits") or []:
+                need.append(f"✂️ {nm}: {sp['day']} цена изменилась скачком ×{sp['k']:g} — похоже на сплит/консолидацию, цены позиции "
+                            "пересчитаны; сверьте с брокером")
+            for d, a in _dv.ex_between(z["t"], str(z.get("entry_at") or z["day"])[:10], day):
+                need.append(f"💸 {nm}: отсечка {d[8:10]}.{d[5:7]}" + (f", дивиденд {a:g} ₽ на акцию" if a else "")
+                            + " — в результат сделки не входит (как в проверках), гэп отсечки — в цене")
+        if need:
+            L.append("\n<b>5в. Требует внимания</b>\n" + "\n".join(need))
+        cov, n_ = _dv.coverage({z["t"] for z in op_all} | {x["t"] for x in trades if x.get("day") == day})
+        if n_:
+            L.append(f"История отсечек (divhist): есть по {cov} из {n_} бумаг дня и открытых позиций; остальные — только по объявленным выплатам.")
+    except Exception as e:  # noqa: BLE001
+        log("требует внимания:", e)
     # 6. вторая стратегия
     js = _v3()
     if js:
@@ -1584,6 +1608,9 @@ def on_remove(PW, uid, data):
     txt = f"🗑 <b>{html.escape(PW.tlabel(tk))}</b> убрана из портфеля бота — в учёте и загрузке больше не участвует."
     if mode == "c":
         px = _px_now(tk)
+        if not px and not key.startswith("v3:"):   # аудит B2-1: торгов нет (остановка, делистинг) — по последней известной цене, с пометкой
+            px = ((_paper() or {}).get("last_px") or {}).get(tk)
+            rec["stale_px"] = bool(px)
         if not px:
             return "Нет текущей цены — попробуйте позже"
         rec["px"] = px
@@ -1600,7 +1627,8 @@ def on_remove(PW, uid, data):
         if entry:
             ret = (px / abs(entry) - 1) * (1 if entry > 0 else -1) - 0.001
             rec["ret"] = round(ret, 5)
-            txt = (f"✋ <b>{html.escape(PW.tlabel(tk))}</b> закрыта вручную по {_fmt(px)}: {ret:+.2%} по цене, "
+            txt = (f"✋ <b>{html.escape(PW.tlabel(tk))}</b> закрыта вручную по {_fmt(px)}"
+                   + (" (последняя известная цена — торгов нет)" if rec.get("stale_px") else "") + f": {ret:+.2%} по цене, "
                    f"{_rub(w * ret * _cap(PW))} в капитале. Дальше сделка в портфеле бота не ведётся.")
     if key.startswith("v3:"):
         PW.S.setdefault("v3_seen", {})[f"close:{key[3:]}"] = time.time()

@@ -1,0 +1,70 @@
+# -*- coding: utf-8 -*-
+"""Регрессионные тесты аудита, партия 2 (события на открытой позиции), без сети:
+B2-1 срок вышел без торгов → позиция не закрывается «в никуда», помечается; после возобновления торгов — закрытие по сроку;
+B2-2 сплит/консолидация → цены позиции пересчитываются, ложного убытка нет; B2-3 смена тикера → учёт продолжается, ключ сделки прежний;
+B2-4 отсечка на открытой позиции видна (дивиденд в результат не входит, как в проверках)."""
+import datetime as dt
+import os
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+os.environ["STATE_DIR"] = os.environ["NEWS_STATE"] = tempfile.mkdtemp()
+import common  # noqa: E402
+
+common.STATE = os.environ["STATE_DIR"]
+import divs  # noqa: E402
+import idea_scan as I  # noqa: E402
+import paper_anom as PA  # noqa: E402
+
+PA._filters = lambda: {}
+divs.upcoming = lambda days=60: []
+
+
+def run(st, md, now):
+    common.save_json(PA.FILE, st)
+    PA.scan(md, 0.0, now, {}, {})
+    return common.load_json(PA.FILE, {})
+
+
+def tr(t, **k):
+    return dict(dict(strat="F4", t=t, day="2026-11-02", sig_at="2026-11-02T11:00", entry=100.0, entry_at="2026-11-02T11:00", tp=150.0,
+                     last_day="2026-11-20", tier=1, move=0.05, p0=100.0, prev=105.0), **k)
+
+
+# ---- B2-1: срок 20.11, торгов нет 23.11 и 24.11 → не закрыта, помечена; 25.11 торги есть → закрыта по сроку с пометкой
+st = {"orders": [], "trades": [tr("HALT")], "seen": {}, "last_px": {"HALT": 90.0}}
+st = run(st, [], dt.datetime(2026, 11, 23, 11, 0))
+x = st["trades"][0]
+assert x.get("exit") is None and x.get("overdue_since") == "2026-11-23", x
+st = run(st, [], dt.datetime(2026, 11, 24, 11, 0))
+assert st["trades"][0]["overdue_since"] == "2026-11-23"
+st = run(st, [dict(SECID="HALT", LAST=80.0, PREVPRICE=88.0, LASTTOPREVPRICE=-9.1)], dt.datetime(2026, 11, 25, 11, 0))
+x = st["trades"][0]
+assert x["exit"] == 88.0 and x["exit_why"] == "срок (после остановки торгов)", x
+print("B2-1 OK: срок без торгов — пометка, а не закрытие «в никуда»; после возобновления — закрытие по сроку")
+
+# ---- B2-2: сплит 1:10 — последняя цена 300 → 30: цены позиции ÷10, результат не −90%
+st = {"orders": [], "trades": [tr("SPLT", entry=280.0, tp=330.0, last_day="2026-12-20")], "seen": {}, "last_px": {"SPLT": 300.0}}
+st = run(st, [dict(SECID="SPLT", LAST=30.5, PREVPRICE=30.0, LASTTOPREVPRICE=1.7)], dt.datetime(2026, 11, 25, 11, 0))
+x = st["trades"][0]
+assert abs(x["entry"] - 28.0) < 1e-9 and abs(x["tp"] - 33.0) < 1e-9 and x["splits"][0]["k"] == 0.1, x
+assert x.get("exit") is None
+# обычное падение −30% — не сплит
+st = {"orders": [], "trades": [tr("DROP", last_day="2026-12-20")], "seen": {}, "last_px": {"DROP": 100.0}}
+st = run(st, [dict(SECID="DROP", LAST=70.0, PREVPRICE=100.0, LASTTOPREVPRICE=-30.0)], dt.datetime(2026, 11, 25, 11, 0))
+assert st["trades"][0]["entry"] == 100.0 and not st["trades"][0].get("splits")
+print("B2-2 OK: сплит пересчитывает цены позиции, обычное падение — нет")
+
+# ---- B2-3: смена тикера YNDX → YDEX: позиция под новым тикером, ключ сделки прежний (решение «в лимите» не теряется)
+st = {"orders": [], "trades": [tr("YNDX", last_day="2026-12-20")], "seen": {}, "last_px": {}}
+st = run(st, [dict(SECID="YDEX", LAST=101.0, PREVPRICE=100.0, LASTTOPREVPRICE=1.0)], dt.datetime(2026, 11, 25, 11, 0))
+x = st["trades"][0]
+assert x["t"] == "YDEX" and x["t_old"] == "YNDX", x
+assert I._trade_key(x) == "F4:YNDX:2026-11-02"
+print("B2-3 OK: смена тикера — учёт под новым тикером, ключ сделки прежний")
+
+# ---- B2-4: отсечка между входом и сегодня видна (SBER, реестр 20.07.2026 в divhist.json)
+assert divs.ex_between("SBER", "2026-07-10", "2026-07-25") and not divs.ex_between("SBER", "2026-07-21", "2026-07-25")
+print("B2-4 OK: отсечка на открытой позиции находится")

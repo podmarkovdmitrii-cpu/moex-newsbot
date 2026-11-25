@@ -115,15 +115,49 @@ def scan(md, ixc, now, feats, ctx=None):
             r["PREVPRICE"] = float(r["LAST"]) / (1 + float(r["LASTTOPREVPRICE"]) / 100)
         px[r["SECID"]] = r
     changed = False
+    # 0а) аудит B2-3: смена тикера на открытой позиции (переименование, редомициляция/конвертация с новым тикером) — словарь
+    #     переименований новостного бота nlp.js; позиция продолжает учитываться под новым тикером, цены не меняются
+    ren = _renames()
+    for x in st["trades"] + st["orders"]:
+        if not x.get("exit") and x["t"] not in px and ren.get(x["t"]) in px:
+            x["t_old"], x["t"] = x["t"], ren[x["t"]]
+            changed = True
+            log(f"виртуальный счёт: {x['t_old']} → {x['t']} (смена тикера), позиция учитывается под новым тикером")
+    # 0) аудит B2-2: сплит/консолидация на открытой позиции или заявке — цена к последней известной (или к цене входа) скачком
+    #    больше чем в 3,5 раза (как common.adjust_splits в исследованиях) → цены позиции пересчитываются, сделка помечается
+    lpx = st.get("last_px") or {}
+    for x in st["trades"] + st["orders"]:
+        if x.get("exit") or x["t"] not in px:
+            continue
+        ref = lpx.get(x["t"]) or x.get("entry") or x.get("limit")
+        if not ref:
+            continue
+        rr = float(px[x["t"]]["LAST"]) / float(ref)
+        if rr > 3.5 or rr < 1 / 3.5:
+            k = round(rr) if rr > 1 else 1 / round(1 / rr)
+            for f in ("entry", "tp", "limit", "p0", "prev"):
+                if x.get(f):
+                    x[f] = round(float(x[f]) * k, 6)
+            x.setdefault("splits", []).append(dict(day=today, k=k))
+            lpx[x["t"]] = float(px[x["t"]]["LAST"])
+            changed = True
+            log(f"виртуальный счёт: {x['t']} — похоже на сплит/консолидацию (×{k:g} к последней цене), цены позиции пересчитаны")
+    st["last_px"] = lpx
     # 1) закрыть позиции, у которых истёк срок: закрытие последнего дня = PREVPRICE в первый торговый день после него
     for tr in st["trades"]:
         if tr.get("exit") or not tr.get("entry"):
             continue
         r = px.get(tr["t"])
         if not r:
+            # аудит B2-1: срок вышел, а торгов нет (остановка, делистинг, смена тикера) — не закрываем «в никуда», а отмечаем,
+            # с какого дня позиция ждёт решения; сводка показывает её до решения (/remove) или до возобновления торгов
+            if today > tr["last_day"] and not tr.get("overdue_since"):
+                tr["overdue_since"] = today
+                changed = True
+                log(f"виртуальный счёт: {tr['t']} — срок выхода {tr['last_day']} прошёл, торгов нет; позиция ждёт решения")
             continue
         if today > tr["last_day"] and r.get("PREVPRICE"):
-            _close(tr, float(r["PREVPRICE"]), "срок", tr["last_day"])
+            _close(tr, float(r["PREVPRICE"]), "срок" if not tr.get("overdue_since") else "срок (после остановки торгов)", tr["last_day"])
             changed = True
     # 2) тейк по текущей цене (позиции, открытые не в этот же проход)
     for tr in st["trades"]:
@@ -222,6 +256,17 @@ def scan(md, ixc, now, feats, ctx=None):
     if changed:
         save_json(FILE, st)
     return st
+
+
+def _renames():
+    """Переименования тикеров из словаря новостного бота (nlp.js: const RENAME = {...}) — один список на оба бота."""
+    try:
+        import re as _re
+        txt = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nlp.js"), encoding="utf-8").read()
+        m = _re.search(r"const RENAME = (\{[^}]*\});", txt)
+        return {k: v for k, v in _re.findall(r"(\w+): '(\w+)'", m.group(1))} if m else {}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _close(tr, price, why, day):
