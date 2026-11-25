@@ -51,11 +51,22 @@ st = run(st, [dict(SECID="SPLT", LAST=30.5, PREVPRICE=30.0, LASTTOPREVPRICE=1.7)
 x = st["trades"][0]
 assert abs(x["entry"] - 28.0) < 1e-9 and abs(x["tp"] - 33.0) < 1e-9 and x["splits"][0]["k"] == 0.1, x
 assert x.get("exit") is None
+assert x["splits"][0]["auto"] is True and x["splits"][0]["kind"] == "сплит"
+# консолидация 10:1 — цена ×10: цены позиции ×10
+st = {"orders": [], "trades": [tr("CONS", entry=10.0, tp=12.0, last_day="2026-12-20")], "seen": {}, "last_px": {"CONS": 11.0}}
+st = run(st, [dict(SECID="CONS", LAST=111.0, PREVPRICE=110.0, LASTTOPREVPRICE=0.9)], dt.datetime(2026, 11, 25, 11, 0))
+x = st["trades"][0]
+assert abs(x["entry"] - 100.0) < 1e-9 and x["splits"][0]["kind"] == "консолидация" and x["splits"][0]["auto"], x
+# гэп +250% после остановки (коэффициент 3,6 — не «круглый») → НЕ пересчитано, требует решения
+st = {"orders": [], "trades": [tr("GAP", last_day="2026-12-20")], "seen": {}, "last_px": {"GAP": 100.0}}
+st = run(st, [dict(SECID="GAP", LAST=360.0, PREVPRICE=100.0, LASTTOPREVPRICE=260.0)], dt.datetime(2026, 11, 25, 11, 0))
+x = st["trades"][0]
+assert x["entry"] == 100.0 and x["splits"][0]["auto"] is False, x
 # обычное падение −30% — не сплит
 st = {"orders": [], "trades": [tr("DROP", last_day="2026-12-20")], "seen": {}, "last_px": {"DROP": 100.0}}
 st = run(st, [dict(SECID="DROP", LAST=70.0, PREVPRICE=100.0, LASTTOPREVPRICE=-30.0)], dt.datetime(2026, 11, 25, 11, 0))
 assert st["trades"][0]["entry"] == 100.0 and not st["trades"][0].get("splits")
-print("B2-2 OK: сплит пересчитывает цены позиции, обычное падение — нет")
+print("B2-2 OK: сплит и консолидация пересчитываются, гэп с некруглым коэффициентом — нет (требует решения), обычное падение — нет")
 
 # ---- B2-3: смена тикера YNDX → YDEX: позиция под новым тикером, ключ сделки прежний (решение «в лимите» не теряется)
 st = {"orders": [], "trades": [tr("YNDX", last_day="2026-12-20")], "seen": {}, "last_px": {}}

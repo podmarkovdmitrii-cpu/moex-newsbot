@@ -77,7 +77,8 @@ def _apply_removed(st):
         if not r:
             out.append(x)
         elif r.get("mode") == "close" and x.get("entry"):
-            out.append(dict(x, exit=r["px"], exit_day=r["day"], exit_why="закрыта вручную", manual=True,
+            out.append(dict(x, exit=r["px"], exit_day=r["day"], manual=True, stale_px=bool(r.get("stale_px")),
+                            exit_why="закрыта вручную" + (" по последней известной (нерыночной) цене" if r.get("stale_px") else ""),
                             ret=float(r["px"]) / float(x["entry"]) - 1 - 0.001))
     st["trades"] = out
     return st
@@ -119,6 +120,11 @@ def _build_sizes(st, inlim=None):
         cash += sizes.get(_trade_key(c), WEIGHT.get(c.get("strat", "S1"), 0.1)) * float(c["ret"])
     _M["sizes"], _M["realized"] = sizes, cash
     return sizes
+
+
+def sizing_base(x):
+    """«initial» — сделка до SIZING_SINCE (размер от начального капитала), «current» — от текущего капитала по закрытым."""
+    return "initial" if (x.get("day") or "9") < SIZING_SINCE else "current"
 
 
 def _sz(x):
@@ -1241,12 +1247,22 @@ def summary_text(PW, day=None):
             if z.get("overdue_since"):
                 need.append(f"⏱ {nm}: срок выхода {z['last_day']} прошёл, торгов нет с {z['overdue_since']} — позиция не закрыта; "
                             "решение вручную (/remove: закрыть по последней цене или убрать из учёта) или ждать возобновления торгов")
+            if z.get("t_old"):
+                need.append(f"🔁 {nm}: бывший тикер {html.escape(z['t_old'])} — позиция та же, учёт продолжается под новым тикером")
             for sp in z.get("splits") or []:
-                need.append(f"✂️ {nm}: {sp['day']} цена изменилась скачком ×{sp['k']:g} — похоже на сплит/консолидацию, цены позиции "
-                            "пересчитаны; сверьте с брокером")
+                need.append(f"✂️ {nm}: {sp['day']} {sp.get('kind', 'сплит')} ×{sp['k']:g} — " + (
+                    "пересчитано автоматически, проверьте у брокера" if sp.get("auto", True)
+                    else "коэффициент не похож на сплит (возможен гэп после остановки) — НЕ пересчитано, требует решения"))
+            d_px = (st.get("px_t") or {}).get(z["t"])
+            if not z.get("overdue_since") and d_px and d_px < _prev_wd_str(_prev_wd_str(_prev_wd_str(day))):
+                need.append(f"⚠️ {nm}: торгов нет с {d_px[8:10]}.{d_px[5:7]} (остановка, делистинг или смена тикера, которой нет в словаре) — проверьте")
+            if z.get("overdue_since") and any(nm_ == "делистинг" for nm_, _c in event_guard(z["t"])["hits"]):
+                need.append(f"🏁 {nm}: по бумаге новости о делистинге — возможен выкуп по фиксированной цене; закрывайте по цене выкупа "
+                            "у брокера, а не по последней биржевой")
             for d, a in _dv.ex_between(z["t"], str(z.get("entry_at") or z["day"])[:10], day):
+                extra = f" — на реальном счёте ≈ {_rub(a / float(z['entry']) * _sz(z) * C)} сверх результата" if a and z.get("entry") else ""
                 need.append(f"💸 {nm}: отсечка {d[8:10]}.{d[5:7]}" + (f", дивиденд {a:g} ₽ на акцию" if a else "")
-                            + " — в результат сделки не входит (как в проверках), гэп отсечки — в цене")
+                            + " — в результат виртуального счёта не входит (как в проверках)" + extra)
         if need:
             L.append("\n<b>5в. Требует внимания</b>\n" + "\n".join(need))
         cov, n_ = _dv.coverage({z["t"] for z in op_all} | {x["t"] for x in trades if x.get("day") == day})

@@ -133,15 +133,20 @@ def scan(md, ixc, now, feats, ctx=None):
         if not ref:
             continue
         rr = float(px[x["t"]]["LAST"]) / float(ref)
-        if rr > 3.5 or rr < 1 / 3.5:
-            k = round(rr) if rr > 1 else 1 / round(1 / rr)
-            for f in ("entry", "tp", "limit", "p0", "prev"):
-                if x.get(f):
-                    x[f] = round(float(x[f]) * k, 6)
-            x.setdefault("splits", []).append(dict(day=today, k=k))
-            lpx[x["t"]] = float(px[x["t"]]["LAST"])
+        if (rr > 3.5 or rr < 1 / 3.5) and not any(j.get("day") == today for j in x.get("splits") or []):
+            n = round(rr) if rr > 1 else round(1 / rr)          # консолидация (рост цены) — ×n, сплит (падение) — ÷n
+            q = rr if rr > 1 else 1 / rr
+            auto = n in SPLIT_RATIOS and abs(q - n) / n <= 0.05  # «круглый» коэффициент (±5% на ход за день) — сплит; иначе гэп, решать вручную
+            k = (n if rr > 1 else 1 / n) if auto else rr
+            if auto:
+                for f in ("entry", "tp", "limit", "p0", "prev"):
+                    if x.get(f):
+                        x[f] = round(float(x[f]) * k, 6)
+            x.setdefault("splits", []).append(dict(day=today, k=round(k, 6), auto=auto, kind="консолидация" if rr > 1 else "сплит"))
+            lpx[x["t"]] = float(px[x["t"]]["LAST"])   # дальше сравниваем с новой ценой — пометка не повторяется каждый день
             changed = True
-            log(f"виртуальный счёт: {x['t']} — похоже на сплит/консолидацию (×{k:g} к последней цене), цены позиции пересчитаны")
+            log(f"виртуальный счёт: {x['t']} — скачок цены ×{rr:.2f} к последней: " + ("сплит/консолидация, цены позиции пересчитаны" if auto
+                else "коэффициент не «круглый» — не пересчитано, требует решения"))
     st["last_px"] = lpx
     # 1) закрыть позиции, у которых истёк срок: закрытие последнего дня = PREVPRICE в первый торговый день после него
     for tr in st["trades"]:
@@ -256,6 +261,9 @@ def scan(md, ixc, now, feats, ctx=None):
     if changed:
         save_json(FILE, st)
     return st
+
+
+SPLIT_RATIOS = {2, 3, 4, 5, 10, 20, 25, 50, 100, 200, 500, 1000}
 
 
 def _renames():
