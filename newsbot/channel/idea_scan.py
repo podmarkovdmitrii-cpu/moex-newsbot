@@ -122,9 +122,28 @@ def _build_sizes(st, inlim=None):
     return sizes
 
 
+PER_TICKER_SINCE = os.environ.get("PER_TICKER_SINCE", "2026-11-25")   # аудит B1-1: с этой даты — одна позиция на бумагу
+RULE_EXTRA = []   # будущие смены правил: ("ГГГГ-ММ-ДД", "ключ", "значение") — добавлять сюда, не переписывая прошлые
+
+
+def rule_table():
+    """Таблица смен правил портфеля: (дата начала, правило, значение). Пустая дата — с начала счёта."""
+    return [("", "sizing", "initial"), ("", "per_ticker", "any"),
+            (SIZING_SINCE, "sizing", "current"), (PER_TICKER_SINCE, "per_ticker", "one")] + list(RULE_EXTRA)
+
+
+def rules_at(day):
+    """Какие правила действовали в день входа `day` (последняя смена с датой ≤ day по каждому правилу)."""
+    r = {}
+    for d, k, v in sorted(rule_table(), key=lambda z: z[0]):
+        if (day or "9") >= d:
+            r[k] = v
+    return r
+
+
 def sizing_base(x):
-    """«initial» — сделка до SIZING_SINCE (размер от начального капитала), «current» — от текущего капитала по закрытым."""
-    return "initial" if (x.get("day") or "9") < SIZING_SINCE else "current"
+    """«initial» — размер от начального капитала (до SIZING_SINCE), «current» — от текущего капитала по закрытым."""
+    return rules_at(x.get("day") or "9")["sizing"]
 
 
 def _sz(x):

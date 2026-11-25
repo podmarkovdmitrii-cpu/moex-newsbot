@@ -129,3 +129,14 @@ sz = I._build_sizes(st3, {})
 assert abs(sz["F4:TRN:2026-01-25"] - 0.05) < 1e-12, sz             # размер переходной сделки — по старому правилу, не задним числом
 assert abs(sz["F4:AFT:2026-02-05"] - 0.10) < 1e-12, sz             # её результат (+0,05 × 20 = +1) вошёл в базу новой сделки
 print("B1-4 OK: переходная сделка — размер не пересчитан, результат вошёл в базу")
+
+
+# ---- таблица смен правил: каждая сделка помечается правилами дня входа; новая смена не переписывает старые
+I.SIZING_SINCE, I.PER_TICKER_SINCE = "2026-11-25", "2026-11-25"
+assert I.rules_at("2026-11-20") == {"sizing": "initial", "per_ticker": "any"}
+assert I.rules_at("2026-11-25") == {"sizing": "current", "per_ticker": "one"}
+I.RULE_EXTRA = [("2026-12-10", "per_ticker", "s1f2")]
+assert I.rules_at("2026-12-01")["per_ticker"] == "one" and I.rules_at("2026-12-10")["per_ticker"] == "s1f2"
+assert I.sizing_base({"day": "2026-11-24"}) == "initial" and I.sizing_base({"day": "2026-12-11"}) == "current"
+I.RULE_EXTRA = []
+print("таблица правил: ok")
