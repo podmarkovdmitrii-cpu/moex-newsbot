@@ -75,10 +75,18 @@ def main():
     H = tqbr_history()
     today = dt.date.today()
     cut = (today - dt.timedelta(days=45)).isoformat()
-    gone = sorted(s for s, (a, b, _) in H.items() if b and (s not in cur or b < cut) and b >= "2008-01-01")
-    log(f"история TQBR: бумаг {len(H)}, сейчас в списке {len(cur)}; ушедших (последние торги 2008…{cut} или нет в текущем списке): {len(gone)}")
+    import re
+    import linkcheck as LC
+    fund = re.compile(r"ETF|БПИФ|ПИФ|фонд", re.I)
+    drre = re.compile(r"гдр|адр|\bДР\b|GDR|ADR", re.I)
+    skipped_fund = sorted(s for s, (a, b, nm) in H.items() if fund.search(nm or ""))
+    renamed = sorted(s for s in H if s in LC.RENAME)
+    gone = sorted(s for s, (a, b, nm) in H.items() if b and "2008-01-01" <= b < cut and s not in LC.RENAME and not fund.search(nm or ""))
+    dr = {s for s in gone if drre.search(H[s][2] or "")}
+    log(f"история TQBR: бумаг {len(H)}, сейчас в списке {len(cur)}; фонды (не акции) {len(skipped_fund)}; переименованные (уже склеены) {len(renamed)}: {', '.join(renamed)}")
+    log(f"ушедших (последние торги 2008…{cut}): {len(gone)}, из них депозитарные расписки {len(dr)} (часто редомициляция, а не потеря): {', '.join(sorted(dr))}")
     log("  ушедшие по году последних торгов: " + ", ".join(f"{y}: {n}" for y, n in sorted(pd.Series([H[s][1][:4] for s in gone]).value_counts().items())))
-    rep["история"] = dict(all=len(H), current=len(cur), gone=len(gone), by_year=pd.Series([H[s][1][:4] for s in gone]).value_counts().sort_index().to_dict())
+    rep["история"] = dict(all=len(H), current=len(cur), funds=len(skipped_fund), dr=sorted(dr), gone=len(gone), by_year=pd.Series([H[s][1][:4] for s in gone]).value_counts().sort_index().to_dict())
     # полный состав: подменяем universe; часовые — только по текущим (чтобы не менять признаки выживших)
     orig_u, orig_ls = TR.universe, TR.load_series
     TR.universe = lambda: list(cur) + [s for s in gone if s not in cur]
@@ -115,9 +123,10 @@ def main():
     for strat in ("S1", "F2", "F4"):
         a = [z["ret"] for z in s_ok if z["strat"] == strat]
         b = [z["ret"] for z in g_ok + g_drop if z["strat"] == strat]
+        bn = [z["ret"] for z in g_ok + g_drop if z["strat"] == strat and z["t"] not in dr]
         c = [z["ret"] for z in s_ok + s_drop + g_ok + g_drop if z["strat"] == strat]
         log(f"  {strat}: выжившие {len(a)} сд., средняя {np.mean(a):+.2%}; по ушедшим {len(b)} сд." + (f", средняя {np.mean(b):+.2%}, медиана {np.median(b):+.2%}, худшая {min(b):+.1%}" if b else "")
-            + f"; всё вместе (с обвалами) {np.mean(c):+.2%} (сдвиг {np.mean(c) - np.mean(a):+.2%})")
+            + (f" (без расписок {len(bn)} сд., средняя {np.mean(bn):+.2%})" if bn else "") + f"; всё вместе (с обвалами) {np.mean(c):+.2%} (сдвиг {np.mean(c) - np.mean(a):+.2%})")
         rep[strat] = dict(n_surv=len(a), mean_surv=float(np.mean(a)), n_gone=len(b), mean_gone=float(np.mean(b)) if b else None, mean_all=float(np.mean(c)))
     if g_ok + g_drop:
         gg = pd.DataFrame(g_ok + g_drop)
@@ -130,7 +139,9 @@ def main():
     for z in T_ok + T_drop:
         z["e"] = CL.get(z["t"], {}).get(z["d_in"])
     sel = lambda L: [z for z in L if z["d_in"] >= "2011-01-01" and z["e"]]  # noqa: E731
-    sets = {"выжившие (как в исследованиях)": s_ok, "+ ушедшие бумаги": s_ok + g_ok, "+ обвалы (№42)": s_ok + s_drop, "всё вместе": s_ok + s_drop + g_ok + g_drop}
+    nd = lambda L: [z for z in L if z["t"] not in dr]  # noqa: E731
+    sets = {"выжившие (как в исследованиях)": s_ok, "+ ушедшие акции (без расписок)": s_ok + nd(g_ok), "+ ушедшие с расписками": s_ok + g_ok,
+            "+ обвалы (№42)": s_ok + s_drop, "всё вместе": s_ok + s_drop + g_ok + g_drop, "всё вместе без расписок": s_ok + s_drop + nd(g_ok + g_drop)}
     log("===== Портфель 2011–2026 (текущие правила выхода, доли 5/5/2,5%, потолок 150%) =====")
     for rule in ("V1", "R"):
         res = {}
