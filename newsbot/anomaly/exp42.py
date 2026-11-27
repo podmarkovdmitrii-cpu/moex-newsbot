@@ -37,7 +37,6 @@ import train as TR  # noqa: E402
 
 log = TR.log
 ND = E31.ND
-ROUND = (2, 3, 4, 5, 10)
 
 
 def data_version(Dd, extra=""):
@@ -56,24 +55,7 @@ def data_version(Dd, extra=""):
 
 
 def classify(c0, nc):
-    """Класс пути с подозрительным скачком: «сбой» / «дробление?» / «обвал» / «рост» (для скачка вверх)."""
-    c = np.r_[c0, np.asarray(nc, float)]
-    c = c[np.isfinite(c) & (c > 0)]
-    if len(c) < 2:
-        return "нет цен"
-    r = c[1:] / c[:-1]
-    k = int(np.argmax(np.abs(np.log(r))))
-    jump = r[k]
-    after = c[k + 1:k + 4]
-    if len(after) >= 2 and (jump < 0.55 and after[1:].max() > c[k] * 0.8 or jump > 1.8 and after[1:].min() < c[k] * 1.25):
-        return "сбой"
-    q = 1 / jump if jump < 1 else jump
-    n = round(q)
-    if n in ROUND and abs(q - n) / n <= 0.05:
-        return "дробление?"
-    if c.min() / c[0] < 0.55 or jump < 0.55:
-        return "обвал"
-    return "скачок вверх"
+    return E15.classify_path(c0, nc)
 
 
 def daily_part(X, Dd, IX):
@@ -108,7 +90,7 @@ def daily_part(X, Dd, IX):
             why = None
             if j + ND >= len(D):
                 why = "торги прекратились" if t in stopped else "конец данных"
-            elif E15.bad_path(c[j], x["h"], x["l"], x["c"]):
+            elif E15.bad_path_strict(c[j], x["h"], x["l"], x["c"]):
                 why = "bad_path:" + classify(c[j], x["c"])
             elif abs(c[j] / c[j - 1] - 1) > 0.8:
                 why = "ход дня > 80%"
@@ -172,7 +154,7 @@ def five_min_part(X, Dd, Hh, IXH):
     if lv is None:
         E = E.merge(X[["t", "d", "lval"]].drop_duplicates(["t", "d"]), on=["t", "d"], how="left")
     E = E[E.lval >= 7].reset_index(drop=True)
-    bad = np.array([bool(E15.bad_path(r.close, r.nh, r.nl, r.nc) or (len(r.fh) > 0 and (max(r.fh) / r.p0 > 2 or min(r.fl) / r.p0 < 0.5))) for r in E.itertuples()])
+    bad = np.array([bool(E15.bad_path_strict(r.close, r.nh, r.nl, r.nc) or (len(r.fh) > 0 and (max(r.fh) / r.p0 > 2 or min(r.fl) / r.p0 < 0.5))) for r in E.itertuples()])
     B = E[bad]
     cls = [classify(r.close, r.nc) for r in B.itertuples()]
     out = dict(events=int(len(E)), dropped=int(bad.sum()))

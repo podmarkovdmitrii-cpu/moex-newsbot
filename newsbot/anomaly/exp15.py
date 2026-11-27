@@ -56,9 +56,45 @@ WF_FROM = int(os.environ.get("EXP_WF_FROM", "2016"))
 MIN_TR = int(os.environ.get("EXP_MIN_TRADES", "100"))
 
 
+BADPATH_MODE = os.environ.get("EXP_BADPATH", "real")   # «real» (с 27.11.2026, аудит №42/45) — отбрасываем только сбои и дробления; «strict» — как раньше
+ROUND_SPLITS = (2, 3, 4, 5, 10)
+
+
+def classify_path(c0, nc):
+    """Класс пути с подозрительным скачком: «сбой» (цена вернулась за ≤ 3 дня) / «дробление?» (круглый коэффициент, не вернулась) /
+    «обвал» / «скачок вверх» / «нет цен»."""
+    c = np.r_[c0, np.asarray(nc, float)]
+    c = c[np.isfinite(c) & (c > 0)]
+    if len(c) < 2:
+        return "нет цен"
+    r = c[1:] / c[:-1]
+    k = int(np.argmax(np.abs(np.log(r))))
+    jump = r[k]
+    after = c[k + 1:k + 4]
+    if len(after) >= 2 and (jump < 0.55 and after[1:].max() > c[k] * 0.8 or jump > 1.8 and after[1:].min() < c[k] * 1.25):
+        return "сбой"
+    q = 1 / jump if jump < 1 else jump
+    n = round(q)
+    if n in ROUND_SPLITS and abs(q - n) / n <= 0.05:
+        return "дробление?"
+    if c.min() / c[0] < 0.55 or jump < 0.55:
+        return "обвал"
+    return "скачок вверх"
+
+
 def bad_path(c0, nh, nl, nc):
-    """Сбой данных: скачок закрытия за день > +80% / −45% (дробление/консолидация без поправки), бар с max/min > 2,
-    или цена ушла в 3+ раза от входа — такие сигналы не считаем (иначе одна ошибка даёт «+100% на сделку»)."""
+    """Путь, который нельзя считать. По умолчанию (EXP_BADPATH=real) — только сбой данных (цена вернулась за ≤ 3 дня), похоже на дробление
+    без поправки или нет цен; настоящие обвалы и скачки ОСТАЮТСЯ в расчёте (аудит №42: среди отброшенных старым фильтром сбоев не было).
+    EXP_BADPATH=strict — старое правило (bad_path_strict) для воспроизведения проверок до №42."""
+    if not bad_path_strict(c0, nh, nl, nc):
+        return False
+    if BADPATH_MODE == "strict":
+        return True
+    return classify_path(c0, nc) in ("сбой", "дробление?", "нет цен")
+
+
+def bad_path_strict(c0, nh, nl, nc):
+    """Старое правило (до 27.11.2026): скачок закрытия за день > +80% / −45%, бар с max/min > 2, или цена ушла в 3+ раза от входа."""
     c = np.r_[c0, np.asarray(nc, float)]
     c = c[np.isfinite(c) & (c > 0)]
     if len(c) < 2:
