@@ -62,7 +62,7 @@ ROUND_SPLITS = (2, 3, 4, 5, 10)
 
 def classify_path(c0, nc):
     """Класс пути с подозрительным скачком: «сбой» (цена вернулась за ≤ 3 дня) / «дробление?» (круглый коэффициент, не вернулась) /
-    «обвал» / «скачок вверх» / «нет цен»."""
+    «обвал» / «скачок вверх» / «внутридневной скачок» (закрытия спокойные, бар max/min > 2) / «нет цен»."""
     c = np.r_[c0, np.asarray(nc, float)]
     c = c[np.isfinite(c) & (c > 0)]
     if len(c) < 2:
@@ -77,9 +77,11 @@ def classify_path(c0, nc):
     n = round(q)
     if n in ROUND_SPLITS and abs(q - n) / n <= 0.05:
         return "дробление?"
-    if c.min() / c[0] < 0.55 or jump < 0.55:
+    if c.min() / c[0] < 0.7 or jump < 0.55:
         return "обвал"
-    return "скачок вверх"
+    if c.max() / c[0] > 1.3 or jump > 1.8:
+        return "скачок вверх"
+    return "внутридневной скачок"
 
 
 def bad_path(c0, nh, nl, nc):

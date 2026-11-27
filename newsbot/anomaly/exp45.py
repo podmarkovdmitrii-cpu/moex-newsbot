@@ -104,7 +104,7 @@ def load_full(rep):
         CL[t] = {d.strftime("%Y-%m-%d"): float(c) for d, c in zip(D.d, D.c)}
     allday = sorted({d for t in CL for d in CL[t] if d >= "2020-01-01"})
     days = sorted(set(allday) | {z["d_in"] for z in T if z["d_in"] >= "2020-01-01"})
-    return dict(T=T, Dd=Dd, CL=CL, days=days, E=E, gset=gset, gone=gone)
+    return dict(T=T, Dd=Dd, CL=CL, days=days, E=E, gset=gset, gone=gone, R=R, FE=FE, bars=bars, cost=cost, crash_keys=crash_keys)
 
 
 def main():
