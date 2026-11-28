@@ -13,8 +13,9 @@ F4 и F2 (проверки №17–18, модель-фильтр по ≈100 п�
   F2 — аномальный РОСТ ликвидной бумаги: покупка сразу, закрытие 10-го торгового дня; без тейка и стопа.
   В учёт идут ВСЕ такие сигналы; у каждого записана оценка модели и признак «верхние 30%» (оценка ≥ порога из обучения) —
   в отчёте сравниваются отобранные моделью и все (как в проверке №18).
-Издержки — 0,1/0,2/0,3% за сделку по эшелону. Цены — снимки котировок раз в ~5 минут, исполнение лимита и тейка — по последней цене
-(осторожнее, чем по максимумам/минимумам в проверках). Закрытие дня срока берётся как PREVPRICE следующего торгового дня.
+Издержки — 0,1/0,2/0,3% за сделку по эшелону. Цены — снимки котировок раз в ~5 минут. Исполнение лимита S1 (аудит №47, с 28.11.2026) —
+как у биржевой заявки: если по снимку цена не дошла до лимита, проверяется минимум цены с момента выставления (5-мин бары ALGOPACK,
+иначе минутные свечи ISS); пометка fill = «снимок» / «минимум». Тейк — по последней цене. Закрытие дня срока берётся как PREVPRICE следующего торгового дня.
 Состояние — paper_anom.json в папке состояния паблика."""
 import datetime as dt
 import os
@@ -28,6 +29,34 @@ THR = {1: 0.04, 2: 0.06, 3: 0.08}
 HOLD = 5
 PER_DAY = int(os.environ.get("PAPER_PER_DAY", "0"))   # 0 — без ограничения числа сигналов S1 в день (раньше 10)
 _MODELS = {}
+S1_FILL = os.environ.get("S1_FILL", "low")   # аудит №47: «low» — лимит исполнен, если минимум цены с момента выставления дошёл до него (как на бирже);
+                                             # «snapshot» — только по снимку LAST (строгий учёт: в истории 86% исполнений и −1,4 п.п./год)
+
+
+def _low_since(t, day, since_hm):
+    """(минимум цены, ЧЧ:ММ) по бумаге за день после since_hm: 5-мин бары ALGOPACK (tradestats), иначе минутные свечи ISS; None — нет данных."""
+    if not since_hm:
+        return None
+    try:
+        import algopack_live as AL
+        if AL.enabled():
+            R = AL._rows(f"tradestats/{t}", **{"from": day, "till": day})
+            h, m = int(since_hm[:2]), int(since_hm[3:5]) + 5     # время бара ALGOPACK — его конец: берём бары, начавшиеся не раньше выставления
+            t5 = f"{h + m // 60:02d}:{m % 60:02d}"
+            bars = [(float(x["pr_low"]), str(x.get("tradetime") or "")[:5]) for x in R
+                    if x.get("pr_low") and str(x.get("tradetime") or "")[:5] >= t5]
+            if bars:
+                return min(bars)
+    except Exception as e:  # noqa: BLE001
+        log("виртуальный счёт: минимум ALGOPACK", t, str(e)[:100])
+    try:
+        from common import candles
+        B = candles(f"engines/stock/markets/shares/boards/TQBR/securities/{t}/candles.json", days=0, interval=1)
+        bars = [(float(b["l"]), b["t"][11:16]) for b in B if b.get("l") and b["t"][:10] == day and b["t"][11:16] >= since_hm]
+        return min(bars) if bars else None
+    except Exception as e:  # noqa: BLE001
+        log("виртуальный счёт: минимум ISS", t, str(e)[:100])
+        return None
 
 
 def _wd_after(d, n):
@@ -181,12 +210,19 @@ def scan(md, ixc, now, feats, ctx=None):
             changed = True
             continue
         r = px.get(o["t"])
+        fill, at = None, now.isoformat(timespec="minutes")
         if r and float(r["LAST"]) <= o["limit"]:
+            fill = "снимок"
+        elif S1_FILL == "low":
+            lo = _low_since(o["t"], today, str(o.get("sig_at") or "")[11:16])
+            if lo and lo[0] <= o["limit"]:
+                fill, at = "минимум", f"{today}T{lo[1]}"
+        if fill:
             e = o["limit"]
             tp = e * (1 + 0.25 * o["move"])
-            st["trades"].append(dict(o, entry=e, entry_at=now.isoformat(timespec="minutes"), tp=round(tp, 6),
+            st["trades"].append(dict(o, entry=e, entry_at=at, tp=round(tp, 6), fill=fill,
                                      last_day=_wd_after(now.date(), HOLD).isoformat()))
-            log("виртуальный счёт: куплено", o["t"], "по", round(e, 4), "тейк", round(tp, 4))
+            log("виртуальный счёт: куплено", o["t"], "по", round(e, 4), "тейк", round(tp, 4), f"(исполнение: {fill})")
             changed = True
         else:
             keep.append(o)

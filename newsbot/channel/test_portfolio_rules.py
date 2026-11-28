@@ -74,7 +74,8 @@ r = decide(st)
 assert r[f"F4:CCC:{day}"] is False and r[f"F4:DDD:{day}"] is True, r
 print("B1-1 OK: одна позиция на бумагу (S1 > F2, F4 при открытой S1, позиция v3)")
 
-# ---- B1-2: v3 в просадке −25% по реальному размеру (модель −50% × 0,5) → общая остановка, хотя сборная в нуле
+# ---- B1-2: v3 в просадке −25% по реальному размеру (модель −50% × 0,5) → общая остановка, хотя сборная в нуле (режим «halt»)
+I.KS_DD_MODE = "halt"
 PW.S = {"v3_base": {"day": day, "eq": 1_000_000}}
 v3(equity=1_000_000)
 rs = I.risk_state(PW, {"trades": [], "orders": []}, day)
@@ -86,6 +87,23 @@ I.resume(PW)
 rs = I.risk_state(PW, {"trades": [], "orders": []}, day)
 assert not rs["halted"], rs
 print("B1-2 OK: порог −20% по всему счёту (сборная + v3), /resume сбрасывает общий пик")
+
+# ---- аудит №47: режим по умолчанию «alert» — при −20% одно сообщение, входы не блокируются; эпизод заканчивается, когда просадка < 10%
+I.KS_DD_MODE = "alert"
+PW.S = {"v3_base": {"day": day, "eq": 1_000_000}}
+v3(equity=1_000_000)
+I.risk_state(PW, {"trades": [], "orders": []}, day)
+v3(equity=500_000)
+PW.out.clear()
+assert I.guard(PW, 1) is True and any("остановитесь и разберитесь" in t.lower() for t in PW.out), PW.out
+rs = I.risk_state(PW, {"trades": [], "orders": []}, day)
+assert not rs["halted"] and "сборная + v3" in rs["dd_alert"], rs
+rs = I.risk_state(PW, {"trades": [], "orders": []}, day)
+assert rs.get("dd_alert") and not rs.get("alert_new"), "повторного сообщения в том же эпизоде нет"
+v3(equity=1_000_000)
+rs = I.risk_state(PW, {"trades": [], "orders": []}, day)
+assert not rs.get("dd_alert") and "dd_alert" not in PW.S["ks"], "просадка ушла — эпизод закрыт"
+print("№47 OK: просадка −20% — сигнал без блокировки входов, одно сообщение на эпизод")
 
 # ---- B1-3: позиция без свежей цены — по последней известной и в списке; без цены вообще — по цене входа
 v3()
@@ -133,8 +151,9 @@ print("B1-4 OK: переходная сделка — размер не пере
 
 # ---- таблица смен правил: каждая сделка помечается правилами дня входа; новая смена не переписывает старые
 I.SIZING_SINCE, I.PER_TICKER_SINCE = "2026-11-25", "2026-11-25"
-assert I.rules_at("2026-11-20") == {"sizing": "initial", "per_ticker": "any"}
-assert I.rules_at("2026-11-25") == {"sizing": "current", "per_ticker": "one"}
+assert I.rules_at("2026-11-20") == {"sizing": "initial", "per_ticker": "any", "ks_dd": "halt", "s1_fill": "snapshot"}
+assert I.rules_at("2026-11-25") == {"sizing": "current", "per_ticker": "one", "ks_dd": "halt", "s1_fill": "snapshot"}
+assert I.rules_at("2026-11-28") == {"sizing": "current", "per_ticker": "one", "ks_dd": "alert", "s1_fill": "low"}
 I.RULE_EXTRA = [("2026-12-10", "per_ticker", "s1f2")]
 assert I.rules_at("2026-12-01")["per_ticker"] == "one" and I.rules_at("2026-12-10")["per_ticker"] == "s1f2"
 assert I.sizing_base({"day": "2026-11-24"}) == "initial" and I.sizing_base({"day": "2026-12-11"}) == "current"

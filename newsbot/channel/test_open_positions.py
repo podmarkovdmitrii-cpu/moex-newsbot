@@ -79,3 +79,19 @@ print("B2-3 OK: смена тикера — учёт под новым тике�
 # ---- B2-4: отсечка между входом и сегодня видна (SBER, реестр 20.07.2026 в divhist.json)
 assert divs.ex_between("SBER", "2026-07-10", "2026-07-25") and not divs.ex_between("SBER", "2026-07-21", "2026-07-25")
 print("B2-4 OK: отсечка на открытой позиции находится")
+
+# ---- аудит №47: исполнение лимита S1 как на бирже — снимок выше лимита, но минимум с момента выставления дошёл → исполнено «по минимуму»
+o = dict(strat="S1", t="LIMT", day="2026-11-25", sig_at="2026-11-25T11:05", p0=110.0, prev=100.0, move=0.1, tier=1, limit=105.0, exc=0.1, wkd=False)
+md = [dict(SECID="LIMT", LAST=107.0, PREVPRICE=100.0, LASTTOPREVPRICE=7.0)]
+PA._low_since = lambda t, day, since: (104.5, "11:40") if t == "LIMT" and since == "11:05" else None
+PA.S1_FILL = "snapshot"
+st = run({"orders": [dict(o)], "trades": [], "seen": {}}, md, dt.datetime(2026, 11, 25, 12, 0))
+assert st["orders"] and not st["trades"], "строгий учёт: по снимку не исполнено"
+PA.S1_FILL = "low"
+st = run({"orders": [dict(o)], "trades": [], "seen": {}}, md, dt.datetime(2026, 11, 25, 12, 0))
+x = st["trades"][0]
+assert x["fill"] == "минимум" and x["entry"] == 105.0 and x["entry_at"] == "2026-11-25T11:40" and not st["orders"], x
+md2 = [dict(SECID="LIMT", LAST=104.0, PREVPRICE=100.0, LASTTOPREVPRICE=4.0)]
+st = run({"orders": [dict(o)], "trades": [], "seen": {}}, md2, dt.datetime(2026, 11, 25, 12, 0))
+assert st["trades"][0]["fill"] == "снимок"
+print("№47 OK: лимит S1 исполняется по минимуму цены с момента выставления (как биржевая заявка); строгий режим — только по снимку")

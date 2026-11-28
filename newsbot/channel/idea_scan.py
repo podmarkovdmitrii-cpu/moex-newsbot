@@ -47,7 +47,9 @@ F2_LOAD_MAX = float(os.environ.get("F2_LOAD_MAX", "1.0"))
 F2_MAX_OPEN = int(os.environ.get("F2_MAX_OPEN", "2"))
 KS_DAY = float(os.environ.get("KS_DAY", "-0.02"))      # убыток закрытых сделок за день, доля капитала → стоп до завтра
 KS_STREAK = int(os.environ.get("KS_STREAK", "3"))       # убыточных сделок подряд (последняя — сегодня) → стоп до завтра
-KS_DD = float(os.environ.get("KS_DD", "-0.20"))         # просадка от пика (закрытые + переоценка открытых) → стоп до команды /resume
+KS_DD = float(os.environ.get("KS_DD", "-0.20"))         # просадка от пика (закрытые + переоценка открытых) → сигнал «остановитесь и разберитесь»
+KS_DD_MODE = os.environ.get("KS_DD_MODE", "alert")       # аудит №47 (28.11.2026): «alert» — только сообщение, входы НЕ блокируются (автостоп стоил ~1,4 п.п./год
+                                                          # и просадку не уменьшал); «halt» — как раньше, стоп до /resume
 # Торги выходного дня (сб/вс): сигналы, сводка и вечерний сканер работают и в выходные (WEEKEND_TRADING=0 — выключить).
 # Сигналы выходных по умолчанию — только наблюдение (на истории стратегии не проверялись, ликвидность ниже); WEEKEND_LIVE=1 — в учёт.
 WEEKEND = os.environ.get("WEEKEND_TRADING", "1") != "0"
@@ -123,13 +125,15 @@ def _build_sizes(st, inlim=None):
 
 
 PER_TICKER_SINCE = os.environ.get("PER_TICKER_SINCE", "2026-11-25")   # аудит B1-1: с этой даты — одна позиция на бумагу
+AUDIT47_SINCE = os.environ.get("AUDIT47_SINCE", "2026-11-28")   # аудит №47: просадка −20% — сигнал без автостопа; лимит S1 — по минимуму цены; дата = день загрузки кода на GitHub
 RULE_EXTRA = []   # будущие смены правил: ("ГГГГ-ММ-ДД", "ключ", "значение") — добавлять сюда, не переписывая прошлые
 
 
 def rule_table():
     """Таблица смен правил портфеля: (дата начала, правило, значение). Пустая дата — с начала счёта."""
-    return [("", "sizing", "initial"), ("", "per_ticker", "any"),
-            (SIZING_SINCE, "sizing", "current"), (PER_TICKER_SINCE, "per_ticker", "one")] + list(RULE_EXTRA)
+    return [("", "sizing", "initial"), ("", "per_ticker", "any"), ("", "ks_dd", "halt"), ("", "s1_fill", "snapshot"),
+            (SIZING_SINCE, "sizing", "current"), (PER_TICKER_SINCE, "per_ticker", "one"),
+            (AUDIT47_SINCE, "ks_dd", "alert"), (AUDIT47_SINCE, "s1_fill", "low")] + list(RULE_EXTRA)
 
 
 def rules_at(day):
@@ -258,14 +262,25 @@ def risk_state(PW, st=None, today=None):
     dd_tot = (1 + tot_m) / (1 + peak_t) - 1
     out.update(day_pnl=day_pnl, streak=streak, eq=eq, peak=peak, dd=dd, n=len(done), mtm=mtm, eq_m=eq_m, peak_m=peak_m, open=len(op),
                stale=stale, v3p=v3p, tot_m=tot_m, dd_tot=dd_tot)
-    if ks.get("dd_halt"):
-        out.update(halted=True, why=ks.get("dd_why") or "просадка")
-    elif dd <= KS_DD:
-        ks.update(dd_halt=True, dd_why=f"просадка виртуального счёта {dd:.1%} от пика с переоценкой открытых позиций (порог {KS_DD:.0%})")
-        out.update(halted=True, why=ks["dd_why"], new=True)
+    dd_why = ""
+    if dd <= KS_DD:
+        dd_why = f"просадка виртуального счёта {dd:.1%} от пика с переоценкой открытых позиций (порог {KS_DD:.0%})"
     elif dd_tot <= KS_DD:
-        ks.update(dd_halt=True, dd_why=f"просадка всего счёта (сборная + v3) {dd_tot:.1%} от пика с переоценкой (порог {KS_DD:.0%}) — "
-                                       "новые входы обеих стратегий остановлены")
+        dd_why = f"просадка всего счёта (сборная + v3) {dd_tot:.1%} от пика с переоценкой (порог {KS_DD:.0%})"
+    if KS_DD_MODE != "halt":
+        ks.pop("dd_halt", None)                # остановка по просадке из прежнего режима не действует
+        # аудит №47: только сигнал «остановитесь и разберитесь», без блокировки входов; одно сообщение на эпизод
+        if dd_why:
+            out["dd_alert"] = dd_why
+            if not ks.get("dd_alert"):
+                ks["dd_alert"] = dd_why
+                out["alert_new"] = True
+        elif ks.get("dd_alert") and min(dd, dd_tot) > KS_DD / 2:
+            ks.pop("dd_alert", None)           # эпизод закончился: просадка меньше половины порога
+    if KS_DD_MODE == "halt" and ks.get("dd_halt"):
+        out.update(halted=True, why=ks.get("dd_why") or "просадка")
+    elif KS_DD_MODE == "halt" and dd_why:
+        ks.update(dd_halt=True, dd_why=dd_why + (" — новые входы обеих стратегий остановлены" if "всего счёта" in dd_why else ""))
         out.update(halted=True, why=ks["dd_why"], new=True)
     elif ks.get("day") == today:
         out.update(halted=True, why=ks.get("why") or "")
@@ -281,6 +296,14 @@ def risk_state(PW, st=None, today=None):
 def guard(PW, admin):
     """True — сигналы можно присылать. При срабатывании — одно сообщение администратору."""
     rs = risk_state(PW)
+    if rs.get("alert_new"):
+        PW.say(admin, f"🛑 <b>Просадка дошла до порога</b>: {html.escape(rs['dd_alert'])}.\n"
+                      "Остановитесь и разберитесь (журнал, отчёт за день, что изменилось на рынке). Новые сигналы бот продолжает присылать в учёт — "
+                      "по правилам (аудит №47) автоматическая остановка не включается: она стоила около 1,4 п.п. в год и просадку не уменьшала. "
+                      "Решение брать ли следующие сделки — за вами.\n"
+                      f"Виртуальный счёт: закрытые {rs['eq']:+.1%}, с переоценкой {rs.get('eq_m', rs['eq']):+.1%} (пик {rs.get('peak_m', rs['peak']):+.1%}); "
+                      f"весь счёт с v3 {rs.get('tot_m', 0):+.1%}, просадка {rs.get('dd_tot', 0):.1%}.")
+        PW.save()
     if rs.get("new"):
         dd_mode = PW.S["ks"].get("dd_halt")
         PW.say(admin, f"🛑 <b>Аварийная остановка</b>: {html.escape(rs['why'])}.\n"
@@ -937,7 +960,8 @@ def _lifecycle(PW, st, admin):
             try:
                 if e == "fill":
                     tp = x.get("tp")
-                    PW.say(admin, f"✅ <b>Куплено · S1 · {name}</b> — лимит {_fmt(float(x['entry']))} исполнен ({str(x.get('entry_at', ''))[11:16]})\n"
+                    PW.say(admin, f"✅ <b>Куплено · S1 · {name}</b> — лимит {_fmt(float(x['entry']))} исполнен ({str(x.get('entry_at', ''))[11:16]}"
+                                  + (", цена коснулась лимита между снимками — по минимуму бара" if x.get("fill") == "минимум" else "") + ")\n"
                                   f"Тейк <b>{_fmt(float(tp))}</b> ({float(tp) / float(x['entry']) - 1:+.1%}) · "
                                   + (f"аварийный стоп {_fmt(float(stp))} · " if stp else "")
                                   + f"выход не позже {x.get('last_day')} (по закрытию)\nРазмер позиции: {_w('S1')} капитала\n{_load_line(st)}")
@@ -1052,7 +1076,8 @@ def status_text(PW):
             f"закрыто {rs['n']}, итог {rs['eq']:+.1%}; открыто {rs.get('open', 0)}, их переоценка {rs.get('mtm', 0):+.1%}; "
             f"с переоценкой {rs.get('eq_m', 0):+.1%}, пик {rs.get('peak_m', 0):+.1%}, просадка {rs['dd']:.1%}; сегодня {rs['day_pnl']:+.1%}; "
             f"убыточных подряд {rs['streak']}.\n"
-            f"Пороги: день {KS_DAY:.0%}, серия {KS_STREAK}, просадка {KS_DD:.0%} (после неё — только командой /resume)."
+            f"Пороги: день {KS_DAY:.0%}, серия {KS_STREAK}, просадка {KS_DD:.0%} "
+            + ("(после неё — только командой /resume)." if KS_DD_MODE == "halt" else "(сигнал «остановитесь и разберитесь», входы не блокируются).")
             + ("" if not ks.get("dd_halt") else "\nЧтобы возобновить — /resume."))
 
 
@@ -1061,6 +1086,7 @@ def resume(PW):
     ks = PW.S.setdefault("ks", {})
     ks.pop("dd_halt", None)
     ks.pop("dd_why", None)
+    ks.pop("dd_alert", None)
     ks.pop("day", None)
     ks["dd_reset_n"] = rs["n"]   # пик для просадки считается с текущего уровня
     ks["peak_mtm"] = rs.get("eq_m", rs["eq"])
@@ -1232,7 +1258,8 @@ def summary_text(PW, day=None):
         L.append("⚠️ Нет свежей цены (переоценка по последней известной): " + ", ".join(f"{html.escape(PW.tlabel(t))} — цена от {d[8:10]}.{d[5:7]}" for t, d in old_))
     if none_:
         L.append("⚠️ Цены нет с входа (оценка по цене входа, не рыночная): " + ", ".join(html.escape(PW.tlabel(t)) for t in none_))
-    L.append("Предохранитель: " + ("🛑 " + html.escape(rs["why"]) if rs["halted"] else "✅ сигналы принимаются"))
+    L.append("Предохранитель: " + ("🛑 " + html.escape(rs["why"]) if rs["halted"] else "✅ сигналы принимаются")
+             + (f"; ⚠️ {html.escape(rs['dd_alert'])} — остановитесь и разберитесь" if rs.get("dd_alert") else ""))
     # 5а. макрорежим (пометка для F4)
     L.append("\n" + macro_line())
     fr = f4_regime_stats(PW, st)
@@ -1553,7 +1580,8 @@ def report_text(PW, day=None):
     L.append(f"\n<b>4. Риск</b>: загрузка {load:.0%} из {LOAD_CAP:.0%}" + (f" (из них v3 {_v3_load(js):.0%})" if js else "")
              + f"; закрытые за день {rs['day_pnl']:+.2%} (порог {KS_DAY:.0%}); убыточных подряд {rs['streak']} (порог {KS_STREAK}); "
              f"просадка сборной {rs['dd']:.1%} (порог {KS_DD:.0%})")
-    L.append("Предохранитель: " + ("🛑 " + html.escape(rs["why"]) if rs["halted"] else "✅ сигналы принимаются"))
+    L.append("Предохранитель: " + ("🛑 " + html.escape(rs["why"]) if rs["halted"] else "✅ сигналы принимаются")
+             + (f"; ⚠️ {html.escape(rs['dd_alert'])} — остановитесь и разберитесь" if rs.get("dd_alert") else ""))
     # 5. вывод
     if ddp <= -0.30:
         warn.append("просадка портфеля глубже −30% — по правилам снизить доли вдвое")
