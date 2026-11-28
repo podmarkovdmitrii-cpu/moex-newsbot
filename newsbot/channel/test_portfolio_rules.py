@@ -159,3 +159,11 @@ assert I.rules_at("2026-12-01")["per_ticker"] == "one" and I.rules_at("2026-12-1
 assert I.sizing_base({"day": "2026-11-24"}) == "initial" and I.sizing_base({"day": "2026-12-11"}) == "current"
 I.RULE_EXTRA = []
 print("таблица правил: ok")
+
+# ---- живой период: исполнения S1 по способу и эпизоды −20% с даты новых правил
+PW.S = {"ks": {"dd_episodes": [{"start": "2026-12-01", "dd": -0.21}, {"start": "2026-10-01", "dd": -0.2}]}}
+st = {"trades": [dict(strat="S1", t="A", day="2026-12-02", entry=1.0, fill="минимум"), dict(strat="S1", t="B", day="2026-12-03", entry=1.0, fill="снимок"),
+                 dict(strat="S1", t="C", day="2026-11-20", entry=1.0), dict(strat="F4", t="D", day="2026-12-03", entry=1.0)]}
+line = I.live_period_line(PW, st)
+assert "S1 исполнено 2 (по минимуму цены 1, по снимку 1)" in line and "эпизодов просадки" in line and line.endswith(": 1"), line
+print("живой период: ok —", line)

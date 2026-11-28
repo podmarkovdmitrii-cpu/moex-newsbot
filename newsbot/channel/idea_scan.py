@@ -275,8 +275,11 @@ def risk_state(PW, st=None, today=None):
             if not ks.get("dd_alert"):
                 ks["dd_alert"] = dd_why
                 out["alert_new"] = True
+                ks.setdefault("dd_episodes", []).append(dict(start=today, dd=round(min(dd, dd_tot), 4)))   # журнал эпизодов для разбора
         elif ks.get("dd_alert") and min(dd, dd_tot) > KS_DD / 2:
             ks.pop("dd_alert", None)           # эпизод закончился: просадка меньше половины порога
+            if ks.get("dd_episodes") and not ks["dd_episodes"][-1].get("end"):
+                ks["dd_episodes"][-1]["end"] = today
     if KS_DD_MODE == "halt" and ks.get("dd_halt"):
         out.update(halted=True, why=ks.get("dd_why") or "просадка")
     elif KS_DD_MODE == "halt" and dd_why:
@@ -1260,6 +1263,7 @@ def summary_text(PW, day=None):
         L.append("⚠️ Цены нет с входа (оценка по цене входа, не рыночная): " + ", ".join(html.escape(PW.tlabel(t)) for t in none_))
     L.append("Предохранитель: " + ("🛑 " + html.escape(rs["why"]) if rs["halted"] else "✅ сигналы принимаются")
              + (f"; ⚠️ {html.escape(rs['dd_alert'])} — остановитесь и разберитесь" if rs.get("dd_alert") else ""))
+    L.append(live_period_line(PW, st))
     # 5а. макрорежим (пометка для F4)
     L.append("\n" + macro_line())
     fr = f4_regime_stats(PW, st)
@@ -1330,6 +1334,15 @@ def summary_text(PW, day=None):
              "Не является индивидуальной инвестиционной рекомендацией.</i>")
     txt = "\n".join(L)
     return txt if len(txt) < 4000 else txt[:3900] + "\n…(сокращено, полный список — /trades)"
+
+
+def live_period_line(PW, st):
+    """Живой период на правилах аудита №47: исполнения S1 по способу и эпизоды просадки −20% (для разбора через 6 месяцев)."""
+    s1 = [x for x in (st or {}).get("trades") or [] if x.get("strat", "S1") == "S1" and x.get("entry") and (x.get("day") or "") >= AUDIT47_SINCE]
+    lo = sum(1 for x in s1 if x.get("fill") == "минимум")
+    ep = [e for e in (PW.S.get("ks") or {}).get("dd_episodes") or [] if (e.get("start") or "") >= AUDIT47_SINCE]
+    return (f"Живой период с {AUDIT47_SINCE[8:10]}.{AUDIT47_SINCE[5:7]}: S1 исполнено {len(s1)} (по минимуму цены {lo}, по снимку {len(s1) - lo}); "
+            f"эпизодов просадки {KS_DD:.0%}: {len(ep)}")
 
 
 def daily_summary(PW, force=False, uid=None):
